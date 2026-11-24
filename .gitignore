@@ -1,0 +1,27 @@
+# Instance secrets and local env overrides
+instances/*.env
+*.env
+!.env.example
+!vars.example.env
+
+# Binary databases, archives, media, caches
+*.db
+*.sqlite
+*.sqlite3
+*.tar.gz
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.mp3
+*.mp4
+*.wav
+__pycache__/
+*.pyc
+node_modules/
+*.log
+
+# Minified third-party bundles
+workspace/共享/工具/three/*.js

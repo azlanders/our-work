@@ -1,0 +1,315 @@
+{
+  "水手服": {
+    "价": 120,
+    "类别": "上",
+    "舒适": 2,
+    "贴图": "top-sailor",
+    "英": "a navy-collared sailor blouse with a white scarf",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "白衬衫": {
+    "价": 80,
+    "类别": "上",
+    "舒适": 2,
+    "贴图": "top-shirt",
+    "英": "a crisp white cotton shirt with rolled-up sleeves",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "针织衫": {
+    "价": 110,
+    "类别": "上",
+    "舒适": 3,
+    "贴图": "top-knit",
+    "英": "a soft cream knit sweater slightly oversized",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "连帽卫衣": {
+    "价": 90,
+    "类别": "上",
+    "舒适": 3,
+    "贴图": "top-hoodie",
+    "英": "a pale blue hoodie with the hood down",
+    "售卖点": [
+      "超市"
+    ]
+  },
+  "睡衣": {
+    "价": 60,
+    "类别": "上",
+    "舒适": 4,
+    "贴图": "top-pajama",
+    "英": "a loose white pajama top with tiny frills",
+    "售卖点": [
+      "超市",
+      "便利店"
+    ]
+  },
+  "打工围裙": {
+    "价": 70,
+    "类别": "上",
+    "舒适": 1,
+    "贴图": "top-apron",
+    "英": "a dark work apron over a plain tee",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "吊带背心": {
+    "价": 45,
+    "类别": "上",
+    "舒适": 2,
+    "贴图": "top-cami",
+    "英": "a thin-strapped light camisole",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "毛衣开衫": {
+    "价": 130,
+    "类别": "上",
+    "舒适": 3,
+    "贴图": "top-cardigan",
+    "英": "a long navy cardigan worn open",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "白裙子": {
+    "价": 90,
+    "类别": "下",
+    "舒适": 2,
+    "贴图": "bottom-skirt",
+    "英": "a white knee-length skirt with soft folds",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "百褶裙": {
+    "价": 110,
+    "类别": "下",
+    "舒适": 2,
+    "贴图": "bottom-pleat",
+    "英": "a navy pleated school-style skirt",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "牛仔裤": {
+    "价": 100,
+    "类别": "下",
+    "舒适": 2,
+    "贴图": "bottom-jeans",
+    "英": "slim light-blue jeans",
+    "售卖点": [
+      "超市"
+    ]
+  },
+  "家居短裤": {
+    "价": 40,
+    "类别": "下",
+    "舒适": 3,
+    "贴图": "bottom-shorts",
+    "英": "soft grey lounge shorts",
+    "售卖点": [
+      "超市",
+      "便利店"
+    ]
+  },
+  "阔腿裤": {
+    "价": 95,
+    "类别": "下",
+    "舒适": 2,
+    "贴图": "bottom-wide",
+    "英": "loose beige wide-leg trousers",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "背带裙": {
+    "价": 125,
+    "类别": "下",
+    "舒适": 2,
+    "贴图": "bottom-jumper",
+    "英": "a denim jumper skirt over a tee",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "睡裤": {
+    "价": 50,
+    "类别": "下",
+    "舒适": 4,
+    "贴图": "bottom-sleep",
+    "英": "loose pajama pants with a small print",
+    "售卖点": [
+      "超市"
+    ]
+  },
+  "白蓝洋装": {
+    "价": 260,
+    "类别": "全身",
+    "舒适": 2,
+    "贴图": "full-dress",
+    "英": "a white and blue gradient frilled dress",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "荷叶边洋装": {
+    "价": 280,
+    "类别": "全身",
+    "舒适": 2,
+    "贴图": "full-frill",
+    "英": "a dress of layered lace frills in pale blue",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "女仆装": {
+    "价": 240,
+    "类别": "全身",
+    "舒适": 2,
+    "贴图": "full-maid",
+    "英": "a navy and white Victorian frilled maid dress with a white lace apron",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "浴衣": {
+    "价": 180,
+    "类别": "全身",
+    "舒适": 3,
+    "贴图": "full-yukata",
+    "英": "a light cotton yukata with a floral pattern",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "连体泳衣": {
+    "价": 150,
+    "类别": "全身",
+    "舒适": 1,
+    "贴图": "full-swim",
+    "英": "a navy one-piece swimsuit with a small ribbon",
+    "售卖点": [
+      "超市",
+      "街市"
+    ]
+  },
+  "小皮鞋": {
+    "价": 80,
+    "类别": "鞋",
+    "舒适": 2,
+    "贴图": "shoes-leather",
+    "英": "black leather mary-jane shoes",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "帆布鞋": {
+    "价": 70,
+    "类别": "鞋",
+    "舒适": 2,
+    "贴图": "shoes-canvas",
+    "英": "white canvas sneakers",
+    "售卖点": [
+      "超市"
+    ]
+  },
+  "凉鞋": {
+    "价": 60,
+    "类别": "鞋",
+    "舒适": 1,
+    "贴图": "shoes-sandal",
+    "英": "simple strappy sandals",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "拖鞋": {
+    "价": 25,
+    "类别": "鞋",
+    "舒适": 3,
+    "贴图": "shoes-slipper",
+    "英": "soft home slippers",
+    "售卖点": [
+      "超市",
+      "便利店"
+    ]
+  },
+  "小鱼发卡": {
+    "价": 50,
+    "类别": "饰",
+    "舒适": 1,
+    "贴图": "acc-whale",
+    "英": "a little whale-shaped hair clip",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "蓝色发带": {
+    "价": 30,
+    "类别": "饰",
+    "舒适": 1,
+    "贴图": "acc-ribbon",
+    "英": "a blue ribbon tied in her hair",
+    "售卖点": [
+      "街市",
+      "超市"
+    ]
+  },
+  "围巾": {
+    "价": 45,
+    "类别": "饰",
+    "舒适": 2,
+    "贴图": "acc-scarf",
+    "英": "a soft knitted scarf around her neck",
+    "售卖点": [
+      "超市"
+    ]
+  },
+  "贝雷帽": {
+    "价": 65,
+    "类别": "饰",
+    "舒适": 1,
+    "贴图": "acc-beret",
+    "英": "a white beret tilted on her head",
+    "售卖点": [
+      "街市"
+    ]
+  },
+  "眼镜": {
+    "价": 55,
+    "类别": "饰",
+    "舒适": 1,
+    "贴图": "acc-glasses",
+    "英": "thin round-framed glasses",
+    "售卖点": [
+      "超市"
+    ]
+  },
+  "耳饰": {
+    "价": 40,
+    "类别": "饰",
+    "舒适": 1,
+    "贴图": "acc-earring",
+    "英": "small pearl earrings",
+    "售卖点": [
+      "街市"
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+# Runtime memory data — this directory itself must exist (requirement: memory/ inside the plugin).
+# Only the placeholder is tracked so a fresh clone has the folder.
+memory/*
+!memory/.gitkeep
+
+# DSH / editor noise
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+
+# Local scratch / secrets / coverage
+.work/
+*.tmp
+*.tgz
+.npmrc
+.env
+.env.*
+coverage/
+
+# v1.4.1 privacy: machine-local overrides (QQ owner ids, local media roots, …)
+config.local.json
+config.local.json.*

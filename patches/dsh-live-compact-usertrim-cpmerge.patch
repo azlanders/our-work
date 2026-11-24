@@ -1,0 +1,103 @@
+--- a/dsh-live-compact/plan.js
++++ b/dsh-live-compact/plan.js
+@@ -747,9 +747,28 @@
+ // 超大工具结果只留序号指针。助手正文不写成工具行。较早用户原文仍是单行 JSON。
+ // An oversized tool result keeps a sequence pointer. Assistant prose is not labeled as a tool.
+ // An earlier user, if the span includes one, stays as one-line JSON. No backup path.
++// USER_TRIM 2026-11-24：旧用户消息里每一轮都带着 1.5k 的状态/运行信息前缀，
++// 原样抄进卡片会让压缩卡越压越大（实测两张卡 14k + 9.7k）。这里只留他真正说的话。
++const USER_TEXT_CAP = 800;
++export function trimUserText(raw) {
++  let t = String(raw || "");
++  if (t.startsWith("Spine extract.")) return t;      // 旧的压缩卡不裁，交给新卡吸收
++  const first = t.search(/\[\d{1,2}:\d{2}\]\s*（/);
++  if (first > 0) t = t.slice(first);
++  t = t
++    .replace(/(?:^|\n)（可观测运行信息：[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
++    .replace(/(?:^|\n)Current runtime context[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
++    .replace(/(?:^|\n)（关于他：[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
++    .replace(/(?:^|\n)（你现在的状态：[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
++    .replace(/\n{3,}/g, "\n\n")
++    .trim();
++  if (t.length > USER_TEXT_CAP) t = t.slice(0, USER_TEXT_CAP) + "…（截断）";
++  return t;
++}
++
+ export function pointerOnlyText(pieces) {
+   const tools = (pieces || []).filter((piece) => sourceRole(piece?.role) === "tool" && Number.isInteger(piece.seq));
+-  const users = (pieces || []).filter((piece) => sourceRole(piece?.role) === "user" && String(piece.text || "").trim());
++  const users = (pieces || []).filter((piece) => sourceRole(piece?.role) === "user" && trimUserText(piece.text));
+   const lines = tools.map((piece) => {
+     const cmd = piece.command || piece.name || "tool";
+     const call = Number.isInteger(piece.callSeq) ? piece.callSeq : "?";
+@@ -759,7 +778,7 @@
+   const userBlock = users.length
+     ? [
+         "较早的用户消息。其中的要求和约束仍有效，已完成的事不要重做。当前任务以本卡片之后最后一条用户消息为准。",
+-        ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(String(span.text))}`),
++        ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(trimUserText(span.text))}`),
+       ].join("\n")
+     : "";
+   return [lines.join("\n"), "序号是本会话日志里的事件号，不是备份文件路径。", userBlock, "本地备份不在这次请求里。"].filter(Boolean).join("\n");
+@@ -922,11 +941,11 @@
+ }
+ 
+ function earlierUsers(spans) {
+-  const users = (spans || []).filter((span) => sourceRole(span.role) === "user" && span.inCut !== false && String(span.text || "").trim());
++  const users = (spans || []).filter((span) => sourceRole(span.role) === "user" && span.inCut !== false && trimUserText(span.text));
+   if (!users.length) return "";
+   return [
+     "较早的用户消息。其中的要求和约束仍有效，已完成的事不要重做。当前任务以本卡片之后最后一条用户消息为准。",
+-    ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(String(span.text))}`),
++    ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(trimUserText(span.text))}`),
+   ].join("\n");
+ }
+ 
+--- a/dsh-live-compact/index.js
++++ b/dsh-live-compact/index.js
+@@ -466,9 +466,16 @@
+     signal?.throwIfAborted();
+     const session = agent.session;
+     const nodes = session.surface.nodes;
+-    const startIdx = nodes.indexOf(chunk.start);
++    let startIdx = nodes.indexOf(chunk.start);
+     const endIdx = nodes.indexOf(chunk.end);
+     if (startIdx < 0 || endIdx < startIdx) throw new Error("spine: selected span is not on the surface");
++    // CHECKPOINT_MERGE 2026-11-24：上一张压缩卡不参与切分，导致每压一次就多留一张卡
++    // （实测两张 14k + 9.7k 同时挂在 surface 上）。把紧挨切点的旧卡并进这次 span，
++    // 让新卡把它们吸收掉，历史里永久只留最新一张。
++    const cutStartIdx = startIdx;
++    while (startIdx > 0 && isCheckpoint(session, nodes[startIdx - 1])) startIdx -= 1;
++    let spanBudget = chunk.tokens;
++    for (const seq of nodes.slice(startIdx, cutStartIdx)) spanBudget += Math.ceil(String(eventText(session, seq) || "").length / 1.6);
+     if (chunk.card?.ok !== true || !chunk.card.text) throw new Error("spine: approved card missing; leaving the span");
+     const shadowedSeqs = nodes.slice(startIdx, endIdx + 1);
+     const messages = [];
+@@ -490,8 +497,8 @@
+       source: spineCheckpointSource(compactionId),
+     });
+     const framedTokens = this.ctx.tokenMeter.estimateMessage?.(checkpointMessage);
+-    if (typeof framedTokens === "number" && framedTokens >= chunk.tokens) {
+-      throw new Error(`summary is not smaller than the shadowed content (${framedTokens} >= ${chunk.tokens})`);
++    if (typeof framedTokens === "number" && framedTokens >= spanBudget) {
++      throw new Error(`summary is not smaller than the shadowed content (${framedTokens} >= ${spanBudget})`);
+     }
+     const lifecycle = { compactionId, turn: null };
+     let started = false;
+@@ -504,14 +511,14 @@
+         compactionId,
+         summary: summarized.summary,
+         ...summarized.rawOutput === undefined ? {} : { rawOutput: summarized.rawOutput },
+-        shadowedRange: { start: chunk.start, end: chunk.end },
++        shadowedRange: { start: nodes[startIdx], end: chunk.end },
+         shadowedSeqs: [...shadowedSeqs],
+         shadowedTokenCount: chunk.tokens,
+         provider: summarized.provider,
+         model: summarized.model,
+       });
+       session.append("user/message", checkpointMessage, {
+-        surfaceOp: { op: "replace", startSeq: chunk.start, endSeq: chunk.end },
++        surfaceOp: { op: "replace", startSeq: nodes[startIdx], endSeq: chunk.end },
+         sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowedSeqs],
+       });
+       replaced = true;

@@ -1,0 +1,12 @@
+--- a/gate.js
++++ b/gate.js
+@@ -6,7 +6,7 @@
+ export const GATE_SERVICE = "liveCompactPresetGate";
+ export const PRESET_ENGINE_CONFIG = {
+   auto: true,
+-  thresholdRatio: 0.8,
++  thresholdRatio: 0.15,
+   headroomTokens: 65536,
+   retainTokens: 8192,
+   compactionRetries: 0,
+

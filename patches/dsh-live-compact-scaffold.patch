@@ -1,0 +1,52 @@
+--- a/dsh-live-compact/plan.js
++++ b/dsh-live-compact/plan.js
+@@ -970,6 +970,18 @@
+ // 已落盘的旧卡片里还把每条 user 原文的整段注入前缀抄着。这里就地解码 seq 行、
+ // 用 trimUserText 剥掉状态/运行快照，再重新序列化。返回 null 表示没得改。
+ const SEQ_LINE = /^seq (\d+): (".*")$/;
++// SCAFFOLD 2026-11-24：压缩卡片只留真实对话。运行卡片/状态卡/记忆提示是每条投递
++// 都重新生成的脚手架，抄进卡片只会让每轮请求重复付费。旧卡片由 scrubCardText 就地重写。
++const SCAFFOLD_LINE = /^(?:- \[[a-z]+\] )?(?:（可观测运行信息|（关于他：|（你现在的状态|（说话的样子|（主动搭话：|（dsh-rofm：|Current runtime context|Current working directory:|\[memory\] \d+ 段更早|这是旧内容摘录|Spine extract\.$|Kept lines 照原句|工具证据只写|\[想逗人\]|- \d+ 秒前：)/
++export function dropScaffoldLines(text) {
++  const out = [];
++  for (const raw of String(text || "").split("\n")) {
++    const line = raw.trim();
++    if (line && !SCAFFOLD_LINE.test(line)) out.push(raw);
++  }
++  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
++}
++
+ export function scrubCardText(text) {
+   const src = String(text || "");
+   if (!src.includes("seq ")) return null;
+@@ -983,12 +995,19 @@
+     } catch {
+       return line;
+     }
+-    const slim = trimUserText(raw);
++    const slim = trimUserText(dropScaffoldLines(raw));
++    if (!slim) {
++      changed = true;
++      return "";
++    }
+     if (slim === raw) return line;
+     changed = true;
+     return `seq ${match[1]}: ${JSON.stringify(slim)}`;
+   });
+-  return changed ? out.join("\n") : null;
++  if (!changed) return null;
++  const joined = out.filter((line, i, all) => !(line === "" && all[i - 1] === "")).join("\n");
++  const kept = joined.split("\n").filter((line) => !/^- \[user\] (?:\d+\/100|[\w-]+\.md|qq_[a-z_]+|memory_\w+|\/to\/.*|\[想逗人\].*|- \d+ 秒前.*)$/.test(line.trim()));
++  return dropScaffoldLines(kept.join("\n")) || null;
+ }
+ // 一张卡片必须比被切掉的原文短，调用方会拒绝变长的结果。
+ // 缺一条硬行就不成刀。助手正文不进硬行，所以「已发布」这类句子不会被抄进来。
+@@ -997,7 +1016,7 @@
+ export function buildCard(spanText, liveText = "", spans = null, extras = null) {
+   const claims = claimSpans(spans);
+   const visible = bodySpans(claims);
+-  const span = visible ? visible.map((item) => item.text).join("\n") : String(spanText || "");
++  const span = dropScaffoldLines(visible ? visible.map((item) => item.text).join("\n") : String(spanText || ""));
+   const live = String(liveText || "");
+   const hard = attributedLines(span, visible);
+   const split = planText(span);

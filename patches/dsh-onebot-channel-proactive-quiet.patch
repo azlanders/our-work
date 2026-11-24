@@ -1,0 +1,16 @@
+--- a/dsh-onebot-channel/lib/outbound.js
++++ b/dsh-onebot-channel/lib/outbound.js
+@@ -196,6 +196,13 @@
+           if (!closed && !entry.dropped && now < record.stagedAt + ttlMs && 可发送续话(record)) continue
+           receiptStore.cancelNotSent({ ...record, now })
+           entry.agent?.inbox?.remove?.(record.sourceMessageId)
++          // PROACTIVE_QUIET 2026-11-24: 她这一轮选择 qq_pass / 没开口，回执被取消时
++          // lastProactiveAt 一直不推进 —— 冷却 15 分钟一到就再烧一整轮 28k 上下文，
++          // 一晚上几十轮一句也没发出去。这里把「这次主动尝试」记上。
++          if (closed && !entry.dropped && record.target) {
++            const key = `${record.target.kind}:${record.target.id}`
++            import('./proactive.js').then((m) => m.noteNudge(key, now)).catch(() => {})
++          }
+         }
+         if (record?.guardToken && record.status === 'sending' && now < record.stagedAt + ttlMs) continue
+         if (record && (record.status === 'not-sent' || entry.dropped || now >= record.stagedAt + ttlMs)) {

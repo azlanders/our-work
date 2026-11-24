@@ -1,0 +1,583 @@
+/**
+ * CLI tests — `node engine/cli.mjs init|compress|recall|list|report`
+ * (docs/SPEC.md §8).
+ */
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { after, test } from 'node:test'
+import * as engineApi from '../engine/index.js'
+import {
+  GATE_BASELINE_ERROR,
+  GATE_LIMITS,
+  STEPS,
+  applyNodeTestLimits,
+  countStaticTestCases,
+  deriveGateLimits,
+  parseNodeTestFailures,
+  parseNodeTestSummary,
+  readGateBaseline,
+  summarizeTotals,
+} from '../tools/verify-1.4.0.mjs'
+
+const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+const CLI = path.join(REPO_ROOT, 'engine', 'cli.mjs')
+
+const tempDirs = []
+function tempDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshr-cli-'))
+  tempDirs.push(dir)
+  return dir
+}
+
+after(() => {
+  for (const dir of tempDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+  }
+})
+
+function runCli(args) {
+  return spawnSync(process.execPath, [CLI, ...args], { cwd: REPO_ROOT, encoding: 'utf8' })
+}
+
+function buildConversationFile(dir) {
+  const messages = []
+  for (let index = 0; index < 16; index += 1) {
+    messages.push({ role: 'user', content: `第${index}轮：部署 docker 端口 8080 的配置方案和注意事项。` })
+    messages.push({ role: 'assistant', content: `第${index}轮部署方案：端口 8080，参数必须正确，版本 v1.4.2。` })
+  }
+  const file = path.join(dir, 'conversation.json')
+  fs.writeFileSync(file, JSON.stringify({ messages, usedPercent: 74, contextWindowTokens: 128000 }))
+  return file
+}
+
+/** 2026-10-30 10:00 +08:00 — every message gets an event time on that day. */
+const TIMED_DAY_BASE = Date.UTC(2026, 9, 30, 2, 0, 0)
+
+/**
+ * Conversation whose messages carry `time` (event time) so the archived folders
+ * get `eventStart/eventEnd` and the in-memory time index can query them.
+ */
+function buildTimedConversationFile(dir, { windowTokens = 128000 } = {}) {
+  const messages = []
+  for (let index = 0; index < 16; index += 1) {
+    messages.push({
+      role: 'user',
+      content: `第${index}轮：部署 docker 端口 8080 的配置方案和注意事项。`,
+      time: TIMED_DAY_BASE + index * 120_000,
+    })
+    messages.push({
+      role: 'assistant',
+      content: `第${index}轮部署方案：端口 8080，参数必须正确，版本 v1.4.2。`,
+      time: TIMED_DAY_BASE + index * 120_000 + 60_000,
+    })
+  }
+  const file = path.join(dir, 'conversation-timed.json')
+  fs.writeFileSync(file, JSON.stringify({ messages, usedPercent: 74, contextWindowTokens: windowTokens }))
+  return file
+}
+
+/** Config that actually enforces time windows and keeps the archive small. */
+function writeTimedConfig(dir) {
+  const configPath = path.join(dir, 'config-timed.json')
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      time: { mode: 'constrain', timezone: 'Asia/Shanghai' },
+      compress: { targetChunkChars: 120, minChunkChars: 20 },
+    }),
+  )
+  return configPath
+}
+
+/** Archive the timed conversation once; returns the CLI context + compress JSON. */
+function prepareTimedArchive() {
+  const root = tempDir()
+  const memoryDir = path.join(root, 'memory')
+  const configPath = writeTimedConfig(root)
+  const conversation = buildTimedConversationFile(root)
+  const compress = runCli(['compress', '--input', conversation, '--session-id', 'cli-timed', '--dir', memoryDir, '--config', configPath])
+  assert.equal(compress.status, 0, compress.stderr)
+  return { root, memoryDir, configPath, conversation, compressJson: JSON.parse(compress.stdout) }
+}
+
+test('cli: help exits 0 and prints usage', () => {
+  const help = runCli(['help'])
+  assert.equal(help.status, 0, help.stderr)
+  assert.match(help.stdout, /node engine\/cli\.mjs init/)
+  assert.match(help.stdout, /node engine\/cli\.mjs recall/)
+  // v1.4.0 CLI surface (time assistance / pagination / selector mode / P1-6 opt-in).
+  assert.match(help.stdout, /--time-from/)
+  assert.match(help.stdout, /--granularity day\|month\|year/)
+  assert.match(help.stdout, /--offset/)
+  assert.match(help.stdout, /--limit/)
+  assert.match(help.stdout, /--mode fair\|deterministic\|legacy/)
+  assert.match(help.stdout, /--allow-small-window/)
+  assert.match(help.stdout, /Pure time browsing/)
+})
+
+test('cli: init prints JSON and creates the memory dir', () => {
+  const root = tempDir()
+  const memoryDir = path.join(root, 'memory')
+  const configPath = path.join(root, 'missing-config.json')
+  const init = runCli(['init', '--dir', memoryDir, '--config', configPath])
+  assert.equal(init.status, 0, init.stderr)
+  const parsed = JSON.parse(init.stdout)
+  assert.equal(parsed.ok, true)
+  assert.equal(parsed.folderCount, 0)
+  assert.ok(fs.existsSync(memoryDir))
+})
+
+test('cli: compress -> list -> recall -> report end to end', () => {
+  const root = tempDir()
+  const memoryDir = path.join(root, 'memory')
+  const configPath = path.join(root, 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({}))
+  const conversation = buildConversationFile(root)
+
+  const compress = runCli([
+    'compress',
+    '--input', conversation,
+    '--used-percent', '74',
+    '--session-id', 'cli-session',
+    '--dir', memoryDir,
+    '--config', configPath,
+  ])
+  assert.equal(compress.status, 0, compress.stderr)
+  const compressJson = JSON.parse(compress.stdout)
+  assert.equal(compressJson.ok, true)
+  assert.equal(compressJson.shouldCompress, true)
+  assert.ok(compressJson.folderCount >= 1, JSON.stringify(compressJson))
+  assert.match(compressJson.archiveNote, /^\[memory\] /)
+
+  const list = runCli(['list', '--dir', memoryDir, '--config', configPath])
+  assert.equal(list.status, 0, list.stderr)
+  const listJson = JSON.parse(list.stdout)
+  assert.equal(listJson.count, compressJson.folderCount)
+  assert.equal(listJson.folders.length, compressJson.folderCount)
+
+  const recall = runCli([
+    'recall',
+    '--text', '部署 docker 端口 8080 配置方案',
+    '--context', 'token=41000', 'window=128000',
+    '--dir', memoryDir,
+    '--config', configPath,
+  ])
+  assert.equal(recall.status, 0, recall.stderr)
+  const recallJson = JSON.parse(recall.stdout)
+  assert.equal(recallJson.ok, true)
+  assert.equal(typeof recallJson.stats, 'object')
+  assert.ok(recallJson.stats.matchedFolders >= 1)
+  assert.equal(recallJson.stats.contextChars, 41000)
+  assert.equal(recallJson.stats.windowTokens, 128000)
+
+  const report = runCli(['report', '--dir', memoryDir, '--config', configPath])
+  assert.equal(report.status, 0, report.stderr)
+  assert.match(report.stdout, /=== memory recall report ===/)
+  assert.match(report.stdout, /compression events     : 1/)
+  assert.match(report.stdout, /recall events          : 1/)
+
+  const reportJson = runCli(['report', '--dir', memoryDir, '--config', configPath, '--json'])
+  assert.equal(reportJson.status, 0, reportJson.stderr)
+  const parsedReport = JSON.parse(reportJson.stdout)
+  assert.equal(parsedReport.summary.compressionEvents, 1)
+  assert.equal(parsedReport.summary.recallEvents, 1)
+})
+
+test('cli: invalid input exits 1 with an error on stderr', () => {
+  const root = tempDir()
+  const missingInput = runCli(['compress', '--dir', path.join(root, 'memory')])
+  assert.equal(missingInput.status, 1)
+  assert.match(missingInput.stderr, /--input/)
+
+  const unknown = runCli(['bogus-command'])
+  assert.equal(unknown.status, 1)
+  assert.match(unknown.stderr, /unknown command/)
+
+  const badJsonFile = path.join(root, 'bad.json')
+  fs.writeFileSync(badJsonFile, '{not json')
+  const badInput = runCli(['compress', '--input', badJsonFile, '--dir', path.join(root, 'memory')])
+  assert.equal(badInput.status, 1)
+  assert.match(badInput.stderr, /invalid JSON/)
+
+  const noText = runCli(['recall', '--dir', path.join(root, 'memory')])
+  assert.equal(noText.status, 1)
+  assert.match(noText.stderr, /--text/)
+})
+
+// ---------------------------------------------------------------------------
+// v1.4.0 CLI surface — event time, time-window recall, browsing, pagination,
+// selector mode, and the P1-6 small-window opt-in (contract §5.5/§5.6).
+// ---------------------------------------------------------------------------
+
+test('cli: compress reports protectedTurn/smallWindow/maxFoldersCapped/eventTime and folder event ranges', () => {
+  const { compressJson } = prepareTimedArchive()
+  assert.equal(compressJson.ok, true)
+  assert.equal(compressJson.shouldCompress, true)
+  assert.equal(compressJson.reason, 'ok')
+  assert.equal(compressJson.protectedTurn, false)
+  assert.equal(compressJson.smallWindow, false)
+  assert.equal(compressJson.maxFoldersCapped, false)
+  assert.ok(
+    compressJson.eventTime && Number.isFinite(compressJson.eventTime.start) && Number.isFinite(compressJson.eventTime.end),
+    `expected an archived event-time span, got ${JSON.stringify(compressJson.eventTime)}`,
+  )
+  assert.equal(compressJson.eventTime.source, 'messages')
+  assert.ok(compressJson.eventTime.end > compressJson.eventTime.start, 'the archived span is a half-open [min, max+1) interval')
+  assert.ok(
+    compressJson.eventTime.end - compressJson.eventTime.start <= 32 * 120_000 + 1,
+    `the archived event span must stay inside the conversation span, got ${compressJson.eventTime.end - compressJson.eventTime.start}`,
+  )
+  assert.ok(compressJson.folderCount >= 2, `expected several folders, got ${compressJson.folderCount}`)
+  for (const folder of compressJson.folders) {
+    assert.ok(Number.isFinite(folder.eventStart), 'folder eventStart is reported')
+    assert.ok(folder.eventEnd > folder.eventStart, 'folder eventEnd is the half-open end')
+  }
+})
+
+test('cli: recall --time-from/--time-to filters by event time, reports page/timeWindow/missType', () => {
+  const { memoryDir, configPath } = prepareTimedArchive()
+  const baseArgs = ['--context', 'window=128000', '--dir', memoryDir, '--config', configPath]
+
+  const hit = runCli(['recall', '--text', '部署 docker 端口 8080 配置方案', '--time-from', '2026-10-30', '--time-to', '2026-10-30', ...baseArgs])
+  assert.equal(hit.status, 0, hit.stderr)
+  const hitJson = JSON.parse(hit.stdout)
+  assert.equal(hitJson.ok, true)
+  assert.equal(hitJson.mode, 'fair')
+  assert.equal(hitJson.browsing, false)
+  assert.ok(hitJson.timeWindow, 'timeWindow is present')
+  assert.equal(hitJson.timeWindow.level, 'day')
+  assert.equal(hitJson.timeWindow.enforced, true)
+  assert.ok(hitJson.timeWindow.hits >= 1)
+  assert.ok(hitJson.page && Number.isInteger(hitJson.page.offset) && typeof hitJson.page.hasMore === 'boolean')
+  assert.equal(hitJson.missType, null)
+  assert.ok(hitJson.additions.length >= 1)
+  assert.ok(typeof hitJson.block === 'string' && hitJson.block.length > 0)
+
+  const miss = runCli(['recall', '--text', '部署 docker 端口 8080 配置方案', '--time-from', '2026-10-20', '--time-to', '2026-10-21', ...baseArgs])
+  assert.equal(miss.status, 0, miss.stderr)
+  const missJson = JSON.parse(miss.stdout)
+  assert.equal(missJson.additions.length, 0)
+  assert.equal(missJson.missType, 'time')
+
+  // A single month is a soft window and resolves to the natural month.
+  const month = runCli(['recall', '--text', '部署 docker 端口 8080 配置方案', '--time-from', '2026-10', ...baseArgs])
+  assert.equal(month.status, 0, month.stderr)
+  const monthJson = JSON.parse(month.stdout)
+  assert.equal(monthJson.timeWindow.level, 'month')
+  assert.ok(monthJson.additions.length >= 1)
+
+  // --granularity is forwarded and reflected in the normalized window.
+  const granularity = runCli(['recall', '--text', '部署 docker 端口', '--time-from', '2026-10', '--granularity', 'month', ...baseArgs])
+  assert.equal(granularity.status, 0, granularity.stderr)
+  assert.equal(JSON.parse(granularity.stdout).timeWindow.granularity, 'month')
+})
+
+test('cli: recall pure time browsing without --text, pagination and --mode', () => {
+  const { memoryDir, configPath } = prepareTimedArchive()
+  const browse = runCli(['recall', '--time-from', '2026-10-30', '--time-to', '2026-10-30', '--limit', '3', '--dir', memoryDir, '--config', configPath])
+  assert.equal(browse.status, 0, browse.stderr)
+  const browseJson = JSON.parse(browse.stdout)
+  assert.equal(browseJson.ok, true)
+  assert.equal(browseJson.browsing, true)
+  assert.equal(browseJson.missType, null)
+  assert.equal(browseJson.page.limit, 3)
+  assert.equal(browseJson.page.offset, 0)
+  assert.equal(browseJson.additions.length, 3)
+  assert.equal(browseJson.page.hasMore, true)
+  assert.ok(browseJson.timeWindow && browseJson.timeWindow.enforced === true)
+
+  const page = runCli([
+    'recall',
+    '--text', '部署 docker 端口',
+    '--mode', 'deterministic',
+    '--offset', '1',
+    '--limit', '2',
+    '--dir', memoryDir,
+    '--config', configPath,
+  ])
+  assert.equal(page.status, 0, page.stderr)
+  const pageJson = JSON.parse(page.stdout)
+  assert.equal(pageJson.mode, 'deterministic')
+  assert.equal(pageJson.page.offset, 1)
+  assert.equal(pageJson.page.limit, 2)
+  assert.equal(pageJson.additions.length, 2)
+})
+
+test('cli: compress --allow-small-window overrides the P1-6 refusal', () => {
+  const root = tempDir()
+  const memoryDir = path.join(root, 'memory')
+  const configPath = path.join(root, 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({}))
+  const conversation = buildTimedConversationFile(root, { windowTokens: 8000 })
+
+  const refused = runCli(['compress', '--input', conversation, '--dir', memoryDir, '--config', configPath])
+  assert.equal(refused.status, 0, refused.stderr)
+  const refusedJson = JSON.parse(refused.stdout)
+  assert.equal(refusedJson.shouldCompress, false)
+  assert.equal(refusedJson.reason, 'small-window')
+  assert.equal(refusedJson.smallWindow, true)
+  assert.equal(refusedJson.folderCount, 0)
+  assert.match(refused.stderr, /--allow-small-window/)
+
+  const allowed = runCli(['compress', '--input', conversation, '--allow-small-window', '--dir', memoryDir, '--config', configPath])
+  assert.equal(allowed.status, 0, allowed.stderr)
+  const allowedJson = JSON.parse(allowed.stdout)
+  assert.equal(allowedJson.shouldCompress, true)
+  assert.equal(allowedJson.smallWindow, false)
+  assert.ok(allowedJson.folderCount >= 1)
+})
+
+test('cli: invalid new recall flags exit 1 with a clear error', () => {
+  const root = tempDir()
+  const trailing = ['--dir', path.join(root, 'memory'), '--config', path.join(root, 'missing-config.json')]
+  for (const [args, pattern] of [
+    [['recall', '--text', 'x', '--mode', 'bogus'], /--mode must be/],
+    [['recall', '--text', 'x', '--granularity', 'week'], /--granularity must be/],
+    [['recall', '--text', 'x', '--limit', '0'], /--limit must be/],
+    [['recall', '--text', 'x', '--offset', '-1'], /--offset must be/],
+    [['recall', '--time-from'], /requires a value/],
+  ]) {
+    const result = runCli([...args, ...trailing])
+    assert.equal(result.status, 1, `expected exit 1 for "${args.join(' ')}" (stdout=${result.stdout})`)
+    assert.match(result.stderr, pattern)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// v1.4.0 event constraint via the CLI (--event)
+// ---------------------------------------------------------------------------
+
+/** Seed folders with canonical event labels through the engine API. */
+function seedEventFolders(memoryDir, configPath, specs) {
+  const cfg = engineApi.loadConfig(configPath)
+  for (const spec of specs) {
+    const id = spec.id
+    engineApi.writeFolder(memoryDir, {
+      id,
+      meta: {
+        version: 1,
+        id,
+        createdAt: spec.createdAt,
+        alpha: spec.alpha ?? 0.9,
+        keywords: spec.keywords,
+        title: spec.keywords.join(' '),
+        stats: { messages: 1, chars: 40, tokens: 12 },
+        ...(spec.event ? { event: spec.event, eventSource: 'llm' } : {}),
+      },
+      messages: [{ role: 'user', content: `内容 ${id}` }],
+    })
+  }
+  // writeFolder does not create index.json: the engine rebuilds it lazily.
+  return cfg
+}
+
+function writeEventConfig(dir) {
+  const configPath = path.join(dir, 'config-event.json')
+  fs.writeFileSync(configPath, JSON.stringify({ event: { mode: 'constrain' }, time: { mode: 'constrain', timezone: 'Asia/Shanghai' } }))
+  return configPath
+}
+
+function prepareEventStore() {
+  const root = tempDir()
+  const memoryDir = path.join(root, 'memory')
+  fs.mkdirSync(memoryDir, { recursive: true })
+  const configPath = writeEventConfig(root)
+  seedEventFolders(memoryDir, configPath, [
+    { id: 'mem-20261030T100000Z-0001', createdAt: Date.parse('2026-10-30T10:00:00+08:00'), keywords: ['旅行', '住宿', '行程'], event: '日本旅行' },
+    { id: 'mem-20261031T100000Z-0001', createdAt: Date.parse('2026-10-31T10:00:00+08:00'), keywords: ['旅行', '计划'], event: '日本旅行' },
+    { id: 'mem-20261031T100000Z-0002', createdAt: Date.parse('2026-10-31T11:00:00+08:00'), keywords: ['旅行', '登录', '重构'], event: '登录重构项目' },
+    { id: 'mem-20261031T100000Z-0003', createdAt: Date.parse('2026-10-31T12:00:00+08:00'), keywords: ['旅行', '闲聊'] },
+  ])
+  return { root, memoryDir, configPath }
+}
+
+test('cli: --event constrains the recall to one event', () => {
+  const { memoryDir, configPath } = prepareEventStore()
+  const constrained = runCli([
+    'recall',
+    '--text', '旅行 计划 住宿',
+    '--event', '日本旅行',
+    '--dir', memoryDir,
+    '--config', configPath,
+  ])
+  assert.equal(constrained.status, 0, constrained.stderr)
+  const parsed = JSON.parse(constrained.stdout)
+  assert.equal(parsed.eventInfo.status, 'exact')
+  assert.equal(parsed.eventInfo.label, '日本旅行')
+  assert.equal(parsed.eventInfo.count, 2)
+  assert.equal(parsed.eventInfo.enforced, true)
+  assert.deepEqual(parsed.additions.map((entry) => entry.id).sort(), ['mem-20261030T100000Z-0001', 'mem-20261031T100000Z-0001'])
+  // 空 = no event constraint
+  const unconstrained = runCli(['recall', '--text', '旅行', '--event', '空', '--dir', memoryDir, '--config', configPath])
+  assert.equal(unconstrained.status, 0, unconstrained.stderr)
+  const openJson = JSON.parse(unconstrained.stdout)
+  assert.equal(openJson.eventInfo.status, 'empty')
+  assert.ok(openJson.additions.length >= 3)
+})
+
+test('cli: pure event browsing without --text', () => {
+  const { memoryDir, configPath } = prepareEventStore()
+  const browsed = runCli(['recall', '--event', '日本旅行', '--dir', memoryDir, '--config', configPath])
+  assert.equal(browsed.status, 0, browsed.stderr)
+  const parsed = JSON.parse(browsed.stdout)
+  assert.equal(parsed.browsing, true)
+  assert.equal(parsed.eventInfo.status, 'exact')
+  assert.deepEqual(parsed.additions.map((entry) => entry.id).sort(), ['mem-20261030T100000Z-0001', 'mem-20261031T100000Z-0001'])
+  assert.equal(parsed.missType, null)
+})
+
+test('cli: ambiguous / unknown events are reported, not guessed', () => {
+  const { memoryDir, configPath } = prepareEventStore()
+  const ambiguous = runCli(['recall', '--text', '旅行', '--event', '日本旅行计划', '--dir', memoryDir, '--config', configPath])
+  assert.equal(ambiguous.status, 0, ambiguous.stderr)
+  const ambiguousJson = JSON.parse(ambiguous.stdout)
+  assert.equal(ambiguousJson.eventInfo.status, 'similar')
+  assert.equal(ambiguousJson.missType, 'event-ambiguous')
+  assert.ok(ambiguousJson.eventInfo.candidates.length >= 1)
+  assert.equal(ambiguousJson.eventInfo.candidates[0].label, '日本旅行')
+  assert.ok(ambiguousJson.eventInfo.candidates[0].score >= 0.72)
+  assert.deepEqual(ambiguousJson.additions, [], 'ambiguous submissions never recall silently')
+  assert.match(ambiguous.stderr, /ambiguous|--event/)
+
+  const unknown = runCli(['recall', '--text', '旅行', '--event', '欧洲蜜月', '--dir', memoryDir, '--config', configPath])
+  assert.equal(unknown.status, 0, unknown.stderr)
+  const unknownJson = JSON.parse(unknown.stdout)
+  assert.equal(unknownJson.eventInfo.status, 'unknown')
+  assert.equal(unknownJson.eventInfo.count, 0)
+  assert.equal(unknownJson.missType, 'event')
+  assert.deepEqual(unknownJson.additions, [])
+  assert.match(unknown.stderr, /event miss/)
+})
+
+test('cli: --event rejects an over-long label', () => {
+  const root = tempDir()
+  const bad = runCli(['recall', '--text', '旅行', '--event', 'x'.repeat(201), '--dir', path.join(root, 'memory')])
+  assert.equal(bad.status, 1)
+  assert.match(bad.stderr, /--event/)
+})
+
+// ---------------------------------------------------------------------------
+// v1.4.1 F-01/F-03/T-09 — tools/verify-1.4.0.mjs must not be false-green
+// ---------------------------------------------------------------------------
+
+const GATE = path.join(REPO_ROOT, 'tools', 'verify-1.4.0.mjs')
+
+test('gate: the spec reporter summary (ℹ tests N) is parsed', () => {
+  const spec = ['ℹ tests 919', 'ℹ suites 0', 'ℹ pass 917', 'ℹ fail 0', 'ℹ cancelled 0', 'ℹ skipped 2', 'ℹ todo 0'].join('\n')
+  assert.deepEqual(parseNodeTestSummary(spec), { tests: 919, pass: 917, fail: 0, skipped: 2, cancelled: 0, todo: 0 })
+})
+
+test('gate: the TAP reporter summary (# tests N) is parsed too (F-03)', () => {
+  const tap = ['1..919', '# tests 919', '# suites 0', '# pass 917', '# fail 0', '# cancelled 0', '# skipped 2', '# todo 0'].join('\n')
+  assert.deepEqual(parseNodeTestSummary(tap), { tests: 919, pass: 917, fail: 0, skipped: 2, cancelled: 0, todo: 0 })
+  assert.equal(parseNodeTestSummary('no summary here'), null, 'an unparsable run must stay detectable')
+})
+
+test('gate: failures are extracted from both reporters (F-03)', () => {
+  const spec = ['✖ handle: a failing case (12.3ms)', '✖ handle: a failing case (12.3ms)'].join('\n')
+  assert.deepEqual(parseNodeTestFailures(spec), ['handle: a failing case'], 'spec failures, de-duplicated')
+  const tap = ['not ok 1 - handle: tap failing case', 'not ok 2 - another case'].join('\n')
+  assert.deepEqual(parseNodeTestFailures(tap), ['handle: tap failing case', 'another case'], 'TAP failures')
+  assert.deepEqual(parseNodeTestFailures('✔ all good (1.0ms)'), [])
+})
+
+test('gate: a green suite with removed tests fails the limit check (F-01)', () => {
+  const full = STEPS.find((step) => step.id === 'unit-tests')
+  assert.ok(full, 'the gate has a full-suite step')
+  assert.deepEqual(applyNodeTestLimits(full, { tests: full.minTests, pass: full.minTests - 2, fail: 0, skipped: 2, cancelled: 0, todo: 0 }), [])
+  // The audit T-01/V-01 scenario: one test file removed and e2e skipped.
+  const shrunkCount = full.minTests - 53
+  const shrunk = applyNodeTestLimits(full, { tests: shrunkCount, pass: shrunkCount - 11, fail: 0, skipped: 11, cancelled: 0, todo: 0 })
+  assert.ok(
+    shrunk.some((problem) => problem.includes(`expected at least ${full.minTests} test(s), got ${shrunkCount}`)),
+    shrunk.join('; '),
+  )
+  assert.ok(shrunk.some((problem) => problem.includes(`expected at most ${full.maxSkipped} skipped test(s), got 11`)), shrunk.join('; '))
+})
+
+// ---------------------------------------------------------------------------
+// V-01: the full-suite floor must track the real suite (not a stale constant)
+// ---------------------------------------------------------------------------
+
+test('gate: tools/gate-baseline.json records the current suite floor (V-01)', () => {
+  assert.equal(GATE_BASELINE_ERROR, null, String(GATE_BASELINE_ERROR))
+  const baseline = readGateBaseline()
+  assert.equal(baseline.ok, true, baseline.error)
+  const scan = countStaticTestCases()
+  assert.ok(scan.files >= 40, `static scan must see the test files (got ${scan.files})`)
+  assert.ok(scan.cases >= 900, `static scan must see the declared cases (got ${scan.cases})`)
+  assert.ok(baseline.value.minFullSuiteTests >= scan.cases * 0.95, 'the recorded baseline must not be stale-low vs the test files')
+  assert.ok(GATE_LIMITS.minFullSuiteTests >= baseline.value.minFullSuiteTests, 'effective floor >= recorded floor')
+  assert.ok(GATE_LIMITS.minFullSuiteTests >= GATE_LIMITS.staticFloor, 'effective floor >= static floor')
+  assert.ok(GATE_LIMITS.minFullSuiteTests > 919, 'V-01: the floor must be above the historical 919 constant')
+})
+
+test('gate: deleting a whole test file drops below the floor and FAILS (V-01)', () => {
+  const baseline = readGateBaseline().value
+  const full = STEPS.find((step) => step.id === 'unit-tests')
+  const count = baseline.minFullSuiteTests
+  assert.deepEqual(applyNodeTestLimits(full, { tests: count, pass: count - 2, fail: 0, skipped: 2, cancelled: 0, todo: 0 }), [])
+  // Deleting test/recall-index.test.mjs (53 cases) leaves the suite above the
+  // historical 919 constant but MUST fail the real floor.
+  const afterDeletion = count - 53
+  assert.ok(afterDeletion > 919, `the V-01 scenario: ${afterDeletion} tests is still > the old 919 floor`)
+  const problems = applyNodeTestLimits(full, { tests: afterDeletion, pass: afterDeletion - 2, fail: 0, skipped: 2, cancelled: 0, todo: 0 })
+  assert.ok(
+    problems.some((problem) => problem.includes(`expected at least ${count} test(s), got ${afterDeletion}`)),
+    problems.join('; '),
+  )
+  // deriveGateLimits: a stale-low recorded baseline is raised by the static scan;
+  // the stricter of the two always wins.
+  assert.equal(deriveGateLimits({ minFullSuiteTests: 0 }, 1000).minFullSuiteTests, 980)
+  assert.equal(deriveGateLimits({ minFullSuiteTests: 1000 }, 500).minFullSuiteTests, 1000)
+})
+
+test('gate: skipping the e2e suites fails the gate (F-01)', () => {
+  for (const id of ['e2e-adapter', 'e2e-real-data']) {
+    const step = STEPS.find((candidate) => candidate.id === id)
+    assert.ok(step, `gate step ${id} exists`)
+    assert.equal(step.maxSkipped, 0, `${id} must never skip`)
+    const skipped = applyNodeTestLimits(step, { tests: step.minTests, pass: 0, fail: 0, skipped: step.minTests, cancelled: 0, todo: 0 })
+    assert.ok(skipped.some((problem) => /expected at most 0 skipped test\(s\)/.test(problem)), skipped.join('; '))
+    const deleted = applyNodeTestLimits(step, { tests: 2, pass: 2, fail: 0, skipped: 0, cancelled: 0, todo: 0 })
+    assert.ok(deleted.some((problem) => /expected at least/.test(problem)), deleted.join('; '))
+  }
+  assert.ok(GATE_LIMITS.minE2eRealDataTests >= 8, 'the real-data e2e file keeps its documented cases')
+})
+
+test('gate: a failing summary is detected by the limit check', () => {
+  const full = STEPS.find((step) => step.id === 'unit-tests')
+  const problems = applyNodeTestLimits(full, { tests: 919, pass: 916, fail: 3, skipped: 0, cancelled: 0, todo: 0 })
+  assert.ok(problems.some((problem) => /3 failing test\(s\)/.test(problem)))
+})
+
+test('gate: totals count every test once, e2e re-runs are not added (T-09)', () => {
+  const rows = [
+    { countsInTotals: true, summary: { tests: 919, pass: 917, fail: 0, skipped: 2 } },
+    { countsInTotals: false, summary: { tests: 12, pass: 12, fail: 0, skipped: 0 } },
+    { countsInTotals: false, summary: { tests: 8, pass: 8, fail: 0, skipped: 0 } },
+  ]
+  const totals = summarizeTotals(rows)
+  assert.equal(totals.nodeTestCases, 919, 'unique cases only')
+  assert.equal(totals.nodeTestPass, 917)
+  assert.equal(totals.nodeTestSkipped, 2)
+  assert.equal(totals.nodeTestCasesSummed, 939, 'summed value kept separate (919+12+8)')
+  assert.equal(totals.nodeTestSteps, 3)
+})
+
+test('gate: --help exits 0 and documents the anti-false-green limits; bad args exit 2', () => {
+  const help = spawnSync(process.execPath, [GATE, '--help'], { cwd: REPO_ROOT, encoding: 'utf8' })
+  assert.equal(help.status, 0, help.stderr)
+  assert.match(help.stdout, /minimum test count/)
+  assert.match(help.stdout, /spec and TAP reporter/)
+  const bad = spawnSync(process.execPath, [GATE, '--bogus'], { cwd: REPO_ROOT, encoding: 'utf8' })
+  assert.equal(bad.status, 2)
+})

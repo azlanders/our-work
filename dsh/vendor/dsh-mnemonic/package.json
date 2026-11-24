@@ -1,0 +1,14 @@
+{
+  "name": "dsh-mnemonic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "自研长期记忆：本地 BM25 检索 + 小卡片注入 + 写档工具。零云端依赖。",
+  "main": "index.js",
+  "files": ["index.js", "lib", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

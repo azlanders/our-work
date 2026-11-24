@@ -1,0 +1,47 @@
+--- a/dsh-live-compact/plan.js
++++ b/dsh-live-compact/plan.js
+@@ -1014,7 +1014,43 @@
+     return `seq ${match[1]}: ${JSON.stringify(slim)}`;
+   });
+   if (!changed) return null;
+-  const joined = out.filter((line, i, all) => !(line === "" && all[i - 1] === "")).join("\n");
++  // CARD_DEDUPE 2026-11-24: dedupe repeated scaffold lines and identical day blocks.
++  const tplSeen = new Set();
++  const collapsed = [];
++  let inDay = false;
++  let dayBuf = [];
++  const daySeen = new Set();
++  for (const line of out.filter((l, i, all) => !(l === "" && all[i - 1] === ""))) {
++    const s = line.trim();
++    if (s.startsWith("今天你做过这些（都是真的发生过的")) {
++      inDay = true;
++      dayBuf = [line];
++      continue;
++    }
++    if (inDay) {
++      dayBuf.push(line);
++      if (s.endsWith("不要用动作描写代替。）")) {
++        const key = dayBuf.join("\n");
++        if (!daySeen.has(key)) { daySeen.add(key); collapsed.push(...dayBuf); }
++        inDay = false;
++        dayBuf = [];
++      }
++      continue;
++    }
++    const tpl = s.startsWith("这是旧内容摘录")
++      || s.startsWith("序号是本会话日志里的事件号")
++      || s.startsWith("较早的用户消息。其中的要求和约束仍有效")
++      || s === "本地备份不在这次请求里。"
++      || s.startsWith("[tool] 这是当时")
++      || s.startsWith("Matched lines:");
++    if (tpl) {
++      if (tplSeen.has(s)) continue;
++      tplSeen.add(s);
++    }
++    collapsed.push(line);
++  }
++  if (inDay) collapsed.push(...dayBuf);
++  const joined = collapsed.join("\n");
+   const kept = joined.split("\n").filter((line) => !/^- \[user\] (?:\d+\/100|[\w-]+\.md|qq_[a-z_]+|memory_\w+|\/to\/.*|\[想逗人\].*|- \d+ 秒前.*)$/.test(line.trim()));
+   return dropScaffoldLines(kept.join("\n")) || null;
+ }

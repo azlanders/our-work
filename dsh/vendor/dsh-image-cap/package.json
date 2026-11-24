@@ -1,0 +1,22 @@
+{
+  "name": "dsh-image-cap",
+  "version": "0.1.0",
+  "description": "只在上下文里留最近的图片，旧图用占位符替换（省 token）。",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "compaction"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

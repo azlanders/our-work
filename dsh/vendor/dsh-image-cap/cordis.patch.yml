@@ -1,0 +1,5 @@
+- insert:
+    - id: image-cap
+      name: dsh-image-cap
+      config:
+        keep: 1

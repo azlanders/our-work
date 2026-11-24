@@ -1,0 +1,48 @@
+--- a/dsh-live-compact/plan.js
++++ b/dsh-live-compact/plan.js
+@@ -752,7 +752,6 @@
+ const USER_TEXT_CAP = 800;
+ export function trimUserText(raw) {
+   let t = String(raw || "");
+-  if (t.startsWith("Spine extract.")) return t;      // 旧的压缩卡不裁，交给新卡吸收
+   const first = t.search(/\[\d{1,2}:\d{2}\]\s*（/);
+   if (first > 0) t = t.slice(first);
+   t = t
+@@ -973,11 +972,15 @@
+ // SCAFFOLD 2026-11-24：压缩卡片只留真实对话。运行卡片/状态卡/记忆提示是每条投递
+ // 都重新生成的脚手架，抄进卡片只会让每轮请求重复付费。旧卡片由 scrubCardText 就地重写。
+ const SCAFFOLD_LINE = /^(?:- \[[a-z]+\] )?(?:（可观测运行信息|（关于他：|（你现在的状态|（说话的样子|（主动搭话：|（dsh-rofm：|Current runtime context|Current working directory:|\[memory\] \d+ 段更早|这是旧内容摘录|Spine extract\.$|Kept lines 照原句|工具证据只写|\[想逗人\]|- \d+ 秒前：)/
++const INLINE_SCAFFOLD = /（(?:可观测运行信息|关于他|你现在的状态|说话的样子|主动搭话|dsh-rofm)：[\s\S]*$/
+ export function dropScaffoldLines(text) {
+   const out = [];
+   for (const raw of String(text || "").split("\n")) {
+-    const line = raw.trim();
+-    if (line && !SCAFFOLD_LINE.test(line)) out.push(raw);
++    let line = raw;
++    const cut = line.search(INLINE_SCAFFOLD);
++    if (cut >= 0) line = line.slice(0, cut).replace(/\s+$/, "");
++    line = line.trim();
++    if (line && !SCAFFOLD_LINE.test(line)) out.push(line);
+   }
+   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+ }
+@@ -986,6 +989,7 @@
+   const src = String(text || "");
+   if (!src.includes("seq ")) return null;
+   let changed = false;
++  const seen = new Set();
+   const out = src.split("\n").map((line) => {
+     const match = SEQ_LINE.exec(line);
+     if (!match) return line;
+@@ -996,6 +1000,11 @@
+       return line;
+     }
+     const slim = trimUserText(dropScaffoldLines(raw));
++    if (slim && seen.has(slim)) {
++      changed = true;
++      return "";
++    }
++    if (slim) seen.add(slim);
+     if (!slim) {
+       changed = true;
+       return "";

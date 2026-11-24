@@ -1,0 +1,2162 @@
+# 验证记录 / Verification log
+
+本文件记录发布前在真实 DeepSeek Harness（desktop profile）里做过的端到端验证，
+以及可以独立复现的测试命令。
+
+> **当前架构见 §13（本次修订，2026-10-25）**：归档不调用模型（新归档以“待评分”落盘），
+> 由当前会话模型在“记忆评分任务”区块后调用 `memory_judge` 工具提交 α/β/关键词；
+> 被加回的回忆块在后续归档时按同一占比规则再归档（`rescorePending`，不新建 folder）。
+> **§2–§12 是历史版本（0.1.x–0.3.0）的验证记录**，其中提到的“归档时额外调用模型打分”
+> （`lib/llm-metadata.js`）与 `recall.pressureChars` 压力裁剪等机制已被本次修订取代/移除，
+> 仅作历史留档，**不代表当前行为**。
+> **v1.2.0 的当前行为与验证数字以 §17 为准**（§1 的数字已同步到 v1.2.0）。
+> **v1.3.0 的跨平台验证与当前测试数字见 §19**；§1/§17/§18 的数字是 v1.2.x 的历史记录，
+> 不再代表当前版本（数字统一以 `npm test` 实测为准，不在文档里写死）。
+> **v1.4.0 的验证记录见 §20**（确定性召回/公平性、时间辅助、小窗口、数据时代、兼容与性能）——
+> §20/§21 是 **v1.4.0 的历史记录**（2026-11-01/02 实测，数字已过时，仅作历史留档）。
+> **当前版本 v1.5.9 的最终验证记录见 §34**（2026-11-15 实测，Derpyu 唤醒提示词归档还原 +
+> 全量测试/门禁/自检/e2e）；§33 是 v1.5.8 的图标替换记录（2026-11-13）；
+> §32 是 v1.5.7 的授权弹窗验证记录（2026-11-10/12，v1.5.8 未改其代码，结论仍适用）；
+> §22–§31 为 v1.4.1–v1.5.6 的历史记录（其中 v1.4.3 见 §24、v1.6.0 见 §27、v1.5.5 见 §30、v1.5.6 见 §31）。
+
+## 1. 自动化测试
+
+下面的命令假设 `node` 在 `PATH` 里；若不在，把 `NODE` 换成你自己的 Node 可执行文件路径即可：
+
+```bash
+NODE=node
+
+# 引擎（零依赖、独立于 DSH，含开源前审计回归/会话日志修复工具/自检工具测试）：188 个测试
+"$NODE" --test test/*.test.mjs
+# ✔ tests 188  pass 188  fail 0
+
+# DSH 适配层（mock session/context，含 memory_judge / memory_recall / memory_image）：113 个测试
+"$NODE" --test test-adapter/*.test.mjs
+# ✔ tests 113  pass 113  fail 0
+
+# 一次性运行全部（引擎 + 适配层 + 模拟）：302 个测试
+npm test
+
+# 独立自检（v1.2 R5；有 FAIL 时退出码 1）
+"$NODE" tools/selfcheck.mjs
+"$NODE" tools/selfcheck.mjs --with-tests   # 额外跑 node --test
+
+# 端到端模拟 + 测试阶段报告
+"$NODE" test/simulate.mjs
+"$NODE" tools/recall-report.mjs --help
+"$NODE" tools/show-recall.mjs
+"$NODE" tools/repair-session-log.mjs --help
+```
+
+v1.2.0 时的测试数字为引擎 188/188、适配层 113/113（`node --test` 共 302/302，含 1 个
+`test/simulate.mjs` 文件；§13/§14/§15 记录了历史功能修订，§16 记录 v1.2，§17 记录 v1.2.0；
+**v1.3.0 的当前数字见 §19**，不在此处写死）。
+
+覆盖内容：erf/p(n) 数值、关键词抽取与匹配、α 范围与高 α 警告、压缩触发/20%
+选取/保留最近消息/不拆 tool 对/分文件夹、回忆第一代上限、代数链、已尝试排除、
+createdAt 排序、损坏 index 重建、原子写、1000 文件夹性能、报告聚合、
+pre-step 归档（待评分，不调用模型）、超过 emergency 线后的多轮紧急归档、合成上下文不归档、
+β 归一化/回忆块/遥测、未评分不可回忆、`memory_judge` 工具、任务区块、
+回忆块再归档（rescorePending）、重启记忆 v2 快照恢复；以及 §14 的开源前审计回归
+（原型污染、代理对拆分、CLI 严格参数、工具损坏数据降级、真实 Session 契约等）、
+§17 的 v1.2 R1–R5（500 上限 / 100+100 任务区块 / 标题规则 / 注记合并 / pinned 记录策略 /
+自检工具）。
+
+## 2. 真实 DSH 端到端验证（2026-10-23）
+
+测试思路：用一个**全新的子代理会话**证明“记忆”确实只存在于 `memory/` 里，
+而不是残留在模型上下文中。
+
+测试配置（隔离，仅作用于子代理，主会话关闭）：
+
+```json
+"compress": { "triggerPercent": 10, "compressPercent": 30, "contextWindowTokens": 600,
+              "minMessagesToCompress": 1, "keepRecentMessages": 1,
+              "applyToSubagents": true, "applyToMainSessions": false },
+"recall":   { "probabilityScale": 1000, "seed": 7, "applyToSubagents": true,
+              "applyToMainSessions": false, "triggerSourceKinds": ["user", "agent-message"] }
+```
+
+步骤与结果（最终版代码复跑，2026-10-23 19:32）：
+
+1. 启动子代理 A，提示词里只出现一次秘密：「凤凰计划内部编号是 ZX-42-ALPHA」，
+   并要求它只回复「已收到」。
+2. A 的回合结束（`agent/turn-stopping`）时上下文占用 **2931.5%**（测试窗口 600），
+   插件把最早 30% 归档：生成 **3 个回忆文件夹（α=0.72 / 0.65 / 0.65）**，
+   `removedChars=4885`、`keptMessages=2`，并用 compaction checkpoint 事务
+   （`compaction/start → compaction/summary → 替换 user/message → compaction/end`）
+   把这段从模型上下文替换成一条很短的归档说明。A 的回复「已收到」不含编号。
+3. 启动**全新子代理 B**（没有任何关于编号的历史），只给出问题与
+   `parent message / self-contained` 等关键词，要求它只凭当前上下文回答编号。
+4. 结果：B 的回忆遥测显示 `matchedFolders=2, attempts=3, addedFolders=3`
+   （第一代 2 个、第二代 1 个），`addedChars=4885`、`addedPercentOfWindow=207.83%`
+   （测试窗口 600 造成的百分比放大），回忆耗时 **1.19 ms**；
+   B 的回答是 **ZX-42-ALPHA**，并说明“来自 prior memory recall，没有使用任何文件/搜索工具”。
+
+会话日志层面的直接证据（`$DSH_HOME/sessions/<workspace>/<session>/session.v4.jsonl.zstd`）：
+
+- A 的会话日志含完整 `compaction/start/summary/end`，模型可见 surface 里原始提示词已被
+  checkpoint 说明替换（原文只保留在日志的 append-origin 记录中，供界面回看）；
+- B 的 `system/message`（surface 第 0 个节点、位于所有对话之前）包含
+  `## 记忆回忆…` 区块且含 `ZX-42-ALPHA`；同时 B 的 `user/message` 里都不含该编号 ——
+  证明答案只能来自被加回上下文的回忆，也证明“加到最早期 = 系统提示词最前面”；
+- 回忆块里的消息已修复为单层 `user:` / `assistant:` 前缀（此前测试发现过 `user: user:`
+  重复前缀，已在最终代码中修复并复验）。
+
+这说明：归档 → 清除模型上下文 → 关键词命中 → 按 α/代数概率加回 → 再开始思考，
+整条链路在真实 DSH 中工作正常；统计口径（加回比例、加回字数、代数）也写入
+`memory/stats.jsonl`，可由 `tools/recall-report.mjs` 复核。
+
+测试结束后已把 `config.json` 恢复为默认值、清空测试期产生的 `memory/` 数据。
+
+## 3. 关闭即停止
+
+- 插件注册 **1 个模型工具（`memory_judge`）+ 2 个 system-prompt sections + 3 个事件监听器**
+  （inbox / pre-step / disposed，均为 Cordis effect），没有定时器、子进程或后台任务；
+- 在插件管理器中禁用 `dsh-rofm` 行即卸载全部 contribution（工具、两个 section、全部监听器）；
+- 已实际执行一次“禁用 → 启用”验证：禁用生效、重新启用后插件恢复 working
+  （`fiberPhase=active`）。
+
+## 4. 已知限制 / 尚未验证的部分
+
+- 回忆块是 system-prompt section（system/message），不是 user/assistant 对话消息：
+  DSH 重启后会重新组装系统提示词，之前的回忆块不会自动出现在模型上下文中。
+  **本次修订起**已注入的回忆会以 **v2 快照**持久化到本会话目录的 `recall-state.json`
+  （`version: 2`：渲染好的 `block` 全文 + `additions`（每条回忆的 β 与 `messages` 原文）），
+  会话恢复后的第一次 pre-step / prompt section 调用会**原样恢复并重新注入**
+  （`startsRequestSeries` 强制重写 head），回忆文件夹被删除也仍能恢复；
+  旧 **v1** 只存 ids、恢复仍依赖文件夹在盘（早期版本记录中“重启后回忆块消失”的描述
+  对应 ≤1.0.0 的 v1 行为）；
+- **待评分记忆不可回忆**：归档只把内容以 `scored:false` 落盘；要等当前会话模型在
+  “记忆评分任务”区块后调用 `memory_judge` 提交 α/β/关键词，它才参与回忆。模型不调用时，
+  这些记忆会一直列在任务区块里且不可回忆，但内容已安全落盘、不会丢；若 Harness 没有
+  `tools` 服务，插件会在启动时记一条警告并**停用自动归档**（保留上下文；已有记忆仍可回忆）；
+- 再归档只发生在 pass 0（同一次压力事件的后续 emergency pass 只处理真实对话）；若对应
+  memory folder 已被手动删除，该回忆仍会从注入块移除（已无法从磁盘回忆），只记录 warning；
+- 归档使用 DSH 的 compaction checkpoint 事件格式；若未来 DSH 修改该事件格式，
+  适配层需要跟进。当前 profile 未启用 `compaction-basic`，因此本次真机运行没有经过
+  DSH 的 compaction invariant 校验；事件序列按官方 producer 的格式构造，且 mock 测试
+  覆盖了该序列（start → summary → replace → end、shadowedSeqs 全覆盖）；
+- 真机验证是在**子代理会话**上完成的（测试配置对主会话关闭，避免污染当前对话）；
+  主会话与子代理会话走同一套代码路径，主会话路径由 `test-adapter` 的 mock 测试覆盖，
+  但没有在主会话上真机触发归档；
+- 插件管理器的标题/描述/图标资源已按 DSH 规范导出（`locale/*.json`、`icon.png`、
+  package exports），但没有浏览器截图能力，**Plugins 页面的实际渲染未做视觉验证**；
+- `compress.contextWindowTokens > 0` 会强制覆盖宿主窗口（用于小窗口/测试），
+  默认 0 表示使用 DSH 上报值。
+
+## 5. 自检中修正的问题（避免“看起来能用”）
+
+- `engine`：回忆结果排序只读顶层 `createdAt`，该字段未写入返回对象，导致按创建时间
+  排序在部分路径失效（默认仍按插入顺序）；已补字段并复测；
+- `engine`：index 缓存仅比较 mtime，同毫秒写入会偶发读到旧索引；已加入 size 维度并新增
+  强制 `reload()`；
+- `lib`：归档消息文本重复带 `user:` 前缀；已改为只存正文，由 engine 统一加前缀；
+- 文档：安装路径曾写成开发目录；`node --test test/` 在 Node 24 下不能直接跑目录，
+  已改为 `node --test test/*.test.mjs`；
+- 安装：linked bundle 在 profile 的 bundle 列表里曾丢失一次（reload 后插件不再激活）；
+  已重新 `set_bundle` 持久化，并复验一次 profile reload 后仍为 active；
+- `lib`：最早一段归档里混入 runtime-context / skill-catalog 等宿主合成 user 消息，
+  导致回忆里出现“当前工作目录”这类噪音；已只归档真实 user/assistant/tool 对话；
+- `lib`：DeepSeek 适配器为 `systemPromptUpdate: 'in-history'`，后续系统提示词更新会被
+  追加到历史中，回忆块不在最前；已在回忆后的 pre-step 返回 `startsRequestSeries: true`，
+  强制 DSH 重写 head system 节点，并复验“唯一非空 system 节点 = surface 第 0 个节点”；
+- 新增 `compress-applied` 遥测：压缩后用 DSH tokenMeter 再测一次上下文，记录
+  before/after tokens 与百分比，便于从 `stats.jsonl` 直接复核“DSH 显示的上下文减少”。
+
+## 6. 多轮真机演示记录（2026-10-23）
+
+完整留档曾保存在本机临时目录（**该临时记录已在 0.2.4 清理测试遗留时删除**，
+不随仓库发布；本节保留结论）：
+
+- 7 轮真实多轮对话（星港部署 / 霜火缓存 / 数据库 / 监控 / 安全 / 汇总核对 / 最终核对）；
+- 触发 3 次归档（62.715% / 64.578% / 76.655%），生成 5 个回忆文件夹，
+  α = 0.63 / 0.53 / 0.75 / 0.75 / 0.70，每个都有 7~8 个关键词；
+- DSH tokenMeter 实测：30,662 → 28,483 tokens；下一轮模型请求上下文 30,427 → 22,763
+  tokens（-25.2%）；
+- 回忆 3 次（3/3、4/4、5 命中加回 3，概率 = α，0.63/0.53/0.75，耗时 0.78ms），
+  按文件夹 createdAt 升序注入到 system 第 0 节点，回忆时间 < 请求时间 < 应答时间；
+- 独立复核脚本 `verify.mjs`（零依赖）：11/11 项检查全部 PASS；
+- 演示配置用 `contextWindowTokens=40000` 模拟窗口（DSH 实际上报 1,048,576），
+  其余阈值/比例/概率公式与生产默认一致，详见该次记录中的 REPORT.md（已清理）。
+
+## 7. 主会话真机触发（2026-10-23 20:48，默认配置）
+
+用户主会话在真实默认配置下（`triggerPercent=60`、`contextWindowTokens=0` →
+DSH 实际上报窗口 **1,048,576**）触发了一次归档，触发点 `agent/pre-step`：
+
+- 上下文 **62.72%**（657,679 / 1,048,576）→ 归档后 **33.10%**（347,043）；
+  provider 实测上下文 655,302 → 326,294（-50.2%）；
+- compaction 事务完整，模型可见 surface 出现 `[memory]` checkpoint；
+- 记录与独立复核（8/8 PASS）曾保存在本机临时目录
+  （**该临时记录已在 0.2.4 清理测试遗留时删除**）。
+
+**这次真机触发暴露并修复了两个真实 bug**（修复后引擎测试 71/71、适配层 10/10）：
+
+1. **回合边界超调**：对齐下一个 user 边界使实际移除 309,560 tokens（47%，远超 20%）。
+   修复：`compress.maxBoundaryOvershoot=1.25`——若下一个边界超过目标 1.25 倍，回退到上一个边界；
+2. **超大单回合不拆分**：生成 1 个 67 万字的文件夹。修复：`chunkSegments` 对超过
+   `targetChunkChars` 的单个 user 回合继续按消息拆分；`compressWithEscalation` 只要仍 >60%
+   就继续普通 pass（最多 `maxExtraPasses`），不再只在 >85% 才补。
+
+本 profile 未启用 `compaction-basic`，因此真机运行未经过 DSH compaction invariant 校验。
+
+## 8. 0.2.0 行为变更（α/关键词由模型生成 + 每会话独立目录）
+
+- **α 与关键词改为模型生成**：归档前调用 Host `llm` 服务（默认当前会话 provider/model），
+  模型返回 `{alpha, keywords}`；插件校验（α 范围、3~8 个关键词、条数一致），失败重试一次，
+  仍失败则**放弃本次归档**（不回退启发式）。因此归档会多一次 LLM 调用。
+- **归档只在 `agent/pre-step` 执行**：`turn-stopping` 是同步事件无法等待模型调用；
+  pre-step 正好在“下一次思考之前”，同时满足防爆位置。
+- **每会话独立回忆文件夹**：`memory/sessions/<session-id>/`，各会话的 index/stats/folders 完全隔离，
+  回忆不跨会话；`storage.perSession=true`（默认）。
+- **概率函数核对（代码层面）**：
+  - `engine/recall.js` 的 `recallProbability(n,μ,σ)` 实现为
+    `(1-erf((n-μ)/(σ√2)))/(1-erf((1-μ)/(σ√2)))`，`n<=1` 直接返回 1，与要求公式一致；
+  - 第一代概率 = `α × probabilityScale`，第 n 代 = `α × p(n) × probabilityScale`
+    （`probabilityScale` 默认 1，仅调试用）；概率被夹到 [0,1]，`roll < probability` 成功；
+  - `firstGenMax` 只对第 1 代**成功加回**计数（失败尝试不计数），第 n>1 代无数量上限（`maxGeneration` 可选）；
+  - 已尝试/已加回的文件夹不会重复尝试；子代由已加回文件夹的关键词扩展。
+  - 结论：与要求一致；唯一“超出要求”的是 `probabilityScale` 调试乘数与 `maxGeneration` 安全阀，默认关闭/为 1。
+- 注意：桌面上的两份旧记录（demo / main-session-trigger）产生于 0.1.x：
+  当时 α/关键词是启发式、且记忆是全局目录；它们仍可作为“旧行为”证据，但**不代表 0.2.0 的当前行为**
+  （记录本体已在 0.2.4 清理测试遗留时删除）。
+
+### 8.1 0.2.0 真机验证（2026-10-23 21:10）
+
+用一个 Team 子会话做隔离真机测试（`applyToMainSessions=false / applyToSubagents=true`、
+`contextWindowTokens=5000` 只为快速触发）：第 2 轮 pre-step 触发了归档，模型（真实
+`deepseek-account/deepseek-flash`）返回并写入了：
+
+- folder `mem-…-0001`：**α=0.95**，关键词 `星港项目、API端口8080、nginx灰度10%、
+  PostgreSQL 16 一主两从、霜火项目、redis maxTotal=64、TTL=300秒、缓存key前缀sr:`
+- folder `mem-…-0002`：**α=0.85**，关键词 `星港项目、PostgreSQL 16 一主两从、
+  nginx灰度10%、redis maxTotal=64、TTL=300秒、sr: 前缀`
+- `meta.importanceSource="llm"`、`keywordsSource="llm"`、`llm={provider,model}` 落盘；
+- 记忆目录为 `memory/sessions/beee46bb-…/`（每会话独立）。
+
+测试后已删除该测试会话目录、恢复默认配置。
+
+### 8.2 重启后回忆恢复（2026-10-23 追加）
+
+- 旧版：重启只丢“已注入到模型上下文里的回忆块”，本地回忆文件夹从未丢失；
+- 0.2.1：每次注入后把已回忆文件夹 id 写入本会话目录的 `recall-state.json`；
+  会话恢复后第一次 pre-step / prompt section 调用会从本地文件夹重建并重新注入
+  （`startsRequestSeries` 强制写回 head），**不需要等新用户消息**；
+- 测试：`test-adapter` 新增 restart 用例（新建同 id session + 新 plugin 实例，pre-step 后
+  回忆块恢复），12/12 通过；若记忆文件夹被删除则跳过对应 id。
+  （历史记录：当时 α/关键词由归档时的额外模型调用产生，该机制已被本次修订替换。）
+
+## 9. 0.2.2：完整内容打分 + 回忆块不会累计爆上下文（历史记录）
+
+> 本节记录 0.2.2 的历史行为，**已被本次修订取代**：不再有“归档时模型打分”
+> （`lib/llm-metadata.js` 已删除，改为 `memory_judge` 工具 + 待评分）；
+> 回忆块不再靠 `recall.pressureChars` 压力裁剪，而是按同一占比规则再归档
+> （`rescorePending`，见 §13.4）。以下仅作历史留档。
+
+- **完整内容打分（历史）**：`importance.llmMaxCharsPerFolder=0` 表示发送每个文件夹的**完整**文本；
+  `chunkSegments` 会把单条超大消息按字符拆成多个 ~`targetChunkChars` 文件夹，保证文件夹小且完整；
+  `llmMaxTotalChars` 只用于分批（超出则多次调用），不再截断任何文件夹。
+  测试：`a single message larger than targetChunkChars is split...` 与 `LLM scorer receives the complete folder content`。
+- **加回的上下文是否被归档（历史）**：0.2.2 时不会（回忆块 pinned，普通归档不移除它），
+  靠硬上限 + `recall.pressureChars` 压力裁剪控制长度。本次修订改为**回忆块也会被再归档**
+  （从模型可见上下文移除、只置 `rescorePending` 复核 α/β、不新建 folder），
+  见 §13.4 与 README §1.4。
+- 结论（历史）：回忆块结构上不可被“归档成文件夹”，但被严格限长并在压力下主动丢弃，
+  不会出现“加回上下文累计到爆窗口”的问题。
+
+## 10. 0.2.3：修复“重启后插件静默失效”
+
+- 现象：重启 DSH 后本会话的 recall/compress 都不再触发（stats.jsonl 无新增 recall 事件）。
+- 根因：恢复的主会话 header 会持久化 `delegationDepth: 0`；旧判断
+  `header.origin === 'subagent' || header.delegationDepth !== undefined`
+  把深度 0 的主会话误判成子代理，于是 `applyToSubagents=false` 让它静默跳过。
+- 修复：只有 `origin === 'subagent'` 或 `delegationDepth > 0` 才算子代理；
+  新增回归测试 `a resumed main session with delegationDepth 0 is still a main session`（15/15 通过）。
+- 影响：重启后第一次归档/回忆即可恢复；之前没有任何本地记忆损坏（文件夹一直在磁盘上）。
+
+## 11. 0.2.4：独立审计后的缺陷修复（2026-10-23 晚）
+
+独立审计（静态审阅 + 90 余项独立对抗测试 + 运行态核对）未发现 P0；以下确认为真实缺陷并已修复
+（代码修复均有回归测试或独立验证脚本覆盖；当前引擎 76/76、适配层 26/26 通过）：
+
+1. **重启后首条用户消息会丢掉重启前的回忆**（P1，`lib/plugin.js`）：
+   `agent/inbox/inserted` 先于任何 pre-step/assemble 触发，旧代码直接 `saveRecallState()`
+   用新一批 id 覆盖 `recall-state.json`，`restoreRecallState()` 之后才执行 → 重启前已注入的
+   回忆被静默丢弃。修复：inbox 处理先恢复持久化回忆，再合并/落盘新一批。
+2. **配置热加载可能漏掉改动**（P2，`lib/config-store.js`）：旧实现只比较 `mtime`；
+   同一文件系统时钟 tick 内的两次写入可共享 `mtimeMs`（实测本机 266/300 对快速写入同 mtime），
+   且同大小编辑无其他变化。修复：按**文件内容**判断变化（`mtime`/`size` 仅作记录），
+   并加回归测试；`touch` 不再触发无意义的引擎重建。
+3. **损坏/半写入的 `config.json` 会静默回落默认值**（P2，`lib/config-store.js`）：
+   旧实现解析失败即换成内置默认值（并丢 rowConfig、清空引擎缓存，`memoryDir` 也可能回落到全局目录）。
+   修复：保留上一次可用配置，文件恢复合法后自动重载。
+4. **压力裁剪掉的回忆无法再次回忆**（P2，`lib/plugin.js`）：`trimRecallOnPressure`/
+   `trimRecallBlock` 丢弃 additions 时没有从 `recalledIds` 删除 id，与 README“之后还能再次回忆”不符。
+   修复：丢弃时同步删除 id。
+5. **回忆块跨批次顺序可能与标题不符**（P2，`lib/plugin.js`）：标题承诺 createdAt 升序，
+   但每批新回忆被追加在末尾。修复：渲染时按 folder createdAt 排序（id 作为稳定 tie-break）。
+6. **`storage.maxFolders` 安全上限从未生效**（P2）：文档写“拒绝再创建”，代码从未读取。
+   修复：归档前检查，超限则**整体拒绝**本次归档（绝不做部分写入后再替换上下文），
+   引擎 `commitCompression` 也加了兜底拒绝。
+7. **禁用插件时仍在途的归档可能继续写盘**（P2，`lib/plugin.js`）：`this.disposed` 是死代码。
+   修复：用 `ctx.effect` 注册 dispose 置位，并在模型打分 await 之后、写盘/替换上下文之前检查。
+8. **上下文替换成功后的回滚会误删归档**（P2，`lib/compaction.js` + `lib/plugin.js`）：
+   旧代码只要 compaction 事务抛错就删除刚写的文件夹（即使替换事件已落地）。修复：只有替换前失败
+   才回滚；替换已落地时保留文件夹（错误对象带 `memoryRecallArchiveCommitted` 标记）。
+9. **per-session 下 `tools/recall-report.mjs` 默认读错路径**（P2，工具 bug）：
+   默认 perSession 后遥测写在 `memory/sessions/<id>/stats.jsonl`，但工具仍读根
+   `memory/stats.jsonl` → 默认永远 0 事件。修复：默认聚合所有 session 遥测 + 旧版全局遥测，`--dir` 保持单目录语义。
+10. **索引可携带 `.`/`..` id**（P3，`engine/store.js`）：过滤器用的 `SAFE_ID_RE` 允许这两个名字，
+    但加载时 `assertSafeId` 会拒绝 → 索引可出现永远加载失败的条目。修复：统一 `isSafeFolderId`。
+11. **拆分超大消息时 `meta.source.seqStart/seqEnd` 不准**（P3，`engine/compress.js`）：
+    按字符拆分的片段使 `seqEnd = start + 条数 - 1` 失真。修复：chunk 记录真实的消息序号范围。
+12. **per-session 引擎缓存不随 agent dispose 释放**（P2，`lib/plugin.js`）：`engines` Map
+    以配置版本+目录为键，agent 销毁后不清理。修复：`agent/disposed` 时按 session 驱逐对应引擎。
+
+随后的回归评审又修正了几处 P3（同属 0.2.4）：
+
+13. **配置读取 I/O 错误（EPERM/EISDIR 等）曾回落默认值**（`lib/config-store.js`）：
+    old 逻辑把“读失败”等同“文件不存在”，会重置所有配置并清空引擎缓存、`memoryDir` 也可能回落到全局目录。
+    现在只有 ENOENT 才按“可选文件缺失”处理，其他 I/O 错误保留上一次可用配置；首次加载坏
+    `config.json` 也会把解析错误写进 `cfg.warnings`（插件启动时记录），不再静默。
+14. **`storage.maxFolders` 拒绝在引擎/CLI 层是“成功形状”**（`engine/compress.js`/`engine.js`/`cli.mjs`）：
+    `commitCompression` 返回 `folders: []`，旧包装仍报 `committed: true`、CLI 打印 “archived 0 folder(s)”。
+    现在返回 `refused: true, reason: 'storage.maxFolders'`，`MemoryEngine.compress` 报 `committed: false`，
+    CLI 输出 `ok: false` + 明确的拒绝原因。
+15. **回滚标记的冻结错误对象隐患**（`lib/compaction.js`）：原先给 error 对象挂属性，
+    若 error 被冻结则标记失败、仍可能误回滚已落地的归档。改为模块级 `WeakSet` + `archiveCommitted(error)`
+    判断（冻结对象也能作为 WeakSet 键），并补了“替换后失败保留文件夹 / 替换前失败回滚”两条回归测试。
+    另：dispose 检查提前到模型打分之前，避免禁用后仍发起一次无意义的打分调用。
+
+审计中记录但**未改**（不影响正确性/属口径问题）：`p(n)` 在 n≥22 因 erf 截断为 0（真实值 <1e-8）；
+拆分消息导致文件夹 chars 与 `removeChars` 差一个角色前缀；`addedChars` 不含回忆块标题开销；
+关键词抽取在高度重复文本下可能被套话挤占（召回效果风险，非正确性问题）。
+
+## 12. 1.0.0：已加回的记忆不再占用第一代名额（2026-10-24）
+
+**问题**：引擎做 BFS 时不知道插件的 `recalledIds`（插件在结果返回后才过滤），
+已加回的文件夹仍参与第一代竞争并计入 `firstGenMax`。复现：12 个文件夹都含关键词「部署」，
+其中 10 个已加回、2 个是新的 → 修复前 `attempts = 10` 全花在重复项上，新的 2 条一次都没被尝试，
+插件过滤后注入 0 条；用户反复说同一个高频词时，新归档记忆可能长期轮不到第一代。
+
+**修复**：`recall({ ..., excludeIds })`（`MemoryEngine.recall(userText, context, { excludeIds })`），
+适配层传入会话的 `state.recalledIds`。被排除的文件夹不再掷骰、不占 `attempts`/`firstGenMax`，
+但仍是**透明桥梁**：其关键词继续扩展 BFS 后代，保证“旧记忆 → 新记忆”的可达性。
+遥测新增 `excludedFolders`，插件日志追加 `excluded=N`。
+
+**复现验证**（独立脚本，直接 import `engine/index.js`，临时目录）：
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 12 个同关键词，10 个已加回 | `attempts=10`，加回 1..10，插件注入 0 条 | `attempts=2`，加回 11、12，注入 2 条；`excludedFolders=10` |
+| 12 个全部已加回（反复同词） | 再次加回 10 条重复项 | `attempts=0`、`addedFolders=0`、`excludedFolders=12` |
+| 旧记忆 A→B→C→D 链已加回，之后新增 E | E 靠重掷旧链才可能被捞到 | A 作桥梁：E 以第 4 代被加回，旧 A 不被重复加回 |
+
+**测试基线**：引擎 `80/80`、适配层 `27/27`，`test/simulate.mjs` 正常；新增回归用例：
+
+- `test/recall.test.mjs`：excludeIds 不占名额、排除项仍当桥梁、缺省/空排除等价旧行为、全排除时不掷骰；
+- `test/engine.test.mjs`：`MemoryEngine.recall` 透传 `excludeIds` 且遥测记录 `excludedFolders`；
+- `test-adapter/plugin-mock.test.mjs`：同一关键词的第二条用户消息不再让已注入文件夹参与掷骰
+  （`attempts=0`、`excludedFolders>0`、注入块不变、日志含 `excluded=`）。
+
+```bash
+node --test test/*.test.mjs            # ✔ tests 80  pass 80  fail 0
+node --test test-adapter/*.test.mjs    # ✔ tests 27  pass 27  fail 0
+```
+
+## 13. 本次修订：当前模型工具评分 + 回忆块再归档（2026-10-25）
+
+本次修订把 α/β/关键词的产生方式改为**当前会话模型在自己的回合内调用 `memory_judge` 工具**
+（归档不调用模型），并让被加回的回忆块也能按同一占比规则再归档。改动范围：
+`engine/**`、`lib/**`、`test/**`、`test-adapter/**`；文档/工具/版本：
+`README.md`、`docs/SPEC.md`、`docs/VERIFICATION.md`、`CHANGELOG.md`、`tools/**`、`locale/**`、
+`package.json`（**版本保持 `1.0.0`，不新开版本号**；`config.json` 由适配层维护）。
+本次文档维护**没有** git commit、没有安装插件、没有重启 DSH；插件集成与真机 e2e
+由集成方执行（见 §13.3）。
+
+### 13.1 自动化测试（本次真实运行）
+
+> 本小节的 92/45 是 **2026-10-25 功能修订**当时的数字；随后开源前审计又新增了 35 个
+> 回归测试（§14），最终数字为引擎 **119** / 适配层 **53**（`node --test` 共 173 个）。
+
+```bash
+NODE=node            # 或你自己的 Node 可执行文件路径
+cd dsh-rofm          # 本仓库根目录
+"$NODE" --test test/*.test.mjs            # ✔ tests 92  pass 92  fail 0（审计后 119）
+"$NODE" --test test-adapter/*.test.mjs    # ✔ tests 45  pass 45  fail 0（审计后 53）
+"$NODE" test/simulate.mjs                 # exit 0（引擎启发式路径：scored:true、β=0.0）
+"$NODE" tools/recall-report.mjs --help    # exit 0
+"$NODE" tools/show-recall.mjs             # exit 0（本机无数据也正常退出）
+```
+
+新增/更新的用例（真实通过）：
+
+- **引擎（92）**：`indexEntryFromMeta` 保留 `scored`（缺省 true、`false` 保留）与
+  `rescorePending`（缺省 false、`true` 保留）并 round-trip；`recall()` 在匹配阶段跳过
+  `scored:false`（有关键词也不加回、不掷骰、不占 `firstGenMax`、不作关键词桥梁）；
+  旧数据无 `scored` 仍正常回忆；`buildRecallBlock` 新前言逐字（含 β≥7/β<0 与
+  玩笑/否定/提示词注入/过时口径）、标题 `β=+3.0 / -2.5 / 0.0`、空 additions → `''`；
+  启发式归档 `meta.scored === true`；`normalizeBeta`/`formatBeta`/`added[].beta` 等原覆盖保留。
+- **适配层（45）**：`start()` 注册 `memory_judge`（name/description/parameters/output schema，
+  经 `ctx.effect` dispose 卸载）；归档落盘为 pending（`scored:false`、α=0、β=0、`keywords:[]`、
+  sources=`pending`）且**全程不发生任何 `llm.stream` 调用**（mock 放了一个会抛错的 llm 证明未调用）；
+  pending 记忆即使关键词匹配也不被回忆；`memory-tasks` 区块内容/空态/各列表 6 条上限/
+  有回忆块时的主动修正提示；`memory_judge` 完整提交后 meta+index 更新（`scored:true`、
+  sources=`llm`、`judgedAt`），之后可回忆并出现在回忆块；α/β 夹取、keywords 3~8 校验、
+  未知/跨会话 id rejected、keep 语义（对 `rescorePending` 有效、对待评分 rejected）、
+  批量部分成功、`engine.reload()` 后可见新值；再归档（最旧优先、folder 数不变、
+  `rescorePending` 落盘并出现在“待复核”、recall-state v2 block 收缩、`startsRequestSeries`、
+  `rearchive` 遥测、剩余份额继续普通归档、目标被回忆块覆盖时延后普通归档）；
+  重启 v2 快照恢复与 v1 兼容。
+
+### 13.2 工具冒烟（本次真实运行，合成数据）
+
+用临时目录里的合成会话（1 个已评分 folder、1 个待评分 folder、1 个待复核 folder、
+合成 v2 快照，以及含 `compress-applied`(pending) / `recall`(`added[].beta`) / `rearchive`
+的 stats.jsonl）跑：
+
+- `"$NODE" tools/show-recall.mjs --dir <合成目录>`：退出 0；头部显示
+  `回忆文件夹: 3 个（已评分 2 / 待评分 1 / 待复核 1）`；待评分 folder 标记 `[待评分]`、
+  `关键词: (尚未评分)`、`sources: α=pending keywords=pending β=pending`；待复核 folder 标记
+  `[待复核]`；并打印两条提示（1 个待评分需 `memory_judge` / 1 个待复核需复核 α/β）；
+  `recall-state.json` 只打印 v2 摘要（`version=2 block=<n> 字 additions=1 条` + 每条
+  `gen/α/β/字数/messages`），不会重复打印整块；
+- `"$NODE" tools/show-recall.mjs --json --dir <合成目录>`：
+  `summary = {"folders":3,"scored":2,"pending":1,"rescorePending":1,"recallable":2}`，
+  `folders[].scored/rescorePending/pending/sources` 均存在；`wouldInject` **不含**待评分 folder
+  （含已评分与待复核回忆）；
+- `"$NODE" tools/recall-report.mjs --dir <合成目录>`：在原有报告后输出
+  `re-archive events       : 1, recalled folders removed: 1, tokens: 184` 与
+  `pending folders created : 1 (awaiting memory_judge)`，β 行
+  `beta (trust)           : n=2, mean=+2.50, β≥7: 1, 0≤β<7: 0, β<0: 1`；
+  `--json` 增加 `workStats`（`rearchiveEvents/rearchivedFolders/rearchivedTokens/pendingCreated`）
+  与 `betaStats`；
+- 无数据冒烟：`"$NODE" tools/recall-report.mjs --help` 退出 0；
+  `"$NODE" tools/show-recall.mjs`（本机仅空会话）退出 0。
+
+> 以上为合成数据冒烟，不是真实会话数据；真实会话结果见 §13.3。
+
+### 13.3 真机 e2e（集成方执行，2026-10-25）
+
+证据材料为一次性工作区过程材料，不随仓库发布（本节保留结论）。
+插件已以 link 形式安装进 desktop profile（`include:dsh-rofm`，enabled / active）；
+测试用临时 config（仅子代理、小窗口 600、trigger 10%）写在插件目录 `config.json`，
+测后已恢复默认配置。测试会话名为 `e2e-memory2`（会话 id 略）。
+
+1. **工具注册（当前模型可调用）**：`memory_judge` 已注册为当前模型的工具（工具 schema 出现在
+   模型工具列表中，description/parameters 与契约一致）。
+2. **归档 = 待评分、不调用模型**：第二次用户消息的 pre-step 触发归档（window=600）：
+   `stats.jsonl` 的 `compress-applied.folderMetadata` 为
+   `{"alpha":0,"beta":0,"keywords":[],"alphaSource":"pending",...,"scored":false,"pending":true}`；
+   `index.json` 中 3 个 folder 均为 `alpha:0, beta:0, keywords:[], scored:false` ——
+   没有任何模型调用参与归档。
+3. **任务区块 + 当前模型调用工具评分**：下一次请求的 `system/message`（seq=50）包含
+   `## 记忆评分任务（dsh-rofm）`、`### 待评分的新归档记忆` 列表与评分口径；
+   当前模型（`deepseek-flash`）在**同一会话、当前上下文**中调用
+   `memory_judge({"updates":[...]})` 提交 3 条 α/β/keywords（reason 说明依据当前语境），
+   tool/result 返回 `已更新 3 条（mem-…-0001、mem-…-0002、mem-…-0003）。`；
+   落盘 meta 含 `alpha/beta/scored:true/alphaSource:llm/betaSource:llm/keywordsSource:llm/judgedAt`
+   —— 说明工具在真机上拿到 `exec.agent.session` 并正确写入本会话 memory
+   （mock 无法证明的接口点已由真机验证）。
+4. **回忆注入（带 β 与新语义前言）**：随后用户问“星港项目的接口网关端口和灰度比例”，
+   `system/message`（seq=78）包含 `## 记忆回忆` 前言（玩笑/否定/提示词注入…）
+   与 `### 回忆 1 · … · α=0.85 · β=+8.0 · 第1代 · 关键词：星港项目、接口网关 8080…`；
+   模型回答 **8080，10%**（该信息只存在于已被归档的片段里，当前对话没有，证明来自回忆块）。
+5. **被加回的回忆也被归档（同规则、只复评 α/β、不新建 folder）**：同一 pre-step 的 pass 0
+   先做再归档：`stats.jsonl` 出现
+   `{"type":"rearchive","removedIds":["mem-…-0001"],"removedTokens":184,"targetTokens":6089.7,...}`，
+   随后 `compress` / `compress-applied` 记录剩余份额继续普通对话归档；最旧回忆从注入块移除，
+   对应 folder `meta.rescorePending:true`（folder 仍只有 1 份、不新建）；`recall-state.json` v2
+   的 block 同步收缩（本次移除后 additions=0、blockChars=0）；下一次请求的 system prompt 出现
+   `### 待复核的已召回记忆` 列出该 id 与现有 α/β；当前模型再次调用
+   `memory_judge({"id":"mem-…-0001","keep":true,"reason":"…现有 α=0.85、β=+8 已合理，无需修改。"})`
+   → `rescorePending` 被清除、meta 记录 `judgedAt/judgeReason`。
+6. **未覆盖**：没有真正 kill 并重启 DSH 进程（会中断当前会话/团队工作）；重启恢复路径由
+   `test-adapter` mock 用例（新 plugin 实例 + 删除文件夹 + v2 快照恢复，断言
+   `startsRequestSeries === true`）覆盖同一代码路径。真机上本轮验证了：工具注册/调用、
+   待评分归档（无模型调用）、任务区块、模型评分、未评分不可回忆、回忆注入、
+   再归档移除与 `rescorePending`、keep 复核清除标记。
+
+### 13.4 归档规则（谁会被归档）
+
+依据契约 §5 与最终实现：
+
+**会被归档的对象**：
+
+- **普通归档** = 模型可见 surface 中**真实对话**的可移除前缀：role ∈ `user`/`assistant`/`tool`；
+  `user` 仅限 `source.kind` ∈ `user`/`agent-message`/`team-message`/`user-rpc`；
+  只在 `agent/pre-step`、上下文 > `compress.triggerPercent`（默认 60%）、
+  消息数 ≥ `minMessagesToCompress`（4）、上下文 ≥ `minContextTokens`（512）时触发；
+  按 token 累计取**最早** `compressPercent`（默认 20%，目标值）的已用上下文，向完整 user 回合
+  边界对齐（不拆 tool-call/tool-result；下一个 user 边界超过目标 `maxBoundaryOvershoot`（1.25）
+  倍则回退上一边界）；最新 `keepRecentMessages`（默认 2）条永不移除；按 `targetChunkChars`
+  （约 1200 字）分文件夹（保持完整 user 回合、单条超大消息只在**句子边界**切分、
+  <200 字尾块合并、单次 ≤ `maxFoldersPerRun` **500**（v1.2 R1，此前 100））；
+  **归档不调用模型**：文件夹以 `scored:false` 待评分落盘，
+  由当前模型经 `memory_judge` 评分后才可回忆；然后用 DSH compaction checkpoint 把该段替换成
+  一条 `[memory]` 归档说明（模型不再看到原文；日志/界面仍保留原文可回看）；
+- **再归档（本次修订新增）** = 被加回的回忆块也参与归档：与普通归档**同触发、同占比**
+  （`targetTokens = totalTokens × compressPercent / 100`），按 createdAt 从**最旧**开始把回忆
+  从注入块移除（下一次请求的模型可见上下文里消失），**不新建 folder**，只把对应 folder 置
+  `rescorePending:true` 进“待复核”，由当前模型用 `memory_judge` 复核 α/β（`keep=true` 表示保持）；
+  剩余份额继续普通对话归档；只有 pass 0 做再归档。`recall.maxRecalledBlocks/maxRecalledChars`
+  上限仍保留（只丢块、不建/不标记；为避免把整个回忆块清空，最后 1 条无论多大都会保留）。
+
+**不会被归档的对象**：
+
+- system prompt 本身 —— 回忆块是 system-prompt section（role=system，pinned 在 head），
+  **普通归档的候选前缀只由真实对话组成，不会把 system 节点当作归档对象**；但若按用户回合
+  对齐后的 surface 替换区间恰好跨过中间的历史 system 节点（`surface` 第 0 个节点受 host
+  保护、永不替换，其余历史 system 节点 host 允许被 shadow），它们会随该区间一起离开模型可见
+  上下文。**再归档规则**则专门处理回忆块：从注入块移除并置 `rescorePending`（不新建 folder）；
+- compaction checkpoint 的 `[memory]` 归档说明（`source.kind=compact-checkpoint`）；
+- 宿主合成的 user 上下文（runtime-context / skill-catalog / … 等非真实用户来源）；
+- 默认子代理会话（`applyToSubagents=false`；打开后按同一规则处理其真实对话）。
+
+**另外**：同一段对话不会归档两次（归档后它已不在 surface 的可移除前缀里，且
+`commitCompression` 对同 id 同内容幂等跳过）；再归档也不会重复建 folder（每条回忆只有一个
+folder）；`storage.maxFolders` 达到上限时**整次归档被拒绝**（不部分写入、不替换上下文）。
+
+**结论**：回忆块**不会以“再生成新 folder”的方式被重复归档**；本次修订把它改为“从模型可见
+上下文移除 + 只复核 α/β（`rescorePending`）”，folder 数量不增加、内容不重复。产生新 folder
+的来源仍然是真实对话的可移除前缀。
+
+### 13.5 本次变更的残余风险
+
+- **待评分流程依赖模型主动调用工具**：模型不调用时，新归档会一直 pending、不可回忆
+  （任务区块会持续列出，模型有机会补）；这是“α/β 必须结合当前语境”的直接代价，内容本身
+  已安全落盘；若 Harness 没有 `tools` 服务，插件会停用自动归档（避免产生永远无法被回忆的
+  记忆），并记录警告；
+- 再归档只发生在 pass 0；若对应 memory folder 已被手动删除，回忆仍会从注入块移除
+  （已无法从磁盘回忆），只记录 warning；剩余份额的普通归档与 emergency pass 逻辑保持原样；
+- v2 快照会随注入的回忆量增长（`block` 全文 + `messages` 原文），受
+  `recall.maxRecalledChars` 硬上限约束；再归档会同步收缩快照；
+- β 是元信息：模型给出的 β 只影响阅读模型的采信建议，**不会**改变回忆概率或名额；
+  β 的提示词质量属于效果问题，不是正确性问题；
+- 归档仍依赖 DSH compaction checkpoint 事件格式；若未来 DSH 修改该格式，适配层需要跟进。
+
+## 14. 开源前代码 / 测试审计（2026-10-25）
+
+独立审计分三条并行通道：`engine/` + `tools/`、DSH 适配层（`lib/`）、测试套件与
+mock 保真度。所有修复都必须先复现、再补回归测试、最后做最小修改；版本号保持
+`1.0.0`，不新开版本。
+
+### 14.1 修复的缺陷
+
+| 级别 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2（安全） | `engine/config.js` `deepMerge`/`cloneConfig` | 配置 JSON 的 `"__proto__"` 键被丢弃并替换合并结果的原型（原型污染；违反 SPEC §2 “未知键保留”） | 用 `Object.defineProperty` 写入 `__proto__` 自有属性；嵌套键同样安全 |
+| P2（安全） | `lib/config-store.js` `deepMerge`/`clone` | 同上（适配层自己的 merge 实现，配置文件 → 实时配置路径） | 同样的 own-property 写入；新增 `test-adapter/audit-host.test.mjs` |
+| P3 | `engine/importance.js` | 长生命周期 `cfg.warnings` 每次 `computeImportance` 重复 push 同一条高 α 警告，无界增长 | 去重后再 push |
+| P3 | `engine/compress.js` | 单条超大消息按 `targetChunkChars` 切片时可能切断 UTF-16 代理对（emoji/扩展汉字变乱码） | 切片落在高代理项时补上低代理项 |
+| P3 | `engine/cli.mjs` | 缺值 flag（`--seed`/`--dir`/…）静默变成 `true` 并退出 0；`--seed abc` 被忽略 | 仅 `--json` 为布尔 flag，其余缺值抛 `CliError`；`--seed` 校验为 `[0, 2^32-1]` 整数 |
+| P3 | `engine/cli.mjs` | CLI 忽略 `compress.contextWindowTokens`（SPEC §2 文档为 CLI 回退） | 窗口优先级：conversation JSON 宿主值 → 配置值回退；同步注释与 SPEC |
+| P3 | `tools/show-recall.mjs` | `--session --json` 把 `--json` 当作 session id | 选项值以 `--` 开头视为缺值 |
+| P3 | `tools/show-recall.mjs` | 损坏的 index / stats 行 / context / recall-state / config / 旧版根 index 直接抛原始堆栈 | 只读降级：index 用 `scanFolderMetas` 内存重建、逐行跳过坏遥测、单个损坏 folder 标记 `corrupt`、容错读 config/recall-state |
+| P3 | `tools/recall-report.mjs` | JSON `null` 的 β 经 `Number(null)` 变成 0 计入 `betaStats`（文档要求忽略非数值） | 仅接受 `typeof === 'number'` 的 β |
+
+### 14.2 新增 / 加固的测试
+
+- `test/audit-engine.test.mjs`（11）：上述 engine/tools 缺陷的 test-first 回归；
+- `test/audit-tests-cli-tools.test.mjs`（10）：SPEC §7 公共 API 面、§8 `--seed` 确定性、
+  §9 `betaStats`/`workStats` 与 `show-recall` 的 JSON/文本/缺目录/列表模式；
+- `test/audit-tests-engine-robustness.test.mjs`（6）：畸形 index（`[]`/`null`/字符串/无 folders）、
+  损坏 context、重复 id、空/超长输入、`estimateTokens` 公式与 emoji、关键词边界；
+- `test-adapter/audit-tests-real-api-conformance.test.mjs`（5）：严格真实 Session 克隆
+  （`surfaceOp`、`sourceEventSeqs`、node-0 保护、已知事件词汇）、合法 compaction 括号与
+  token-meter shadow 字段、`memory_judge` ToolDefinition + `output.render`、pre-step
+  `startsRequestSeries` 一次性、恶意 session id 不能逃出 `memory/sessions/`；
+- `test-adapter/audit-host.test.mjs`（3）：适配层 `deepMerge`/`ConfigStore` 原型污染回归；
+- 既有测试加固：删除恒真断言（`test/engine.test.mjs`）、工具对测试补“确实发生压缩”的正控制
+  （`test-adapter/plugin-mock.test.mjs`）、空数组 `every()` 前补非空断言（`test/recall.test.mjs`）。
+
+### 14.3 最终验证数字
+
+- `node --test test/*.test.mjs` → **119/119 pass**；
+- `node --test test-adapter/*.test.mjs` → **53/53 pass**；
+- `npm test`（`node --test`，含 `test/simulate.mjs`）→ **173/173 pass**；
+- `node test/simulate.mjs`、`node engine/cli.mjs --help`、`node tools/recall-report.mjs --help`、
+  `node tools/show-recall.mjs --json` 均 exit 0；版本保持 `1.0.0`；
+- 发布包（`npm pack --dry-run`）不含任何运行时 `memory/` 数据。
+
+### 14.4 审计结论与残余风险
+
+- 三条通道都做了“先复现再修复”；没有未复现的修复。适配层（`lib/`）未发现已证实的功能缺陷，
+  只加固了与 engine 同类的原型污染 sink。
+- 未覆盖/无法在 CI 覆盖：真实 DSH 宿主启动（契约以从 `app.asar` 提取的真实源码 + 严格
+  Session 克隆验证）；`show-recall --live` 的 zstd 会话日志路径；真实 tokenMeter 的
+  usage-pricing fold；`systemPrompt` section 的 `context.agent` 运行时约定（公开 d.ts 只声明
+  `scope`/`signal`）。以上属于发布说明中应保留的诚实边界。
+- 已清扫：无个人路径 / 用户名 / 真实 session id / 密钥；`memory/` 只保留 `.gitkeep`；
+  Node 版本要求统一为 `>=20`（与 CI 矩阵一致）；文档中的测试数字与命令已同步。
+
+### 14.5 已知文档 / 实现措辞差异（本次未改行为，仅记录）
+
+- SPEC §5.4 只写“尾部小块并入前一块”，实现还会把开头小错块前移、超大消息拆分产生的
+  中间小片段可能独立成块；
+- SPEC §4 写 `computeImportance()` 返回 `{alpha, signals}`，实际还返回 `warnings`（正文有提）；
+- SPEC §2 “percentages clamped to (0,100]” 与实现“非法值替换为默认值 + warning”措辞可再收紧；
+- `storage.indexFile`/`statsFile` 接受 `../` 相对路径 —— 无权限边界（`storage.dir` 本就允许绝对路径），
+  仅建议只在手工配置中这样用。
+
+## 15. 1.1.0：任务区块增强（2026-10-26）
+
+### 15.1 变更
+
+- **复核条目（`rescorePending`）显示完整原文与上次评分理由**：`dsh-rofm:memory-tasks`
+  区块里每条待复核记忆现在形如：
+  ```text
+  1. id=mem-… · 标题=… · 现有 α=0.70 β=+4.0 · 关键词=星港、灰度
+     上次评分理由：用户当时确认这是玩笑
+     原文：
+     user: …
+     assistant: …
+  ```
+  `上次评分理由` 来自 `meta.judgeReason`（无记录时显示 `（无记录）`）；`原文` 是该
+  folder 的**完整原文**（`memoryFolderReview()` 按 `messageToText` 渲染 role 前缀，
+  不截断），原文不可读时保留该条并标记 `（原文为空或不可读）`。
+- **列表上限 6/6 → 12/12**：每轮最多列 12 条待评分新归档 + 12 条待复核；评分口径
+  新增一条复核说明。
+- 版本号 `package.json` / `engine/package.json` = **1.1.0**；`memory_judge` schema
+  未变，任务区块只是追加信息（向后兼容）。
+
+### 15.2 验证（本机真实运行）
+
+- `node --test test/*.test.mjs` → **119/119 pass**；
+- `node --test test-adapter/*.test.mjs` → **54/54 pass**；
+- `npm test`（= `node --test`，含 `test/simulate.mjs`）→ **174/174 pass**；
+- 新增/更新用例：
+  - `memory-tasks section caps each list at 12 entries`：14 个待评分 + 14 个待复核
+    fixture，断言两个列表各只列 12 条；
+  - `re-review entries quote the full original text and the last judge reason`：
+    原文尾部标记（位于 160 字摘要窗口之外）可见、`上次评分理由：用户当时确认这是玩笑`
+    可见、损坏 `context.json` 的 folder 显示 `（原文为空或不可读）` 且工具不崩溃；
+- `node test/simulate.mjs`、`node engine/cli.mjs --help`、`node tools/recall-report.mjs --help`、
+  `node tools/show-recall.mjs --json` 均 exit 0。
+
+### 15.3 注意
+
+- 复核条目显示完整原文会让任务区块变长（每条约为一个 folder 的原文；folder 目标约
+  `compress.targetChunkChars` 默认 1200 字，超大消息按块切分）。12 条时请预留相应
+  上下文空间；如需要可在后续版本加一个可配置的原文显示上限。
+
+## 16. v1.2：用户改进与最终形态（2026-10-26 起；注入位置 2026-10-27 回退）
+
+> 本插件在 v1.2 期间试验过“回忆块 = 系统提示词之后的第一条历史消息”，随后按用户要求**回退**到
+> 系统提示词 section；早期试验形态曾因漏写 message `id` 使部分会话日志无法加载，已提供
+> `tools/repair-session-log.mjs` 修复。下面是最终形态的验证清单。
+
+### 16.1 变更清单与验证点
+
+1. **α 用户喜好**
+   - 行为：`memory_judge` description / `alpha` 参数说明 / “记忆评分任务” α 口径三处都包含
+     “用户明确表达的喜好/厌恶/习惯/长期偏好 → 高 α”条款（逐字见 SPEC §4.2、README §1.2）。
+   - 验证：`node --test test-adapter/scoring-rubric.test.mjs`（3/3）与 plugin-mock 的
+     “memory-tasks section lists pending folders … and the rubric”。
+2. **句子完整性拆分**
+   - 行为：超长消息只在句末/换行切分，跨目标句子整体移动，文件夹可 > `targetChunkChars`；
+     拼接与原文逐字一致、不拆代理对。
+   - 验证：`node --test test/compress.test.mjs`（25/25）。
+3. **回忆块注入位置（回退）**
+   - 行为：恢复为 `dsh-rofm:recall` system prompt section（order 100）；注入/恢复/再归档设置
+     `forceNewSeries`，`onPreStep` 返回 `startsRequestSeries: true` 触发头节点重写；
+     不再写任何 `rofm-recall` 历史消息。
+   - 验证：`plugin-mock` 的 “start() registers … two prompt sections” 与
+     “recall … before thinking”（断言 `startsRequestSeries` 一次为 true、下一 step 为 undefined）；
+     `audit-tests-real-api-conformance` 的 pre-step 用例同样断言 true/undefined。
+   - 真实侧：请求的 system prompt 里能看到 `## 记忆回忆（按创建时间从早到晚）` 区块；
+     会话日志不应新增 `rofm-recall` 的 user/message。
+4. **图片文件夹 + 路径提示**
+   - 行为：归档时图片块 → `[图片：（name）]` + `<session>/images/<name>` + `meta.images` +
+     `images/index.json`；回忆块与 `memory_recall` 文本把占位符展开成**绝对路径**
+     （文件丢失标 `（缺失）`），不再重新上传附件。
+   - 验证：`node --test test/images.test.mjs`（含 `injectImagePaths`/索引用例）与 plugin-mock 的
+     “I4: archived images are stored as files, shown by path in the recall block, and findable
+     via memory_image”（断言文件字节、`meta.images`、索引、块内路径、工具返回路径）。
+   - 真实侧：归档后 `ls memory/sessions/<id>/images/` 可见文件；回忆块中应出现
+     `[图片：（…，文件：<绝对路径>）]`；用 `read_image` 读该路径可查看。
+5. **`memory_recall` 工具**
+   - 行为：关键词主动回忆 + 连续未命中 3 次提醒 / 6 次停用到下一轮；结果含 α/β/关键词/原文，
+     图片以文件路径列出；不触碰注入块。
+   - 验证：`node --test test-adapter/recall-tool.test.mjs`（图片路径过滤/展开、3/6 升级）
+     与 plugin-mock 的 “I5: memory_recall recalls by keyword and escalates…”。
+6. **`memory_image` 工具**
+   - 行为：只读查找归档图片；按 query（记忆关键词/标题/文件名）、memoryId（记忆文件夹 id）、
+     name（文件名子串）过滤，返回绝对路径/存在性/元数据/所属记忆；无过滤返回最近归档。
+   - 验证：`node --test test-adapter/image-tool.test.mjs`（25/25，覆盖过滤/排序/limit/空态/
+     禁用的会话/渲染），以及 plugin-mock I4 里的端到端查找与渲染。
+7. **fallback 渲染一致性**
+   - 行为：`renderRecallBlockFallback()` 导出；引擎渲染失败时才使用；两者逐字节相同。
+   - 验证：`node --test test-adapter/recall-render.test.mjs`（3/3）。
+8. **pinned 合并（v1.2 I7；v1.2 R4 已收紧，见 §17）**
+   - 行为（v1.2）：压缩替换区间里的 pinned 节点原文并入 checkpoint 归档说明；不变成回忆文件夹；
+     说明仍需小于被替换内容，否则跳过压缩。**v1.2 起**只有
+     `subagent-settled`/`subagent-error-details`/`tool-jobs`/`user-approval` 等一次性通知
+     写入注记附录；runtime-context/time-context/skill-catalog/in-history system 副本
+     **不再写入**（宿主会重新注入，静默 shadow、不变成文件夹）。
+   - 验证：plugin-mock 的 I7 用例已按 v1.2 R4 更新（附录只含一次性通知、遥测
+     `pinnedRecorded`/`pinnedShadowed` 正确、重新注入类内容不出现）。
+9. **会话日志修复工具**
+   - 行为：只给缺 message `id` 的日志事件补 uuid（不猜 role/source/content），
+     支持 `--dry-run`，默认写 `.bak-<时间戳>`，多帧 zstd 原样重编码。
+   - 验证：`node --test test/repair-session-log.test.mjs`（6/6，含 plain 与多帧 zstd 往返）。
+
+### 16.2 本次运行结果（v1.2 当时，本机真实执行；v1.2 数字见 §17）
+
+- `node --test test/*.test.mjs` → **168/168 pass**
+- `node --test test-adapter/*.test.mjs` → **110/110 pass**
+- `npm test`（= `node --test`，含 `test/simulate.mjs`）→ **279/279 pass**
+- `node test/simulate.mjs`、`node engine/cli.mjs --help`、`node tools/recall-report.mjs --help`、
+  `node tools/show-recall.mjs --json`、`node tools/repair-session-log.mjs --help` 均 exit 0
+- `node --check`（lib/*.js）通过；`git diff --check` 干净
+
+### 16.3 兼容性与已知限制
+
+- `config.json` 无新增键；旧配置、旧 `memory/` 文件夹（无 `meta.images`）、旧 v1/v2
+  `recall-state.json` 均兼容（无 `images` 的文件夹行为与 1.1.0 完全一致）。
+- 没有 `ctx.attachments` 服务的宿主上，归档图片只保留占位文本；回忆/找图仍可用（路径标记缺失）。
+- 回忆块回到系统提示词后，任何回忆变化都会让宿主重写头节点（`startsRequestSeries`），
+  会失效整段前缀缓存；这是 v1.1 既有行为，不是本次新增。
+- v1.2 早期试验写入的无 `id` `rofm-recall` 消息不会自动消失；用
+  `tools/repair-session-log.mjs`（先 `--dry-run`）修复后重启 DSH。
+- `tools/show-recall.mjs` / `tools/recall-report.mjs` 只展示图片数量/索引信息，不展示图片内容。
+- `memory_judge` 成功改动任务列表后触发 `startsRequestSeries` 头节点重写，避免每轮评分追加整份系统提示词。
+- `记忆评分任务` 每轮上限：v1.2 期间为 50+50 条（2026-10-27 起；此前各 12 条），
+  **v1.2 起为 100+100 条（见 §17，R1）**。待复核条目带完整原文与上次评分理由，
+  100 条时区块会明显变长；待评分 100 条约增加上万字符，提交评分后会立即缩短。
+- 真实宿主（desktop profile）需要重载插件后才会运行新代码；v1.2 早期历史消息形态的会话在回退后
+  不会自动迁移，如需清理用上面的修复工具。
+
+## 17. v1.2.0：R1–R5（2026-10-28）
+
+> 本节是 v1.2.0 的**当前行为**验证记录。§1 的测试数字已同步到本次运行；
+> 历史小节（§1–§16）里凡是与本节冲突的，以本节为准。
+
+### 17.1 变更与验证点
+
+1. **R1 上限（500 / 100+100）**
+   - 行为：`compress.maxFoldersPerRun` 默认 **500**（`engine/config.js` `DEFAULT_CONFIG`
+     与随包 `config.json` 同步，`storage.maxFolders` 仍 10000）；「记忆评分任务」区块
+     每轮最多列 **100 条待评分 + 100 条待复核**（`lib/plugin.js` `TASKS_LIST_LIMIT = 100`，
+     已导出）。代价：待复核条目每条带完整原文与上次评分理由，满额时区块可能增加数万字符。
+   - 验证：`test/engine.test.mjs` / `test/audit-engine.test.mjs` 断言默认值 500；
+     `test-adapter/plugin-mock.test.mjs` 的 “memory-tasks section caps each list at 100
+     entries”（100+100 夹具只列前 100 条）；`tools/selfcheck.mjs` config/engine 两项
+     独立断言 500 与标题唯一性冒烟。
+2. **R2 标题规则**
+   - 行为：优先取 chunk 内第一条内容非空的用户消息；从回合中间开始的 chunk 在本次归档的
+     移除区间里向前继承最近一条用户消息；否则 chunk 首条消息；仍为空则 `第N段对话`；
+     最多 24 个 Unicode 码点；同一归档内重复标题加全角 `（<folder 序号>）`，唯一标题不变。
+   - 验证：`test/compress.test.mjs` 新增 4 个 R2 用例（中途继承 / 重复编号且唯一标题不变 /
+     无用户文本回退 / 既有标题用例保持通过）。
+3. **R3 checkpoint 注记合并**
+   - 行为：每次归档把替换区间前方本插件旧注记合并为**一条**，N 累加为**累计归档段数**，
+     旧注记文本（含附录）丢弃；`buildArchiveNote(plan,{totalSegments})` 支持累计 N
+     （不传时输出与旧版逐字节相同）；新增 `parseArchiveNote()`（锚定开头、兼容带/不带关键词、
+     容忍附录）；外来 checkpoint 不合并/不改写并阻止区间继续向前扩张；遥测新增
+     `mergedCheckpoints` / `archiveSegments`。
+   - 验证：`test/compress.test.mjs`（build/parse 用例，含外来文本返回 null 与附录容忍）；
+     `test-adapter/plugin-mock.test.mjs` 的 R3 用例（旧注记合并、旧附录丢弃、外来 checkpoint
+     终止合并且保持原样、两次真实归档端到端后 surface 只剩一条注记且 N 累计）。
+   - 真实数据解析回放：本机 `~/.dsh/sessions` 下 109 份会话日志中，共 24 条
+     `compaction/summary` 事件；其中 **23 条是本插件注记，23/23 全部被 `parseArchiveNote`
+     正确解析**（含 2 条带 pinned 附录），另 1 条是其它压缩器写的 summary，被正确判定为
+     外来 checkpoint（`parseArchiveNote` 返回 `null`，不参与合并/统计）。
+4. **R4 pinned 记录策略**
+   - 行为：宿主每轮重新注入的 pinned 内容（runtime-context / time-context / skill-catalog /
+     in-history `system/message`、`developer/message` 副本 / 遗留 `rofm-recall`）**不写入注记**、
+     静默 shadow、永不变成回忆文件夹；`subagent-settled` / `subagent-error-details` /
+     `tool-jobs` / `user-approval` 只记录**本次归档事务 shadow 到**的；未知来源按记录处理；
+     外来 checkpoint 不合并/不改写。附录固定标记改为
+     `[memory] 本次归档区间内还有 N 条非对话上下文（子代理/后台任务/审批等一次性通知，宿主不会重新注入），已并入本说明以免丢失：`。
+   - 验证：`test-adapter/plugin-mock.test.mjs` 的 R4 用例（重新注入类 pinned 不出现于注记、
+     四类一次性通知只来自本次事务、附录标记文本、`pinnedRecorded` 遥测）；
+     `lib/surface.js` 的 `classifyPinnedMessage` / `shouldRecordPinned` 为纯函数，
+     由上述用例覆盖。
+5. **R5 自检工具**
+   - 行为：新增 `tools/selfcheck.mjs`（零依赖、不 import `lib/plugin.js`）与 npm script
+     `selfcheck`；检查 config / engine 默认值 + `planCompression` 冒烟 / memory store /
+     recall state / 会话日志注记（zstd 解帧重放 `surfaceOp`）/ 可选 `node --test`；
+     每项 PASS / WARN / FAIL，**有 FAIL 才退出 1**。
+   - 验证：`test/selfcheck.test.mjs`（13 个用例，黑盒 spawn 工具，覆盖 `--json`、
+    `--memory-dir`/`--sessions-dir`、退出码与 PASS/WARN/FAIL 判定）。
+   - 真实数据运行（本机）：默认 4 passed / 1 warnings / 0 failed，退出码 0；
+     WARN 是**旧版本遗留**（session-f908562e 的最终 surface 上仍有 2 条 v1.2 之前的注记、
+     旧注记附录里含重新注入类内容），按设计只报 WARN、不算 FAIL。
+     `--with-tests` 时 5 passed / 1 warnings / 0 failed，测试套件项输出
+     `node --test passed (302 passed, 0 failed)`。
+
+### 17.2 本次运行结果（本机真实执行）
+
+```bash
+# 引擎（含 tools/selfcheck.mjs 的测试）：188/188 pass
+"$NODE" --test test/*.test.mjs
+# 适配层：113/113 pass
+"$NODE" --test test-adapter/*.test.mjs
+# 全部（引擎 + 适配层 + test/simulate.mjs）：302/302 pass
+"$NODE" --test
+
+# 自检工具（真实 memory/ 与历史会话日志）
+"$NODE" tools/selfcheck.mjs
+#   [PASS] config / engine / memory store / recall state
+#   [WARN] session logs — 3 legacy warning(s)（旧版遗留）
+#   selfcheck: 4 passed, 1 warnings, 0 failed   (exit 0)
+"$NODE" tools/selfcheck.mjs --with-tests
+#   [PASS] test suite — node --test passed (302 passed, 0 failed)
+#   selfcheck: 5 passed, 1 warnings, 0 failed   (exit 0)
+
+"$NODE" test/simulate.mjs
+"$NODE" engine/cli.mjs --help
+"$NODE" tools/recall-report.mjs --help
+"$NODE" tools/show-recall.mjs --json
+"$NODE" tools/repair-session-log.mjs --help
+# 均 exit 0
+```
+
+### 17.3 兼容性与已知限制（v1.2）
+
+- `config.json` **无新增键**；旧配置、旧记忆文件夹（无 `meta.images`/旧 note 格式）、
+  旧 v1/v2 `recall-state.json`、旧会话日志均向后兼容。
+- **旧版本遗留的多条注记不会被自动改写**：v1.2 只在新的归档发生时把旧注记自然合并；
+  历史会话里已有的多条 `[memory]` 注记/含重新注入内容的旧附录保持原样
+  （`tools/selfcheck.mjs` 报 WARN 而非 FAIL）。新会话/新归档会收敛到一条累计注记。
+- **注记合并只在向后扩张安全时发生**：遇到外来 checkpoint、未知 pinned 或真实对话节点就停止，
+  因此不是“每次都会合并”；没有旧注记可合时 N 仍是本次 folder 数（行为与旧版一致）。
+- **任务区块变大**：100+100 上限下，满额待复核（每条完整原文+上次评分理由）可能给每轮
+  上下文增加数万字符；提交评分后会立刻缩短，建议一次多提交几条。
+- 标题去重只作用于**同一次归档**；不同归档之间的同名标题不会互相加序号。
+
+## 18. v1.2.1 补丁：高 α 警告真正落地（2026-10-28）
+
+> 本节是 1.2.1 的验证记录；当时的测试数字为 **304/304**（v1.3.0 的当前数字见 §19）。
+
+### 18.1 修复内容
+
+- 引擎 `importance.warnAbove` 警告此前只进 `plan.warnings`，DSH 适配层从不写日志/遥测 →
+  `lib/plugin.js compressOnce()` 现在把 plan 中的新警告（排除启动时已打印的配置警告）以
+  `archive: …` 写入宿主日志，并把 `warnings` 数组写进 `compress-applied` 遥测；
+- `memory_judge` 提交 α > `importance.warnAbove`（默认 0.8）时**仍按提交值生效**（不是上限），
+  但返回值新增 `warnings: string[]`，render 后模型看到「注意：α=… 超过 importance.warnAbove=…」提醒；
+- README/SPEC 修正 `α > warnAbove` 的表述（补默认值 0.8 与警告可见位置：插件日志 /
+  `compress-applied.warnings` / `memory_judge` 返回值）。
+
+### 18.2 验证结果
+
+- `node --test` → **304/304**（引擎 188 + 适配层 115 + simulate 1）；
+- 新增用例：`memory_judge` 对 α=0.95 返回提醒且 α 保留 0.95、α=0.5 无提醒；归档时引擎警告
+  出现在宿主日志与 `compress-applied.warnings`；
+- `node tools/selfcheck.mjs` → 5 passed / 0 failed；
+- CI：Node 20/22/24 × Ubuntu/Windows 全绿。
+
+## 19. v1.3.0：跨平台验证（Windows / Linux / macOS，2026-10-31）
+
+> 本节是 v1.3.0 的跨平台验证记录。最终数字：`node --test` = **493 用例（491 pass + 2 skip、0 fail）**；
+> CI 矩阵是最终的跨平台闸门。
+>
+> 结论先说：**Windows 在本机做了真机回归；Linux/macOS 的结论来自 CI 矩阵 +
+> 静态审计 + 可在任意平台模拟的路径规则测试**（本机没有 macOS/Linux 开发机，
+> 不把它写成“已真机验证”）。
+
+### 19.1 静态审计项与处置
+
+审计范围：`.github/workflows/ci.yml`、`README.md`、`CONTRIBUTING.md`、`docs/PUBLISHING.md`、
+`docs/VERIFICATION.md`、`docs/SPEC.md`、`package.json` scripts，以及会碰到平台差异的
+`lib/`、`engine/`、`tools/`、`test/` 代码（只读审计；修复按各自改动范围执行）。
+
+| # | 平台假设 / 问题（证据） | 处置 |
+|---|---|---|
+| A1 | CI 只有 `ubuntu-latest, windows-latest`（`ci.yml` L19），**没有 macOS** | OS 矩阵改为 `ubuntu-latest / windows-latest / macos-latest` × Node `20/22/24`（9 组合，`fail-fast: false`） |
+| A2 | CI 没有打印平台/Node 的步骤，矩阵红点难归因 | 新增 `Platform info`：`node -p "process.platform + '/' + process.arch + ' node ' + process.version"` |
+| A3 | README 的 Windows 安装示例被**双重转义**（`C:\\\\Users\\\\…`，markdown 渲染出多余反斜杠） | 改为 `C:\Users\<you>\plugins\dsh-rofm`（并注明 JSON 传参时反斜杠要写 `\\`） |
+| A4 | README 只有 POSIX 占位符 `/path/to/dsh-rofm`，无 `~/plugins/dsh-rofm`、`/Users/...` 示例 | 新增三平台安装示例与逻辑（§2.4）；`target` 说明为“展开后的绝对路径” |
+| A5 | README/CONTRIBUTING/PUBLISHING 多处只提 Linux/Windows 或只写 Git Bash | 统一改为 Windows/Linux/macOS；补 PowerShell 不展开 `*`、bash/zsh 用法、CI 矩阵说明 |
+| A6 | 文档没有 macOS 大小写不敏感文件系统、Linux 权限、NFD 文件名、符号链接记忆目录的说明 | README §2.4「macOS / Linux 注意事项」+ SPEC §11 补契约；`test/portability.test.mjs` 用测试钉住 |
+| A7 | `storage.dir` / `compat.mediaRoots` 不支持 `~`，一份配置无法跨机器复用 | 新增 `lib/paths.js`（`expandHomePath`/`isHomeRelativePath`，仅裸 `~` 与 `~/`/`~\`；`~user` **不**展开），`lib/config-store.js` 的 `resolveStorageDir` 与 `lib/compat.js` 的 `normalizeCompatConfig` 接入（v1.3.0） |
+| A8 | 媒体白名单的路径规则只能用宿主 OS 验证 | `lib/qq-media.js` 的 `validateMediaPath` 支持注入 `platform` / `pathImpl`：Windows 忽略大小写且 `\`/`/` 等价、Linux 大小写敏感、macOS 由 `realpath` 归一化；`test/portability.test.mjs` 覆盖三套规则 |
+| A9 | `tools/repair-session-log.mjs` 用 `new URL('file://' + path.resolve(...))` 做主模块检测：路径含 `#`/空格/中文、或经符号链接调用时静默不执行 | 抽出 `tools/main-module.mjs`（`pathToFileURL`/`fileURLToPath` + `canonicalScriptPath` 解符号链接；`win32`/`darwin` 忽略大小写），`selfcheck.mjs` 同步使用 |
+| A10 | `tools/selfcheck.mjs` 的 `--json` / 人读输出没有平台信息，跨平台排障困难 | `--json` 增加 `platform: { os, arch, node }`，人读汇总增加 `platform: <os> <arch>, node <version>` 行 |
+| A11 | 写盘文件换行未验证（Windows 上可能写出 CRLF，跨平台 diff 噪音） | `test/portability.test.mjs` 断言 `stats.jsonl` / `meta.json` / `context.json` / `images/index.json` / staging `index.json` **只有 LF**；`.gitattributes` 固定源码 LF |
+| A12 | 记忆目录经符号链接/junction 访问（macOS `/var → /private/var`、外置盘）未验证 | `test/portability.test.mjs` 端到端覆盖：图片、引擎 folder、stats、staging 全部写穿到真实目录 |
+| A13 | 含空格 / 中文 / `#` 的路径未验证 | `test/portability.test.mjs` 覆盖 config `storage.dir`、图片、folder、stats 的完整读写 |
+| A14 | 文档里写死的测试数字（304/429/456 等）会随版本漂移 | README / PUBLISHING / VERIFICATION 改为「以 `npm test` 实测为准」并记录 v1.3.0 实测值（493 = 491 pass + 2 skip）；SPEC §10 改为指向本节 |
+| A15 | `node:zlib` 的 zstd 只有 Node ≥ 22.15 才有，Node 20 矩阵格上相关用例会失败 | 相关用例按能力检测 `test.skip`（`repair-session-log.test.mjs` / `selfcheck.test.mjs`），CI 三 OS 都绿 |
+| A16 | Windows 用户无符号链接权限时 symlink 用例会红 | 用例用 `t.skip(原因)` 跳过（本机实测 2 个）；Linux/macOS CI 上真实执行 |
+
+### 19.2 CI 矩阵（9 个组合）
+
+```yaml
+os: [ubuntu-latest, windows-latest, macos-latest]
+node: [20, 22, 24]
+```
+
+每个组合都跑完整 5 步（全部 `shell: bash`，macOS 自带 bash 3.2 兼容）：
+
+1. `node --test test/*.test.mjs`（引擎）
+2. `node --test test-adapter/*.test.mjs`（DSH 适配层）
+3. `node test/simulate.mjs`（端到端模拟）
+4. `node engine/cli.mjs --help`（CLI 冒烟）
+5. `node tools/selfcheck.mjs`（自检；runner 上没有会话日志 → WARN + exit 0，三 OS 一致）
+
+> 本机无法运行 GitHub Actions，**首次三 OS 运行结果以合并后的 Actions 页面为准**；
+> 配置本身已用 YAML 解析器校验（`js-yaml` 解析通过：matrix/os/node、`shell: bash`、
+> `Platform info` 与 5 个步骤齐全，且 workflow 内无 PowerShell/反斜杠路径等 Windows-only 构造）。
+
+### 19.3 本机 Windows 回归（真机）
+
+- 环境：Windows 11（`win32/x64`）、Node `v24.21.0`（DSH runtime 自带）；
+- 命令与结果（v1.3.0 发布前最终运行）：
+  - `node --test` → **tests 483 / pass 481 / fail 0 / skipped 2**（分项：`test/` 350 = 348 pass + 2 skip；
+    `test-adapter/` 132 全 pass；`test/simulate.mjs` 计入 1）；
+  - `node test/simulate.mjs` → exit 0（`context added back 11.98 %`）；
+  - `node tools/selfcheck.mjs` → **7 passed, 0 warnings, 0 failed**（本机检测到已安装的 `dsh-onebot-qq`，
+    因此带 3 条 compat PASS 行；平台行 `platform: win32 x64, node 24.21.0`）；
+  - `node engine/cli.mjs --help` → exit 0；
+  - `node --test test/portability.test.mjs` → **12/12**（静态 case-exact import / 零依赖 /
+    file-url 与内联 platform 分支检查 / package 入口大小写 / `~` 展开 / POSIX-Windows-macOS
+    三套 mediaRoot 规则 / 符号链接记忆目录 / 空格-CJK-`#` 路径 / LF-only）。
+- 已知 skip（不影响退出码）：2 个 symlink 用例（当前 Windows 用户无符号链接权限）。
+
+### 19.4 macOS / Linux 的结论来源（诚实说明）
+
+本机没有 macOS/Linux 开发机，因此不把这两平台写成“真机验证”。结论来自：
+
+1. **CI 矩阵**：合并后每次 push/PR 在两个平台 × Node 20/22/24 上真实执行（最终闸门）；
+2. **静态审计**：逐文件检查路径分隔符/盘符、`file://` 构造、`~` 展开、`realpath`/符号链接、
+   大小写、换行、`readdir`/locale、`process.platform` 分支（A1–A16）；
+3. **可在 Windows 上模拟的规则测试**：`validateMediaPath` 注入 `path.posix` + `platform=linux/darwin`
+   验证 POSIX/macOS 包含规则；`expandHomePath` 注入 `path.posix`/`path.win32`；
+   case-exact import 检查（Windows 本机会“碰巧通过”的大小写错误在 Linux 上会失败）。
+
+macOS 专项处理：APFS 大小写不敏感由 **`realpath` 归一化**吸收（返回磁盘真实拼写，两侧比较一致）；
+`/tmp → /private/tmp`、`/var → /private/var` 这类符号链接根目录不会误拒；记忆目录可以是
+符号链接/junction。Linux 专项处理：路径**大小写敏感**（`mediaRoots` 必须拼写一致）、
+数据目录需要运行用户可写（权限问题见 README §2.4）。
+
+### 19.5 残余风险
+
+- Linux/macOS **未做本机真机验证**（无开发机）：以 CI 首次三 OS 全绿为准；首次运行前不应宣称已跨平台验证；
+- Windows 上无符号链接权限的用户会跳过 2 个 symlink 用例（其余平台执行）；
+- `compat.mediaRoots` 的相对路径按**进程 cwd** 解析（v1.3.0 兼容行为）：文档已要求写绝对路径/`~/`；
+- macOS 上非 ASCII 文件名可能以 NFD 落盘（中文/重音字符）：插件按读到的真实路径工作，
+  但跨平台手工拷贝/改名可能产生重复项；
+- 内存/磁盘性能与 locale 无关，但 CI runner 与真实 DSH 桌面环境的性能差异仍可能存在。
+
+## 20. v1.4.0 验证记录（2026-11-01，历史留档）
+
+> **本节是 v1.4.0 发布时的验证记录（历史留档，数字已过时）**；当前版本 v1.4.3 的最终记录见 §24。
+> 环境：Windows 11、Node v24.21.0、DSH 自带运行时、
+> 仓库 `<repo>`；真实库 21 个 store / 3742 folders）。数字为 2026-11-01 收尾实测；
+> 一键门禁 `node tools/verify-1.4.0.mjs` 是最终可复现的发布口径（8 步全部 exit 0 才算 PASS）。
+> 所有对真实 `memory/` 的操作**只读**，写盘测试全部使用 `os.tmpdir()` 临时目录。
+>
+> **测试数（v1.4.0 最终版，含事件约束增补）**：`node --test` = **916 tests / 914 pass / 0 fail / 2 skip**
+> （2 skip = Node zstd 平台条件跳过，非缺陷；不是 Windows 符号链接用例；engine 层 622 / adapter 层 213）；
+> 另有 2 个 e2e 文件 **12 + 7 = 19 用例**全绿 → 一键门禁汇总 **935 / 933 pass / 0 fail**。
+
+### 20.1 门禁命令与实测结果（8 步全部 exit 0）
+
+| # | 命令 | 结果（实测） | 耗时 |
+|---|---|---|---|
+| 1 | `node --test`（全量，= verify 第 1 步） | **916 tests / 914 pass / 0 fail / 2 skip**（事件约束增补后，见 §21） | ~27 s |
+| 2 | `node test/simulate.mjs` | exit 0（`context added back 11.98 %`；legacy 路径，v1.3.0 回归口径） | ~0.3 s |
+| 3 | `node tools/selfcheck.mjs` | exit 0；检测到 QQ 插件 **11 passed / 1 warning / 0 failed**（12 条 check）；neutral profile **8 / 1 / 0**（9 条） | ~1–2 s |
+| 4 | `node engine/cli.mjs --help` | exit 0 | ~0.1 s |
+| 5 | `node tools/memory-audit.mjs --json` | exit 0（真实库只读；四套口径见 §20.5） | ~0.1 s |
+| 6 | `node tools/time-view.mjs --help` | exit 0（只读时间视图） | ~0.1 s |
+| 7 | `node --test test/e2e-adapter-simulate.test.mjs` | **12 tests / 12 pass / 0 fail**（v1.4.1；1.4.0 时为 8） | ~4 s |
+| 8 | `node --test test/e2e-real-data-readonly.test.mjs` | **8 tests / 8 pass / 0 fail**（v1.4.1 夹具版；1.4.0 时为 6） | ~2–8 s |
+| — | `node --test test/release.test.mjs test/config-consistency.test.mjs` | 30 / 30 pass（release 段存在性 + 配置/版本一致性） | <1 s |
+
+**一键门禁**：`node tools/verify-1.4.0.mjs`（= `npm run verify`）→ **8/8 PASS**，`RESULT: PASS`，exit 0。
+> 历史注记：本行在 1.4.0 收尾稿里曾把门禁汇总写成 `850 / 848 pass`（更早文案残留），
+> 与同节 916/935 的数字冲突；v1.4.1 起门禁只打印 **unique** 用例数与 summed 数（见 §22），
+> 不再出现该口径。
+`npm run check` 是等价展开：`node --test` + simulate + selfcheck + cli --help + memory-audit --json +
+time-view --help（不含 e2e，e2e 由 verify 覆盖）。CI 另在 Linux/Windows/macOS × Node 20/22/24 上跑矩阵
+（见 §19.2；v1.4.0 未改动 CI 结构）。
+
+v1.4.0 新增/扩展测试文件（当前用例数，`node --test <file>` 实测）：
+
+| 文件 | 用例 | 覆盖 |
+|---|---|---|
+| `test/recall-index.test.mjs` | 43 | σ、8 lane、寄存器 TTL、回收冷却、block 优先级裁剪/高α pin、G1–G5 属性、确定性重放、分页、重启续跑、序列化、性能 |
+| `test/time-index.test.mjs` | 64 | 时区/DST/闰年、日/月/年边界、跨日重叠、非法/未来/反向、最小 3 天/最大 366 天、阶梯、browse、旧数据回退、oracle fuzz、性能 |
+| `test/keyword-match.test.mjs` | 13 | 双向匹配无回归、phrase/title、可选扩展、确定性 |
+| `test/turn-protection-engine.test.mjs` | 18 | 当前回合保护/无切点拒绝、小窗口/窗口冲突、hard-limit、folder 上限、事件时间、commit 回滚/journal/幂等 |
+| `test/memory-audit.test.mjs` | 20 | 时代边界、四套口径、只读默认、`--apply` 作用域、真实库只读复现 |
+| `test/config-consistency.test.mjs` | 8 | `DEFAULT_CONFIG` == 随包 config == 文档关键值；两个 package 版本 == 1.4.0；CHANGELOG 段存在 |
+| `test/e2e-adapter-simulate.test.mjs` | 8 | fake host 全链路：720 消息长会话（240 turn × 3）归档→评分→召回、重启恢复、v3 持久化、8k/16k 窗口、任务预算 |
+| `test/e2e-real-data-readonly.test.mjs` | 6 | 真实库三工具一致（74.00% / 0.54% / 0/359）、零写入证明、真实 index 全覆盖、旧 recall-state v2 可读 |
+
+### 20.2 公平性验证（G1/G2/G3/G4/G5）
+
+- **确定性重放**：`determinism: 100 replays are identical; selection calls neither Math.random nor Date.now`
+  通过——100 次重放 pick 序列完全一致；源码级断言 `engine/recall-index.js` 不含 `Math.random`，
+  `Date.now` 仅出现在缓存时间戳（`cache bookkeeping`）。
+- **高α首轮必现**：`G1: rare-word high-α target is surfaced in the same round (>=20 seeds, 100%)` 通过——
+  ≥20 个随机种子全部当轮命中；`G1: ordinary-word high-α target delay <= ceil(rank_H / k_H)` 通过；
+  adapter 级 `G1: high-α memory is injected in the first fair round in every trial` 通过。
+- **低α显式引用**：`G2: explicit reference of a low-α unique word surfaces in the same round (100% over seeds)` 通过；
+  `G2: low-α rotation covers L=100 candidates within ceil(L/r)=50 rounds` 通过；
+  `G2: a_low >= r marks degraded (sticky) and warns` 通过（配额不足可观测，不丢记忆）。
+- **不丢弃 / 不重复 / 不饥饿**：
+  `G3: ledger never loses ids over 1000 rounds and picks never collide`、
+  `G3: block trim evicts low α first (60 low + 10 high, trim 4 => 4 low)`、
+  `G4: 300 rounds, consecutive injections of the same id are >= cooldown apart`、
+  `G5: 3 higher-α arrivals per round do not delay a rare high-α target`、
+  `queryBoost`/`recycle`/`register 2-round TTL` 用例全部通过。
+- **重启续跑**：`restart: serialized lanes + rebuilt index reproduce 60/60 picks` 通过；
+  adapter 级 `60 rounds of picks are identical across a plugin restart (recall-state v3 round-trip)` 通过。
+- **block 高α占比 ≥0.85**：v1.4.0 优先级裁剪保证“block 里同时有低α时绝不裁高α”（`G3` 用例断言
+  `G3: block trim evicts low α first (60 low + 10 high, trim 4 => 4 low)`）；设计阶段仿真
+  （`D:\workspace\output\rofm-recall-fairness\fairness-results.json`，非本轮重跑）的 FAIR-DRI block
+  高α占比为 **86–97%**（≥0.85 门槛满足），v1.3.0 legacy 约 **22%**；同一仿真里高α“被查询到即首轮可见”
+  FAIR-DRI **100%/100%**、legacy **13%/29%**、纯 DRI+sticky ledger **18–43%**（说明 sticky ledger
+  单独使用会把“block 被裁”变成永久遗忘，这正是 1.4.0 必须配查询重入/寄存器的原因）。
+- **adapter 级复现**：`G1: high-α memory is injected in the first fair round in every trial`、
+  `G4: an evicted memory is not re-injected before the recycle cooldown`、
+  `ledger cap: overflow evicts the least recently surfaced ids and WARNs once (G3)`、
+  `block trim uses engine priority order, not the createdAt FIFO` 全部通过。
+- **确定性（跨层）**：引擎 100 次重放一致（上）；adapter 级
+  `determinism: the same memory + the same session input replayed on fresh stores yields identical
+  recall ids` 通过；`restart: serialized lanes + rebuilt index reproduce 60/60 picks` 与
+  `60 rounds of picks are identical across a plugin restart (recall-state v3 round-trip)` 通过。
+- **遥测**：`fair recall writes lane telemetry and the adapter recall-block event` 通过（`lanesPicked`
+  七道齐全、`degraded`/`registerDrops` 可见；`recall-block` 事件记录 blockBefore/After/evicted/pinnedHigh/
+  round/lanesPicked）；`regression BUG-4: sum(lanesPicked) === picks.length` 通过。
+
+### 20.3 时间辅助验证
+
+- **63+ 用例全过**：`test/time-index.test.mjs` **64/64 pass**，覆盖：
+  `zonedDayStart: Asia/Shanghai midnights are 16:00Z`、`dayKey: the Shanghai day flips exactly at 16:00Z`；
+  DST `America/New_York` 春前/秋后日长 23h/25h、`addZonedDays` 跨 DST 保持 wall-clock；
+  闰年 `February 29 2028` 存在且跨过；`queryTimeIndex: interval-overlap boundaries are half-open`；
+  反向窗口/非法输入/未来钳制/最小 3 天/最大 366 天/阶梯 rung 全部包含 L0；
+  `normalizeTimeQuery: repeats deterministically with an explicit fake clock`（确定性）。
+- **旧数据回退**：`folderTimeRange: folders without event time fall back to [createdAt, createdAt+1)`、
+  `buildTimeIndex: legacy entries without event fields keep archivedAt ranges`、
+  `integration: real-shaped legacy folders (no event time) are fully queryable` 通过。
+  真实库 3742 个 folder **0 个有 event 字段**（计划书 §9.1：历史 0/4825 消息带 time），全部回退归档时间，
+  `tools/selfcheck.mjs` 的 `time index` 检查 PASS（6 store / 3742 folders / 50 条交叉核对、
+  `constrain` 过滤与朴素区间一致、`off/index` 永不改变召回）。
+- **时间索引纯内存**：无任何日期目录、无第二个落盘索引；`engine.load()`/查询只从 `index.folders` 派生。
+- **真实数据 0 event 字段**：见上；新归档才有 `messages` 事件时间（`test/turn-protection-engine.test.mjs`
+  的 `event time: folder meta carries eventStart/eventEnd/eventTimeSource` 通过）。
+- **边界口径**：`time.mode='off'` 忽略时间参数 + warning；`'index'` 归一化但不过滤（`enforced=false`）；
+  `'constrain'` 过滤；显式双端点 = 硬窗口不放宽、单日/月/年 = 软窗口走阶梯
+  （`normalizeTimeQuery`/`timeFallbackLadder` 用例与 `time.mode=constrain: direct hit, ladder widening and
+  missType="time"` adapter 用例通过）。
+- **非法输入 0 抛错**：`normalizeTimeQuery: invalid / empty / malformed input degrades safely (never throws)`、
+  `malformed granularity is ignored, conflicting granularity warns`、`failure safety: absurd timestamps degrade
+  instead of throwing`、`detectGranularity: invalid and impossible inputs are rejected`、
+  `timeFallbackLadder: degenerate input degrades to "no constraint" without throwing` 等覆盖
+  **11 类非法/退化输入**（空串、乱码、非日期、越界 epoch、超大/负时间、坏 granularity、坏时区、
+  反向窗口、单端点、缺 index、损坏 event 区间），全部安全降级、**0 抛错**。
+- **Plan A/B oracle**：`oracle fuzz` 用 500 组 × 20 窗口 × 3 时区（Asia/Shanghai / UTC /
+  America/New_York DST）对比“CSR 桶查询”与“朴素区间扫描”，结果**完全一致**；
+  `queryTimeIndex: windowScanMax forces the full-scan path with identical results` 通过
+  （桶只是候选过滤，精确重叠判定永远裁决）。
+- **时间索引纯内存、不落盘**：无日期目录、无第二个索引文件；`buildTimeIndex` 只从 `index.folders` 派生，
+  `time.mode='off'` 时零行为。
+
+### 20.4 小窗口 / 硬停止 / 回合保护验证
+
+- **8k/16k 不自毁**：`test/e2e-adapter-simulate.test.mjs` 的两条用例通过——
+  `8k window: default (allowSmallWindow=false) refuses automatic archiving and builds no backlog`、
+  `16k window: default refuses archiving, opt-in archives (guard is the gate, not the trigger)`；
+  **默认 8k/16k 窗口归档 0 次 + opt-in 对照组**（opt-in 后同一形状允许归档）；
+  引擎侧 `small-window sanity: 8k window is refused by default, allowed with the explicit opt-in, 20k is the
+  boundary` 通过；`a contextWindowTokens that disagrees with the host window by 4x counts as a conflict`、
+  `a measurement above 500% of the window (fake meter) is refused unless allowSmallWindow` 通过。
+- **长会话不越线**：720 消息 e2e 长会话（`long session (240 turns × 3 messages = 720 messages ≥ 700):
+  archive → judge → recall, no self-destruction`）通过——全流程 afterPercent 始终 **< 95%（hardLimit）**、
+  连续超过 hardLimit 线的 episode **≤ 2**（第 2 次即硬停止）、任务区块预算内、**无 > `scoring.maxPending`
+  的积压**（评分后 pending 归零）。
+- **归档释放下限**：`compress: the release floor archives at least to releaseTargetPercent (default 50%)` 通过——
+  61% 触发时目标被抬到“至少 50% 以下”（128k 窗口 = 14080 tokens 下限）；
+  `releaseFloorEnabled=false` 恢复旧口径的用例同时通过；遥测含 `releaseFloor/releaseTargetPercent`。
+- **hardLimit 硬停止**：`hardLimitPercent becomes a hard stop after consecutive failed compressions` 通过；
+  `hardLimitStop=false keeps the v1.3.0 diagnostics (WARN once, no stop)` 通过。
+  阈值口径 = **连续 2 个压力 episode**（一次触发 + 其 emergency pass = 1 episode）。
+- **当前回合保护**：`turn protection: without protectSeq the same shape would archive the current question
+  (the guard matters)`、`no legal cut point before the current turn → refuse, warn, write no folder`、
+  `fail-safe: no legal user boundary at all → refuse instead of an arbitrary cut` 通过
+  （P0-3 的“随便切一刀”已删除）；e2e 240 turn 多步工具回合 **0 次当前问题被归档**；
+  引擎级 protectSeq 拒绝路径与 C 的 `test/turn-protection-engine.test.mjs` **18 用例全绿**
+  （含 no-legal-cut / 小窗口 / 硬停止 / commit 回滚 / 幂等 / 事件时间）。
+- **commit 事务/回滚/幂等**：`commit transaction: a failure on the 2nd folder rolls back every folder,
+  keeps the index byte-identical and drops the journal`、`the journal is removed after a successful commit`、
+  `commit idempotency: the same (sessionId,turn,seqStart,seqEnd,contentHash) never duplicates folders, even
+  with a new now` 通过（journal 只清理 `.commit-*.json`，绝不删 folder）。
+- **单步上限/事件时间**：folder cap 与 `eventTimeRangeOf` 用例通过（`maxFoldersCapped` 可观测）。
+
+### 20.5 数据时代 / 遗留数据验证（口径 A–D）
+
+`node tools/memory-audit.mjs --json`（真实库只读，**2026-11-01 历史快照**；2026-11-02 清理测试/压测数据后
+当前真实库为 3 stores / 1264 folders / 2 pending = 0.16%，见 §22）与
+`node tools/selfcheck.mjs` / `node tools/recall-report.mjs --json` **三方输出一致**（下列数字为历史快照）：
+
+```json
+{ "totals": { "folders": 3742, "scored": 973, "pending": 2769, "pendingPercent": 74, "currentPendingPercent": 0.54 },
+  "buckets": {
+    "legacy":    { "folders": 593,  "scored": 6,   "pending": 587 },
+    "synthetic": { "folders": 2780, "scored": 600, "pending": 2180 },
+    "current":   { "folders": 369,  "scored": 367, "pending": 2 } },
+  "calibers": {
+    "A": { "folders": 3742, "pending": 2769, "pendingPercent": 74 },
+    "B": { "folders": 3149, "pending": 2182, "pendingPercent": 69.29 },
+    "C": { "folders": 369,  "pending": 2,    "pendingPercent": 0.54 },
+    "D": { "folders": 359,  "pending": 0,    "pendingPercent": 0,
+           "sessions": ["session-b5eeee7e-009b-4f60-b4ff-0e7c5ac1617f"] } } }
+```
+
+- **口径 A 全库存量 = 2769/3742 = 74.0%**（只描述历史现状，不是当前机制质量）；
+- **口径 B 排除 pre-1.2.0 遗留 = 2182/3149 = 69.3%**；
+- **口径 C 当前真实待评分 = 2/369 = 0.54%**（scored 367/369 = 99.46%；2 条来自 QQ 通道 qqb-g）；
+- **口径 D 1.3.0 后正常会话 = b5eeee7e 359/359 scored、0 pending = 0.00%**；
+- 三方一致口径（`test/e2e-real-data-readonly.test.mjs` 用例名）：
+  `recall-report --json agrees with both tools (74.00% all-stock / 0.54% current / 0/359 normal)`；
+- `legacy 587 + synthetic 2180` **只标记、不回补**（`--apply` 只写 `pendingEra`）。
+
+测试证据：
+- `test/memory-audit.test.mjs` 20/20 pass，含 `era: the documented boundaries and thresholds are exact`、
+  `auditMemory buckets by folder era and reproduces calibers A-D`、`default run writes nothing (mtime+bytes unchanged)`、
+  `--apply only adds pendingEra to index.json (meta/scored/createdAt untouched)`、
+  `real memory/ is only read and reproduces the documented data-era split`；
+- `test/e2e-real-data-readonly.test.mjs`：`memory-audit --json reports the documented era buckets on the real store`、
+  `selfcheck --json agrees with memory-audit and reports 0 failed checks`、
+  `recall-report --json agrees with both tools (74.00% all-stock / 0.54% current / 0/359 normal)`、
+  `running memory-audit / selfcheck / recall-report never modifies real memory/sessions` 全部通过；
+- `tools/selfcheck.mjs` 的 `pending era` 检查 PASS，输出
+  `legacy pending 587 + synthetic pending 2180 (pre-1.4.0 residue, not re-judged); current pending 2/369 = 0.54%`；
+- `test-adapter/scoring-pressure.test.mjs`：任务区块只列 current、synthetic/legacy 不进列表、
+  预算与背压/heuristic 兜底用例全部通过。
+
+### 20.6 真实数据只读证明
+
+- **零写入证据（e2e 实测）**：`test/e2e-real-data-readonly.test.mjs` 的
+  `running memory-audit / selfcheck / recall-report never modifies real memory/sessions` 通过——
+  对 `memory/sessions/**` 全部 **7533 个文件**记录 `path → size:mtimeMs`，三个工具（含 `--json`）跑完后
+  前后快照**逐文件 0 变化**（无新建、无修改、无删除）。
+- **只读默认**：`tools/memory-audit.mjs` 默认不写任何文件（测试断言 `default run writes nothing
+  (mtime+bytes unchanged)`）；`tools/time-view.mjs` 从不写盘；`tools/selfcheck.mjs` / `recall-report.mjs`
+  只读。
+- **`--apply` 只在临时副本验证**：`--apply only adds pendingEra to index.json (meta/scored/createdAt
+  untouched)`、`--apply on a temp copy of real sessions writes only index.json (source untouched)` 通过——
+  只写 `index.json` 的 `pendingEra` 字段；真实 `memory/` 上本轮**从未执行过 `--apply`**。
+- **真实库一致性**：`every real index.json parses and every on-disk folder is indexed` 通过
+  （3742 folders ↔ index 双向对账）；`the 1.3.0 recall-state.json snapshot is still restorable through the
+  v2 read path` 通过（真实旧快照可读）。
+- **测试运行环境**：所有写盘测试使用 `os.tmpdir()` 临时目录；真实 `memory/` 仅在只读用例里被读取。
+
+### 20.7 兼容与回滚验证
+
+- **旧数据可读**：`test/engine.test.mjs` 与 store/index 往返用例通过——旧 `index.json`
+  （version 1 无新字段）读→写→读不丢字段（新字段有值才写、旧条目缺省按默认推断）；
+  旧 `recall-state.json` v2/v1 读路径由 adapter 用例覆盖：
+  `a v2 recall-state migrates to v3 without losing the restored block`、
+  `a v2 file with no valid addition falls back to the v1 ids path`、
+  `the 1.3.0 recall-state.json snapshot is still restorable through the v2 read path`、
+  `malformed v3 fields degrade individually (no throw, block kept)`、
+  `a changed configFingerprint resets the lane cursors but keeps block and ledger`；
+- **旧 config 缺新键**：`loadConfig()` 对缺键全部走默认（`test/engine.test.mjs` 兼容用例；
+  `test/config-consistency.test.mjs` 断言随包配置加载 `warnings: []`）；
+- **legacy 一键回滚**：`legacy mode is a byte-compatible rollback: no lanes/round passed, engine mode legacy`
+  通过；`node test/simulate.mjs`（legacy 引擎路径）exit 0；
+- **`time.mode='off'` 零行为**：`queryTimeIndex: time.mode off/index leaves recall unconstrained`、
+  `timeFallbackLadder: mode off/index returns only the original window` 通过；
+- **性能/跨平台**：v1.3.0 的 portability / compat 测试保持全绿（本机 613 引擎 + 209 适配层用例含既有全部回归）。
+
+### 20.8 性能实测（本轮，真实数据/合成数据）
+
+| 项目 | 实测 | 门槛 |
+|---|---|---|
+| `buildRecallIndex` 合成 N=10⁴（测试） | **29.5 ms**（本轮复测 32.2 ms） | 目标 N=10⁴ <60ms（CI 放宽 200ms） |
+| `selectRecall` 合成 N=10⁴（测试） | **≤ 0.4 ms**（worstSelect 0.3ms / pops 25） | 目标单次 <5ms（CI 放宽 50ms） |
+| `buildTimeIndex` 真实 2780 folders（session-a46df597） | **5.83 ms**（本轮冷构建复测 6.49–9.58ms，含新进程读配置/索引与 `Intl` 预热） | 设计 1.5–2.8ms@2780 为**热构建**口径 |
+| `buildTimeIndex` 全库（6 store / 3742 folders） | **9.1 ms** | N=10⁴ 目标 ≤20ms |
+| 3 日查询（真实/合成） | **0.014 ms/次**（测试 N=10⁴ 0.013ms） | 目标 <5ms，CI 放宽 50ms |
+| `buildTimeIndex` 同进程热构建（本轮 best of 5，真实 2780） | 1.88 ms | 补充口径 |
+| `buildRecallIndex` 真实 2780 folders（本轮 best of 5） | 2.21 ms | 补充口径 |
+| `selectRecall` 真实 2780 folders（3 查询 × 20 轮，本轮） | 最差 2.79 ms | 补充口径（索引小，pops 主导） |
+| v1.3.0 legacy `recall` 1000 folders（既有测试） | 冷启动 <50ms / 热路径 <20ms | 保持 |
+| `engine.recall` 1000 folders（既有性能测试） | 冷/暖均在校验预算内 | 保持 |
+
+> 真实数据测量命令（只读）：`readIndex('memory/sessions/session-a46df597-…')` +
+> `buildTimeIndex()` / `buildRecallIndex()` / `selectRecall()`；合成 N=10⁴ 数字来自
+> `test/recall-index.test.mjs` / `test/time-index.test.mjs` 的 perf 用例输出。
+> 性能数字以最终门禁/复测记录为准（本表保留复测值以便复现）。
+
+### 20.9 残余风险与未覆盖项（诚实说明）
+
+- **QQ 真机通道本轮未重新端到端复测**：1.4.0 的 compat 用例与 v1.3.0 保持一致且全绿，但
+  onebot / Derpyu 的真机回合（含群成员门控 + 图片归档）沿用 v1.3.0 的验证结论（§19）；
+- **e2e 长会话是 fake host 模拟**（`test/e2e-adapter-simulate.test.mjs`，720 消息上跑真实 adapter 路径），
+  不是真人 700 turn 会话；真实宿主时序差异仍可能暴露未模拟的边界；
+- **公平性仿真的 legacy/DRI 对比数字来自设计阶段工件**（`D:\workspace\output\rofm-recall-fairness`），
+  不是 1.4.0 发布前在本机重跑的；本机验证的是公平性**性质**（G1–G5 用例）与遥测；
+- **时间数据**：旧库 0 个 event 字段，1.4.0 之前的历史记忆按“归档时刻”近似事件时间；
+  新归档开始才有真实事件区间（本机现有会话尚未产生 1.4.0 归档样本）；
+- **时间阶梯不嵌套**：`day3 → month → year → all` 是**平级**的放宽序列（不是 day3 内再套 month）；
+  单日查询到命中为止逐个 rung 尝试，`widenedTo` 记录实际落点；
+- **memory_judge eventTime 1.4.1 才开放**（`time.judgeEventTime=false`，1.4.0 忽略该参数并提示）；
+- **重启后首轮 block trim 没有 `candidateIds`**：首轮裁剪退化为“纯 α 裁剪”
+  （仍保证高α pin 与 at-least-one），下一轮起恢复“是否在本轮候选集”的完整裁剪键；
+- **CLI 没有 turn 语义**：`engine/cli.mjs` 不暴露 `protectSeq`（文档已写明）；
+  `compress --allow-small-window` 只是逐 plan 覆盖，不改变产品默认；
+- **Linux/macOS**：仍以 CI 三平台矩阵为准（本机无真机，同 §19.4）；
+- **数字口径**：§20 为 v1.4.0 主功能验证；事件约束增补后全量为 916 / 914 pass / 0 fail / 2 skip（+ e2e 19），见 §21；
+  **§21 为「事件约束」增补验证**（最终 916 / 914 pass / 2 skip，门禁 935 / 933）；
+  发布门禁以 `node tools/verify-1.4.0.mjs` 输出为准。
+
+## 21. 1.4.0 增补：事件约束验证记录（2026-11-02，历史留档；该增补随 1.4.1 发布）
+
+> **口径说明**：本节是「事件约束」增补的验证记录（随 **1.4.1** 发布；1.4.0 tag 不含该增补）。
+> 数字为 v1.4.0 时代的历史快照（`node --test` 916 / 914 pass / 2 skip），**已被 §22 取代**。
+> 环境同 §20：Windows 11 / Node v24.21.0；真实 `memory/` 全程只读。
+
+### 21.1 测试与门禁
+
+| 项 | 实测 |
+|---|---|
+| `test/event-index.test.mjs`（新） | **28 / 28 pass**：归一化/空词/长度、Dice/avg/min 相似度、exact/similar/unknown/disabled、评分归并（`event-merged:`）、索引构建与缓存、真实标签 |
+| `test/recall-index.test.mjs` | **52 / 52 pass**（+8 事件用例：`C(Q)∩W∩E`、时间+事件 AND、`filteredByEvent`） |
+| `test/recall.test.mjs` 的 `events:*` | **10 条**：事件索引分组、exact 过滤、省略/「空」不约束、unknown 事件 miss、similar 歧义不猜、time+event AND、AND 下窗外/事件外 miss 分类、`mode=index/off`、纯事件浏览、遥测字段 |
+| `test/cli.test.mjs` 事件用例 | **4 条**：`--event` 约束、纯事件浏览、`--event 空`、ambiguous/unknown 提示 |
+| `test-adapter/plugin-mock.test.mjs` | **58 条**，其中事件相关 3 条：任务区块含 event rubric、空召回提示含 event 用法、**自动召回不传 `event`**；`memory_recall` 四态渲染与 `memory_judge` 打标签/归并/清空 |
+| `test/config-consistency.test.mjs` + `test/release.test.mjs` | **30 / 30 pass**（event 段与 DEFAULT_CONFIG/文档一致；CHANGELOG 段含「事件约束」） |
+| `node tools/selfcheck.mjs` 的 `event tags` 检查（新） | **纯 INFO 观测项**：带 event 的 folder 数 / 去重事件数 / 主要事件 / `event.mode`（engine 默认 vs 随包 vs 生效）/ similarity metric+threshold / 相似标签抽查。真实库输出 `no event-tagged memories yet (0/3742 folder(s) carry an event label); event.mode engineDefault=index, packaged=constrain, effective=constrain; similarity metric=dice threshold=0.72`。两种环境口径：检测到 QQ 插件 **11 passed / 1 warning / 0 failed**（12 条 check 行）；neutral **8 passed / 1 warning / 0 failed**（9 条）——唯一 WARN 仍是 a46 旧会话遗留 checkpoint note |
+| 全量 `node --test` | **916 / 914 pass / 0 fail / 2 skip**（2 skip = Node zstd 平台条件跳过） |
+
+### 21.2 相似度实测（Dice 默认指标）
+
+`eventSimilarity()` 默认 `metric='dice'`：`score = 2·|A∩B| / (|A|+|B|)`（token = Latin 词 len≥2 +
+CJK bigram + CJK 单字），`≥ event.similarity.threshold=0.72` 视为“双向高度相似”。实测（当前代码）：
+
+| A | B | Dice | 含义 |
+|---|---|---|---|
+| 日本旅行 | 日本旅行计划 | **0.778** | ≥0.72 → 视为同一事件（评分期自动归并；回忆期返回 similar 候选让模型判断） |
+| 日本旅行 | 日本美食 | **0.429** | <0.72 → 不同事件，不合并 |
+| 项目 | 登录重构项目 | **0.429** | <0.72 → 短标签不会吞掉更长事件（长度失衡被惩罚） |
+
+`metric='avg'`（`(containA+containB)/2`）与 `'min'`（严格：`日本旅行` vs `日本旅行计划` 仅 0.636）
+为可选实验指标；默认产品行为固定 Dice。单测还覆盖：完全相同 =1、无共享 token =0、空标签 =0。
+
+### 21.3 回忆期四态与 AND
+
+- **exact**：`events: recall constrained to one event returns only that event (exact)` 通过——
+  `C(Q)∩W∩E` 只返回该事件记忆；跨事件同关键词不串（不同事件即使关键词相同也不会混入）。
+- **empty/disabled**：`events: omitted / explicit "空" both mean "no event constraint"` 与
+  `events: event.mode=index never filters but reports disabled; mode=off ignores the argument` 通过——
+  省略/「空」= 不约束；`event.mode='index'`（engine 默认）只建索引不约束且 `enforced=false`；
+  `'off'` 忽略参数并 warning。
+- **unknown**：`events: an unknown event constrains to nothing and reports missType=event` 通过——
+  返回空结果 + `missType='event'` + 提示（补标签 / `event:"空"` / 问用户），**不计 3/6 strike**。
+- **similar（歧义）**：`events: a bidirectionally similar submission returns ambiguity instead of guessing` 通过——
+  不自动合并、不选路、`additions: []`、返回候选事件（label/count/score，最多 5 个），
+  `missType='event-ambiguous'`，**不计 strike**；模型可重试候选标签、`event:"空"` 或询问用户。
+- **AND**：`events: time and event constraints are ANDed` 与
+  `events: under AND, an in-window candidate outside the event is an event miss` 通过——
+  `C(Q)∩W∩E` 同时生效；时间硬窗口不会被事件放宽；只约束第一代。
+- **纯事件浏览**：`events: browsing by event works without keywords (event start order)` 通过——
+  无 keywords 只给 `event` 时按 eventStart 升序浏览该事件记忆，不消费/推进 lane 状态。
+- **遥测**：`events: recall telemetry records eventStatus/eventLabel/eventFiltered` 通过——
+  `recall` 事件出现 `eventStatus` / `eventLabel` / `eventFiltered`，缺失字段的旧遥测按“缺失”处理。
+
+### 21.4 事件标签一致性（全库唯一标签）
+
+- **评分期自动归并**：`assignEventLabel()` 对“双向高度相似”的已有 canonical 标签静默归并，
+  返回 warning（稳定前缀 **`event-merged:`**，如
+  `event-merged: 事件「旅行经历」与已有事件「日本旅行」高度相似（0.83），已归并到后者，保证同一事件标签一致`）；
+  `memory_judge` 摘要只统计 assigned/merged/cleared 计数（不含正文）。
+- **回忆期不自动合并**：相似但不同的事件返回候选让模型判断（见 21.3 similar），不静默合并。
+- **清空语义**：`event:'空'` 删除 `meta.event`（不写空字符串）；写入时同步
+  `eventSource='llm'`、`eventAt`；**新记忆不强制 event**（α+β+keywords 三元组必填不变），
+  缺失时只追加非阻断提示。
+- 单测：`event-index.test.mjs` 的归并/清空/exact 用例 + `plugin-mock` 的 judge 打标签/归并/清空用例通过。
+
+### 21.5 旧数据回退与真实数据只读
+
+- **旧数据无 event**：本机真实库 **21 store / 3742 folders**，其中 `event` 字段 **0 个**
+  （只读统计，2026-11-02）——这些记忆**不参与**事件约束召回（仍可按关键词/时间正常回忆），
+  复核评分时补标签即可；**不批量回填、不改写旧 meta**。
+- **迁移零要求**：旧 `index.json`（无 event 字段）可读；新字段 optional、有值才写；
+  `engine/store.js` 的 `indexEntryFromMeta` 显式拷贝（有值才写）。
+- **真实数据只读**：事件索引从 `index.json` 纯内存派生（不建事件文件夹、不落盘第二份真相）；
+  `memory-audit` / `selfcheck` / `recall-report` / CLI 只读运行，本次验证未写真实 `memory/`
+  （与 §20.6 的 7533 文件 `path→size:mtimeMs` 前后 0 变化同一约束）。
+- **回滚**：`event.mode='off'` 一键关闭（忽略参数、不建索引；已写 `event` 标签保留）。
+
+### 21.6 残余风险与限制
+
+- 事件相似是 **token Dice 相似、不是语义向量**：同义改写/缩写全称可能 <0.72，此时走 similar
+  歧义流程让模型/用户判断，不自动合并；阈值/指标可配（dice/avg/min）。
+- 事件标签质量取决于评分模型（`memory_judge`）；同一事件应始终用同一个标签，评分期自动归并兜底。
+- **自动召回不加事件约束**（发生在模型思考前，没有判断者）；事件约束只用于模型主动检索
+  （`memory_recall` / CLI `--event`）。
+- CLI `--event` 有 200 字符长度上限（超长报参数错误）；工具侧超长同样按参数错误处理。
+- 与时间约束一致：事件约束只作用于第一代候选，`hops` 后代沿用同一约束集。
+
+## 22. v1.4.1 验证记录（2026-11-02，历史留档；当前版本记录见 §24）
+
+> **环境**：Windows 11、Node v24.21.0（DSH 自带运行时）、仓库 `<repo>`。
+> 所有写盘测试用 `os.tmpdir()`；真实 `memory/` 在验证期间只读（清理测试/压测数据由 cleanup-data 单独执行，
+> 隔离目录 `<out>/quarantine-memory/` 可恢复）。
+> 本节数字均来自本机同一次收尾运行；命令可直接复跑。
+
+### 22.1 最终数字（2026-11-02）
+
+| 项 | 实测值 | 命令 |
+|---|---|---|
+| 全量测试 | **1039 tests / 1037 pass / 0 fail / 2 skip**（2 skip = Node zstd 平台条件跳过） | `node --test` |
+| 一键门禁 | **8/8 PASS**，`RESULT: PASS`，exit 0；**1039 unique（1059 summed with e2e re-runs）** node:test 用例；baseline recorded 1039 / static 999 / effective 1005 | `node tools/verify-1.4.0.mjs` |
+| 门禁分步 | unit 998（~55–78s）/ simulate PASS / selfcheck PASS / cli-help PASS / memory-audit PASS / time-view PASS / e2e-adapter **12/12** / e2e-real-data（夹具）**8/8** | 同上 |
+| 自检 | **10 passed / 2 warnings / 0 failed**（检测到两个 QQ 插件，12 条 check 行；2 WARN = 历史会话日志遗留注记 + recall fairness 的 degraded 观测） | `node tools/selfcheck.mjs` |
+| 模拟 | PASS（`context added back 81.89 %`、`chars added back 7083`；legacy 回归口径） | `node test/simulate.mjs` |
+| e2e | adapter **12/12**；real-data 夹具 **8/8**（`test/fixtures/memory-snapshot/**`，<300KB） | `node --test test/e2e-*.test.mjs` |
+
+### 22.2 真实数据快照（2026-11-02，清理测试/压测数据后）
+
+| 指标 | 值 | 来源 |
+|---|---|---|
+| stores | **3**（`session-7bc15160` / `session-b5eeee7e` / `qqb-g-1134030529`） | `node tools/selfcheck.mjs` |
+| folders | **1264**（index 与磁盘一致；1262 scored / **2 pending = 0.16%**） | 同上 |
+| 时代分桶 | legacy 0 / synthetic 0 / current 1264（历史快照 legacy 587 / synthetic 2180 已隔离） | `node tools/memory-audit.mjs --json` |
+| 事件标签 | **565/1264** folder 带标签，1 个去重事件（`rofm 1.4.0 开发`） | `node tools/selfcheck.mjs` |
+| 时间索引 | 3 stores / 1264 folders / 50 条交叉核对；mode=constrain, timezone=Asia/Shanghai | 同上 |
+| 图片 / stats | 0 archived image(s)；124 stats line(s) | 同上 |
+
+> 历史快照（仅作“清理前”参考，**不要当当前口径**）：2026-11-01 文档快照 3742 folders / 2769 pending /
+> 74.0% / 2/369 = 0.54%；清理前最终大盘 22 stores / 4637 folders / 2769 pending / 59.7% / current 2/1264 = 0.16%。
+
+### 22.3 修复验证矩阵（要点）
+
+- **P0/P1 全部修复且审计 PoC 复跑不再复现**：A-01（plan 幂等键/正文守恒）、A-02（崩溃恢复）、
+  E-01（9 位 chatKey 跨会话）、E-02（autopatch 写坏文件）、E-03（passive 水位）、B-01（分页）、
+  B-02（双向匹配）、A-03（守恒断言）、A-04（空 system note 合并）——修复前 FAIL → 修复后 PASS 的
+  回归测试见 `test/compress-transaction-recovery.test.mjs`、`test/recall-1.4.1-regressions.test.mjs`、
+  `test/time-index-1.4.1-regressions.test.mjs`、`test/compress-floor-guard.test.mjs`、
+  `test-adapter/scoped-config-idempotent.test.mjs` 等。
+- **门禁负向证明**：测试数下限由 `tools/gate-baseline.json` 维护（记录值：全量 1039 / 最多 skip 4 /
+  e2e 12/8；有效下限 = max(记录值, 静态扫描用例数×98%)；基线缺失或损坏直接 FAIL；
+  **新增/删除测试必须同步更新基线**）。反证通过：删掉一个 53-test 文件 → FAIL（expected ≥1039, got 937）；
+  e2e 全部 skip → FAIL；伪造失败 → FAIL；TAP reporter 输出可解析；resume 版本校验覆盖。
+- **scopedConfig 幂等**：现场嵌套目录 `memory/sessions/session-7bc15160.../sessions/session-7bc15160.../`
+  已隔离到 `quarantine-stray-nested-20261102-235448/`（未删除；旧目录可删/忽略，无需迁移）。
+- **版本**：`package.json` / `engine/package.json` = **1.4.1**；`test/config-consistency.test.mjs` 版本无关，
+  升版后 `node --test` 仍 0 fail。
+
+### 22.4 复跑命令
+
+```bash
+export PATH="/c/Users/user/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin:$PATH"
+cd /c/Users/user/Desktop/dsh-rofm
+node --test
+node tools/verify-1.4.0.mjs
+node tools/selfcheck.mjs
+node test/simulate.mjs
+node --test test/e2e-adapter-simulate.test.mjs
+node --test test/e2e-real-data-readonly.test.mjs
+node tools/memory-audit.mjs --json
+```
+
+## 23. v1.4.2 验证记录（2026-11-03，历史留档；当前版本记录见 §24）
+
+> **环境**：Windows 11、Node v24.21.0（DSH 自带运行时）、仓库 `<repo>`。
+> 所有写盘测试使用 `os.tmpdir()`；真实 `memory/` 在验证期间只读。
+> 本节数字来自实现 + 测试 + 文档全部 landed 后的最终收尾运行；命令可直接复跑。
+> §22 保留为 1.4.1 历史记录（1005 tests），其 1.4.1 段落、类别词保证与隐私/config.local 内容不变。
+
+### 23.1 最终数字（2026-11-03）
+
+| 项 | 实测值 | 命令 |
+|---|---|---|
+| 全量测试 | **1026 tests / 1024 pass / 0 fail / 2 skip**（2 skip = Node zstd 平台条件跳过） | `node --test` |
+| 新增用例 | **20 例**（`test-adapter/cross-chat-tool.test.mjs`） | `node --test test-adapter/cross-chat-tool.test.mjs` |
+| 一键门禁 | **8/8 PASS**，`RESULT: PASS`，exit 0；**1026 unique（1046 summed with e2e re-runs）** node:test 用例；**1024 pass / 2 skip / 0 fail**；baseline recorded **1026** / static **1020** / effective floor **1026** | `node tools/verify-1.4.0.mjs` |
+| 门禁分步 | unit-tests **1026**（38.2s，机器负载不同）/ simulate PASS / selfcheck PASS / cli-help PASS / memory-audit PASS / time-view PASS / e2e-adapter **12/12** / e2e-real-data（夹具）**8/8** | 同上 |
+| 自检 | **10 passed / 2 warnings / 0 failed**（检测到两个 QQ 插件；2 WARN = 历史会话日志遗留注记 + recall fairness 的 degraded 观测，与 1.4.1 口径一致；autopatch 行显示 4 个工具名均已放行） | `node tools/selfcheck.mjs` |
+| 模拟 | PASS（`context added back 81.89 %`、`chars added back 7083`；legacy 回归口径） | `node test/simulate.mjs` |
+| 基线 | `tools/gate-baseline.json`：`minFullSuiteTests` **1005 → 1026**；`maxFullSuiteSkipped` 4、e2e-adapter 12 / e2e-real-data 8 不变 | — |
+
+门禁原始输出要点（本机实测，exit 0）：
+
+```text
+[PASS] privacy — tracked config has no machine-local values
+[PASS] node --test (full suite) (1026 tests / 1024 pass / 0 fail / 2 skip)
+[PASS] node test/simulate.mjs
+...
+[PASS] node --test test/e2e-adapter-simulate.test.mjs (12 tests / 12 pass / 0 fail / 0 skip)
+[PASS] node --test test/e2e-real-data-readonly.test.mjs (8 tests / 8 pass / 0 fail / 0 skip)
+baseline: recorded 1026, static 1020 declared -> full-suite floor 1026 (update tools/gate-baseline.json when tests change)
+steps: 8/8 PASS · node:test cases: 1026 unique (1046 summed with e2e re-runs) / 1024 pass / 0 fail / 2 skip
+RESULT: PASS
+```
+
+新增的 20 例覆盖：tool definition/schema、私聊主人命中群聊、私聊+WebUI 诱饵零泄漏、未评分 folder
+不可见、群聊/非主人/`ownerIds:[]`/WebUI/子代理拒绝（且授权先于 IO）、`listGroups`、`group` 过滤、
+`limit`/`offset` 分页、`timeFrom/timeTo`（epoch/date-only/非法输入）、路径穿越/注入、只读（hash/mtime）、
+`compat.crossChat` 默认值与 clamp、注册门控（compat off / `crossChat.enabled=false` / 有 `tools` service）。
+
+### 23.2 安全矩阵（新工具 `memory_group_recall`）
+
+数据来自 `test-adapter/cross-chat-tool.test.mjs`（20 例）+ 独立 verify 与红队复核（本次发布工作区的
+`verify/verification.md`、`security-review.md`，均 PASS）。
+
+| 场景 | 预期 | 结果 |
+|---|---|---|
+| `onebot-private-<owner>` 查询群聊记忆 | 允许；结果带来源群号/α/标题/片段；不含私聊/WebUI 诱饵 | PASS |
+| `qqb-p-<owner>`（Derpyu 私聊主人） | 允许 | PASS |
+| `onebot-group-*` 群聊会话调用 | 拒绝、不返回任何数据 | PASS |
+| `qqb-g-*` 群聊会话调用 | 拒绝 | PASS |
+| 非主人私聊（如 `onebot-private-888`） | 拒绝 | PASS |
+| `compat.ownerIds: []` | 拒绝并提示写 `config.local.json`（fail-closed） | PASS |
+| WebUI（`session-*`）/ 子代理 / 无 session | 拒绝；`memoryDir` getter 证明**授权前不读 store** | PASS |
+| 诱饵：私聊 store / WebUI store 放同关键词记忆 | 结构化结果与 render 文本中都不出现；`scored:false` 不可见 | PASS |
+| 路径穿越/注入：`group:'../../x'` / `'..\\..'` / 控制字符 query | 不抛未处理异常、不读越界、不泄漏路径 | PASS |
+| 只读 | 执行前后群 store 所有文件 hash/mtime 不变、无新文件产生 | PASS |
+| 时间过滤（`timeFrom/timeTo`）与非法时间 | 正常过滤（`eventStart ?? createdAt`）；非法输入 warning 不崩 | PASS |
+| `listGroups` / `group` 过滤 / `limit`+`offset` clamp 与分页 | 只列群、只匹配指定群（群号/chatKey/轮换会话 id）、分页提示正确 | PASS |
+| 注册门控 | `compat.qqBots='off'` 与 `crossChat.enabled=false` 不注册（仍 3 工具）；compat 启用时 4 工具且端到端可用；缺 `tools` service 静默降级 | PASS |
+| `compat.crossChat` 配置 | 默认值、clamp（maxResults 1..20 / snippet 80..2000 / maxGroups 1..500 / maxFolders 1..100000）、`ownerOnly=false` 泄漏 warning | PASS |
+| tool definition | parameters 为严格 object schema（`additionalProperties:false`、全部可选）、output schema + render、`timeoutMs: 10000`、`isConcurrencySafe` | PASS |
+
+### 23.3 配置 / 文档一致性
+
+- `package.json` / `engine/package.json` = **1.4.2**；`node --test test/config-consistency.test.mjs` **8/8 PASS**
+  （版本从 `package.json` 读取、要求 CHANGELOG 有非空 `[1.4.2]`、README §3 / SPEC §2 文档值与 engine 默认一致、
+  `PRODUCT_OVERRIDES` 仍只有 time/event 三个产品覆盖）。
+- `config.json` 增 `compat.crossChat` 示例块 + `_readme` 隐私边界说明；`compat.ownerIds` / `compat.mediaRoots`
+  仍为空（fail-closed），个人值走 gitignored `config.local.json`；`node tools/privacy-check.mjs` PASS。
+- `locale/zh.json` / `locale/en.json` 描述补 v1.4.2 能力一句；README/SPEC/CHANGELOG/VERIFICATION 无方向性
+  错误描述（不会声称群聊会话也能用、或会返回私聊/WebUI 记忆；grep 复核见 §23.4）。
+- `tools/gate-baseline.json` 的 `minFullSuiteTests` = **1026**，与最终 `node --test` 的 `tests` 数一致
+  （e2e 最小数 12/8 不变）；门禁输出 `baseline: recorded 1026, static 1020 declared -> full-suite floor 1026`。
+
+### 23.4 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"   # 本机 Node bin 目录
+cd <repo>
+node --test
+node tools/verify-1.4.0.mjs
+node tools/selfcheck.mjs
+node test/simulate.mjs
+node --test test-adapter/cross-chat-tool.test.mjs
+node tools/privacy-check.mjs
+# 文档方向性错误描述复核（README/SPEC/CHANGELOG 应无输出；"不会返回私聊"等否定句不算）：
+grep -rn "群聊也可\|群聊也能查\|私聊数据会返回\|群聊会话也能用" README.md docs/SPEC.md CHANGELOG.md
+```
+
+
+## 24. v1.4.3 验证记录（2026-11-05，历史留档；当前版本记录见 §25）
+
+> **环境**：Windows 11、Node v24.21.0（DSH 自带运行时）、仓库 `<repo>`。
+> 所有写盘测试使用 `os.tmpdir()`；真实 `memory/` 与真实归档在验证期间只读。
+> 本节对应“QQ 渠道兼容下评分摘要是原始 JSON、模型看不到对话正文”的用户报告。
+> §23 保留为 1.4.2 历史记录；§1–§22 为更早版本历史。
+
+### 24.1 缺陷与复现（修复前）
+
+- **报告**：模型给记忆打分时普遍偏低（α 0.1~0.4，71 条真实对话 α 中位数 0.3）；报告者抽样
+  353 个归档中 212 个（60%）的摘要以 `{"newMessages":[{"seq":5,"messageId":"…","sender":"私聊",
+  "text":"真实聊天对话的内容"...` 这类原始 JSON 开头。
+- **机制**：QQ 渠道兼容（Derpyu520/qq-bridge）会话里，MCP 工具结果就是
+  `serializeModelData(...)` 的 JSON 字符串（`qq_get_unread_messages` 返回
+  `{"ok":true,"key":…,"messages":[{…,"text":…}]}`；`qq_wait_for_messages` 返回带
+  `newMessages` 的同形 JSON）。`memoryFolderTaskInfo`（1.3.0 时叫 `memoryFolderSummary`）
+  把归档消息经 `messageToText` flatten 后 `slice(0, 160)`：前 160 字符全是 `"seq"`/`"messageId"`
+  等字段名，模型只能凭字段名猜重要性 → 低 α。
+- **修复前实测**（本机真实库 3 stores / 1264 folders；用当时工作树代码 + 报告形态的合成归档）：
+  - QQ unread/wait JSON 的摘要分别为
+    `tool: {"ok":true,"key":"private:765280787","unreadCount":2,"messages":[{"seq":5,"messageId":…`，
+    真实对话正文在 160 字符窗口外；
+  - 真实库里**旧摘要以 JSON/工具标记开头** 的文件夹 **188 个**，其 α **中位数 0.05、均值 0.116**；
+    旧摘要以可读正文开头的 1074 个文件夹 α **中位数 0.10、均值 0.134** —— 与“JSON 摘要 → 低 α”
+    的报告方向一致（本机以 WebUI/工具会话为主；报告者是 QQ 重度使用场景，故比例 60% vs 14.9%）。
+
+### 24.2 修复内容（渲染层，无数据迁移）
+
+- 新增 `lib/message-text.js` 模型可读渲染层（`messagePreview` / `conversationPreview` /
+  `messagesToReadableText`）：完整 JSON chat 载荷按 `sender：text` 行提取（丢弃 seq/messageId/
+  userId/ok 等 id 与标记），支持 `messages` / `newMessages` / 内容块数组 / 嵌套数组；用户消息内嵌
+  JSON 快照（QQ 唤醒提示「本次消息快照」）仅当 JSON 至少含一条真实消息行时才提取（代码/配置
+  JSON 不误伤）；坏/截断 JSON 安全退回旧渲染，全程 bounded（单消息 4000 字符 / 500 节点）且不抛错。
+- **原地渲染**：消息顺序不变；有可读对话时剔除纯 `[tool-call …]` 协议标记与仍解析不出正文的原始
+  JSON 残片，普通文本工具输出保留原位置；整个文件夹无可读对话时退回旧 flatten，输出逐字节不变。
+- 消费面：评分摘要 `memoryFolderTaskInfo`、待复核「原文」`memoryFolderReview`、
+  `memory_group_recall` 群聊摘要 `snippetOf`；`类型` 改为“完全无可读对话才是 tool”。
+- 存档 `context.json` 不重写；旧归档下次生成任务区块时立即按新渲染显示。
+
+### 24.3 修复后实测（本机真实库，只读对比）
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 摘要以 JSON/工具标记开头的文件夹 | 188 / 1264（14.9%） | **165 / 1264（13.1%）**，全部为“整个文件夹无可读对话”（纯 tool-call/协议标记 141、截断/坏 JSON 24），有对话的文件夹 **0 个**仍以原始 JSON 开头 |
+| 由 JSON 摘要变为可读对话的文件夹 | — | **23** |
+| 摘要内容发生变化的文件夹 | — | **42**（其余 1222 个逐字节相同；0 个空摘要） |
+| JSON 摘要文件夹的 α（n=188） | 中位数 0.05 / 均值 0.116 | 修复针对的是评分输入，不批量回写旧 α |
+| 可读摘要文件夹的 α（n=1074） | 中位数 0.10 / 均值 0.134 | — |
+| 抽查 10 条变化条目 | — | 均为“JSON 字段名 → 对话正文”或“去掉 tool-call 协议标记”，未发现信息丢失/怪异输出 |
+
+### 24.4 测试与门禁（2026-11-05 本机实测）
+
+- `node --test` = **1060 tests / 1056 pass / 0 fail / 4 skip**（4 skip = 平台符号链接/zstd 条件跳过）。
+  新增：`test/message-preview.test.mjs` **17 例** + adapter **4 例**（`scoring-pressure` 3、`cross-chat-tool` 1）。
+  回归点：QQ unread/wait JSON → `sender：text`；内嵌快照提取；坏/截断 JSON 不抛错；非聊天 JSON 退回；
+  协议标记剔除仅在有对话时；tool-only 摘要逐字节不变；待评分摘要/类型/待复核原文/群聊 snippet。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（baseline recorded **1060** / maxSkipped 4 / e2e 12/8 不变；
+  详见门禁原始输出）。
+- `tools/selfcheck.mjs`、`test/simulate.mjs`、e2e-adapter 12/12、e2e-real-data 8/8 与 1.4.2 口径一致。
+- 版本：`package.json` / `engine/package.json` = **1.4.3**；`test/config-consistency.test.mjs` 8/8 PASS
+  （版本从 package.json 读取、CHANGELOG 有非空 `[1.4.3]` 段）。
+
+### 24.5 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node tools/verify-1.4.0.mjs
+node tools/selfcheck.mjs
+node test/simulate.mjs
+node --test test/message-preview.test.mjs
+node --test test-adapter/scoring-pressure.test.mjs test-adapter/cross-chat-tool.test.mjs
+```
+
+## 25. v1.4.4 验证记录（2026-11-06，历史留档；当前版本记录见 §26）
+
+### 25.1 缺陷与复现（修复前）
+
+用户报告：会话每轮请求都失败，报
+`Failed to parse the request body as JSON: system[0].text: unexpected end of hex escape`，
+待评分记忆永远评不上分。
+
+- 根因：`conversationPreview` 的 160 码元摘要等按 UTF-16 码元 `slice`；emoji 跨边界时
+  截出孤立高代理项 → 摘要进入 `dsh-rofm:memory-tasks` 系统提示词 → 宿主 `JSON.stringify`
+  把孤立代理项转义成 `\ud83e` → DeepSeek Messages 接口拒绝这种非法转义。
+- 本机真实接口对照（`POST https://api.deepseek.com/anthropic/v1/messages`，`max_tokens=1`）：
+  正常请求 `200`；system 含孤立代理项（序列化为 `\ud83e`）→
+  `400 Failed to parse the request body as JSON: system[0].text: unexpected end of hex escape`；
+  人为 `\ud83`（少一位）→ `400 ... invalid escape`。
+- 死锁：请求在模型回合前 400 → 无法调用 `memory_judge` → folder 保持 `scored:false` →
+  下一轮再次注入同一坏摘要；重启无效（folder + recall-state 快照持久化；启发式兜底只作用于新归档）。
+
+### 25.2 修复内容（无数据迁移）
+
+- `lib/message-text.js` 新增 `safeSlice()` / `toWellFormed()`，用于 `truncate`、
+  `pushPreviewLine`、`conversationPreview`、`messagesToReadableText`；
+- `lib/plugin.js`：复核原文预算截断改 `safeSlice`；两个 systemPrompt section 注册处统一
+  `toWellFormed`；checkpoint 注记二次拼接后清洗；`recall-state.json` 的 `block` 写入前清洗；
+- `lib/memory-tool.js`（`judgeReason` 300 + 工具结果）、`lib/cross-chat-tool.js`（snippet +
+  工具结果）、`lib/images.js`（图片消息正文 truncate 镜像）、`lib/recall-tool.js` 与
+  `lib/image-tool.js`（工具结果）同步清洗；
+- 存档 `context.json` 不重写：摘要/原文每次从 `context.json` 重新渲染，旧 folder 自动生效。
+
+### 25.3 测试与门禁（2026-11-06 本机实测）
+
+- `node --test` = **1067 tests / 1065 pass / 2 skip / 0 fail**（6 unit + 1 adapter 新例）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（baseline → 1067 / maxSkipped 4 / e2e 12/8 不变）。
+- `node test/simulate.mjs`、`node tools/selfcheck.mjs`、`node tools/privacy-check.mjs`、
+  `node engine/cli.mjs --help` 全 PASS；`test/config-consistency.test.mjs` 通过
+  （版本从 package.json 读取、CHANGELOG 有非空 `[1.4.4]` 段）。
+- 版本：`package.json` / `engine/package.json` = **1.4.4**；`tools/gate-baseline.json` 同步 1067。
+
+### 25.4 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node tools/verify-1.4.0.mjs
+node --test test/message-preview.test.mjs
+node --test test-adapter/scoring-pressure.test.mjs
+```
+
+## 26. v1.5.0 验证记录（2026-11-08，当前版本）
+
+> **环境**：Windows 11、Node v24.21.0（DSH 自带运行时）、仓库 `<repo>`。
+> 所有写盘测试使用 `os.tmpdir()`；真实 `memory/`（3 stores / 1264 folders）与真实归档在验证期间只读。
+> 本节对应 1.5.0 六组需求（地点/人物/多事件/时间标签过滤、自适应配额 20、多子句逐题作答、
+> 「你说过」助手原话、事件不静默归并、冲突并列多说法）开发完成后的**独立黑盒缺陷审计
+>（24 条：S2×13 / S3×11）**及其修复。§20–§25 为更早版本历史。
+
+### 26.1 独立审计与修复（修复前基线）
+
+- 审计方式：独立 Agent 黑盒审计；仓库与真实 `memory/` 只读，全部 fixture 落在 `rofm-audit-1.5/tmp/`。
+- **修复前门禁全绿但仍有缺陷**：`node --test` = **1202 tests / 1200 pass / 0 fail / 2 skip**、
+  `node tools/verify-1.4.0.mjs` = 8/8 PASS，审计仍确认 **24 条真实缺陷**（“有测试、有字段、有函数，
+  但端到端未实现/实现错误”）。
+- 修复结果：24/24 全部修复（S1=0；S2=13、S3=11），逐条证据见
+  `D:/Deepseek/rofm-fix/verify/SCOREBOARD.md`、总报告 `D:/Deepseek/rofm-fix/FINAL-FIX-REPORT.md`。
+
+| 领域 | 缺陷 | 修复后行为 |
+|---|---|---|
+| 时间标签 | F-LEAD-01 / F-02-01、F-03-01、F-03-02、F-03-03 | 软窗口 fallback 每档套「标签优先」；`timeTag.maxSpanDays` 真实生效；`mode=off` 归档不采集/不写 timeTags；锚点回退 folder `createdAt` |
+| 标签索引/遥测 | F-02-03、F-02-04、F-02-05、F-02-06、F-02-07 | 单字符 CJK 标签 mention 加词边界；missType 按「谁真正过滤掉候选」归因；`timeTagFiltered` 真实遥测；`timeWindowFor` 与 recall 命中集一致；pending folder 不进 tagIndex |
+| 写入（memory_judge） | F-01-01、F-01-02、F-01-03 | 事件字段错类型视为未提供（保留旧标签+warning，不静默清空）；普通改写/同集合重排不再计「归并」；从未有标签的空清空为 no-op |
+| 配额/子句/助手通道 | F-04-01、F-04-02、F-04-03、F-04-04、F-04-05、F-04-06、F-04-07 | 子句保底不再被 fair lane 残留污染且 `hits` 真实；`reserveSlots` 生效（0/2 有差异）；`assistantSaid.enabled=false` 硬开关且索引不建 asst postings；`firstGenMax=0` kill switch 守住；legacy 不再谎报；预算裁剪有「裁剪/预算」提示且条数真实；无候选文案与死分支修正 |
+| 接线/文档 | F-LEAD-02、F-LEAD-03、F-05-01、F-05-02 | assistant 原话改分句级实词抽取（真实归档→评分→召回 end-to-end 可命中）；rubric 去重；任务区块预算硬不变量成立；SPEC D-02 旧「同批静默归并」描述更新 |
+
+### 26.2 修复内容（无数据迁移）
+
+- 引擎：`engine/engine.js`（时间标签 ladder、missType/遥测、`timeWindowFor`、assistant 开关与预留槽、
+  firstGenMax kill switch、子句保底 + 真实 `hits`/可选 `clauseInfo[i].ids`）、`engine/recall-index.js`
+  （assistant postings 按开关门控）、`engine/tag-index.js`（单字符 mention、跳过 `scored===false`）、
+  `engine/relative-time.js`（`maxSpanDays`）、`engine/compress.js`（assistant 抽取、mode=off、锚点）。
+- 插件/工具：`lib/memory-tool.js`（事件标签写入语义）、`lib/passive-archive.js`（同归档口径）、
+  `lib/plugin.js`（任务区块预算、rubric、裁剪提示、kill switch 守卫）、`lib/recall-tool.js`
+  （顶层 `assistantSaid` 如实回显）。
+- **行为语义变化**：`memory_recall` 结果顶层 `assistantSaid` 由「请求过」改为「引擎实际检索了」；
+  `assistantInfo` 保持 `{requested, effective, phrases}`。
+- 不新增/修改配置键；`config.json` / `DEFAULT_CONFIG` 不变；旧数据不回填、读路径字节不变；
+  `docs/SPEC.md` 的 v1.4.1 (D-02) 旧描述更新为 1.5.0 语义。
+
+### 26.3 测试与门禁（2026-11-08 本机实测）
+
+- `node --test` = **1258 tests / 1256 pass / 0 fail / 2 skip**（2 skip 为 Node zstd 平台条件跳过）。
+  新增审计回归 5 个文件共 56 例：`test/audit-fix-engine.test.mjs`（15）、`test/audit-fix-judge.test.mjs`（8）、
+  `test/audit-fix-tags-time.test.mjs`（17）、`test/audit-fix-archive.test.mjs`（7）、
+  `test/audit-fix-plugin.test.mjs`（8）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1258** / maxSkipped 4 / e2e 12/8；
+  1258 unique / 1278 summed with e2e re-runs）。
+- `node tools/selfcheck.mjs` = 10 passed / 2 warnings / 0 failed；`tools/privacy-check.mjs` PASS；
+  `node test/simulate.mjs`、`node engine/cli.mjs --help` PASS。
+- 真实库只读回归：3 stores / **1264 folders**，`list` + 12 固定查询与 1.4.4 一致，`index/meta/context`
+  字节不变，`compat-old-data` = **PASS=12 / FAIL=0**。
+- 测试有效性：5 类新增回归测试拷入修复前备份仓库全部变红；11 类跨版本行为消融均
+  「修复前复现 → 修复后消失」。
+- 版本：`package.json` / `engine/package.json` = **1.5.0**；`tools/gate-baseline.json` = 1258。
+
+### 26.4 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node tools/verify-1.4.0.mjs
+node tools/selfcheck.mjs
+node tools/privacy-check.mjs
+node --test test/audit-fix-engine.test.mjs test/audit-fix-judge.test.mjs \
+  test/audit-fix-tags-time.test.mjs test/audit-fix-archive.test.mjs test/audit-fix-plugin.test.mjs
+```
+
+> 审计脚本复跑备注（`D:/Deepseek/rofm-audit-1.5/` 为只读证据，不改脚本）：
+> ① `04-quota-clause-assistant/02-clauses.mjs` 的两条 REPRO 断言是缺陷确认期断言（修复正确后必然失败/自相矛盾），
+> 正式口径见 `D:/Deepseek/rofm-fix/POLICY.md` §1ter；
+> ② `01-judge-tags/repro-01-judge-tags.mjs` 是无条件打印 REPRODUCED 的报告生成器，不是验收门禁，
+> F-01 系列以 `lead/verify-slice01.mjs` + 动态断言为准；
+> ③ `lead/repro-assistant-channel.mjs` 的 e2e 段归档出的是 pending folder（本就不可召回），
+> 缺陷证据以 scored 路径（`scoring.fallback='always'`）为准；
+> ④ `05-wiring-docs-compat/compat-old-data.mjs` 使用共享临时目录，**不可并发运行**。
+
+
+---
+
+## 27. v1.6.0 最终验证（2026-11-08，历史留档；当前版本见 §28）
+
+**范围**：可计算回忆块（新配置 `recall.computeDates`）、归档关键词上限 8→30（查询侧维持 16）、`memory_recall` 满页加配额重试与
+persons 多称呼别名语义、`memory_judge` 人称代词指代消解、记忆使用规则新增三条、benchmark harness 工具结果渲染修复
+（`exam.mjs:232` 的整段 JSON `slice(0,8000)` 移除）。
+
+### 27.1 测试与门禁（本机实测）
+
+- `node --test` = **1304 tests / 1302 pass / 0 fail / 2 skip**（2 skip 为 Node zstd 平台条件跳过，非缺陷）。
+  相对 1.5.0（1258）新增 46 例：`test/recall-computable-block.test.mjs`（21）、
+  `test-adapter/recall-tool-1.6.0.test.mjs`（15）、`test-adapter/memory-tool-1.6.0.test.mjs`（4）、
+  `test-adapter/plugin-rules-1.6.0.test.mjs`（6）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1304** / maxSkipped 4 / e2e 12/8；
+  **1304 unique / 1324 summed with e2e re-runs**）；privacy / simulate / selfcheck / cli-help / memory-audit /
+  time-view / e2e-adapter（12/12）/ e2e-real-data（8/8）全部 PASS。
+- `test/config-consistency.test.mjs` 通过：版本 1.6.0、CHANGELOG 有 `## [1.6.0]`、README §3 / SPEC §2 文档值一致、
+  七个 PRODUCT_OVERRIDES（六个 v1.5.0 开关 + `recall.computeDates`）与 `DEFAULT_CONFIG`/随包 `config.json` 对账一致。
+- benchmark harness 独立审计（`rofm-bench/formal/harness/`，benchmark 研究目录、不属于本插件包）：
+  `node _test-tool-render.mjs` 25/25；独立审计脚本 `_audit-tool-render.mjs` **33 checks 全 PASS**；
+  冻结插件真实 `output.render` 探针：20 条×2000 字符记忆 → 输出 8000 字符、**20/20 id 全可见**、每条保留
+  id/关键词/时间/标签/关键句摘要、无 raw JSON；旧 `JSON.stringify(value).slice(0,8000)` 对照仅 4/20 条完整；
+  选中 7 条 → 7/7 可见；2 条小结果输出与真实 `output.render` 逐字节相同。
+
+### 27.2 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node --test test/recall-computable-block.test.mjs test-adapter/recall-tool-1.6.0.test.mjs \
+  test-adapter/memory-tool-1.6.0.test.mjs test-adapter/plugin-rules-1.6.0.test.mjs
+node tools/verify-1.4.0.mjs
+node tools/selfcheck.mjs && node tools/privacy-check.mjs
+# benchmark harness（研究目录，只读/自测，不调用模型）
+cd D:/Deepseek/rofm-bench/formal/harness && node _test-tool-render.mjs && node _audit-tool-render.mjs
+```
+
+### 27.3 版本
+
+`package.json` / `engine/package.json` = **1.6.0**；`tools/gate-baseline.json` = **1304**；
+`docs/SPEC.md` §2/§6.7/§6.13 与 README §1.14/§3 已同步 1.6.0 行为与新配置；数据格式不变、旧数据无需迁移。
+
+---
+
+## 28. v1.5.4 第一阶段验证：回忆块时间口径（2026-11-09）
+
+**范围**：回忆块时间口径修正——① 归档时把每条消息自己的事件时间写入 `context.json` 的 `message.time`，
+回忆时 `messageAnchorMs` 不再退回文件夹 `createdAt`；② 回忆块标题改为 `归档于 X（事件时间 Y）`
+（X = 归档时间，Y = 事件时间），移除 v1.6.0 的独立 `事件时间：` 行；③ 回忆块 preamble
+（`RECALL_BLOCK_TIME_RULE`）与 `dsh-rofm:memory-rules` 明确「引用日期以事件时间为准，标题是归档时间」；
+④ 同一时间口径同步到降级渲染器（`renderRecallBlockFallback`）与 `memory_recall` 工具结果标题；
+⑤ `eventStart/eventEnd = 0` 按「无事件时间」处理，不再渲染 1970。
+
+### 28.1 测试与门禁（本机实测）
+
+- `node --test` = **1312 tests / 1310 pass / 0 fail / 2 skip**（2 skip 为 Node zstd 平台条件跳过，非缺陷）。
+  相对 1.6.0（1304）新增 8 例：`test/recall-computable-block.test.mjs` 净 +2（标题同时标注归档/事件时间、
+  由消息时间派生事件时间、时间口径规则只在可计算 preamble、epoch 0 哨兵；旧事件时间行断言改为标题断言）、
+  `test-adapter/plugin-mock.test.mjs` +1（归档 `context.json` 每条消息带 `time`、`meta.eventStart/End`
+  与之相等、召回标题与相对时间注解使用事件时间而非归档日）、
+  `test-adapter/plugin-rules-1.6.0.test.mjs` +1（v1.5.4「时间引用」规则 + 顺序/长度守卫）、
+  `test-adapter/recall-render.test.mjs` +1（降级渲染器在 `computeDates=true` 时与引擎逐字节一致，
+  含消息时间派生事件区间与注解）、`test-adapter/recall-tool.test.mjs` +3（`memory_recall` 条目
+  `归档于/（事件时间）` 标题、消息时间派生、browse 仍按事件时间）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1316** / maxSkipped 4 / e2e 12/8；
+  **1316 unique / 1336 summed with e2e re-runs**）；privacy / simulate / selfcheck / cli-help / memory-audit /
+  time-view / e2e-adapter（12/12）/ e2e-real-data（8/8）全部 PASS。
+- `test/config-consistency.test.mjs` 通过：版本 1.5.4、CHANGELOG 有 `## [1.5.4]`、README §3 / SPEC §2 文档值一致、
+  七个 PRODUCT_OVERRIDES（六个 v1.5.0 开关 + `recall.computeDates`）与 `DEFAULT_CONFIG`/随包 `config.json`
+  对账一致。
+- 独立审计（Lead 自写探针，未入库）：用真实归档产物复算——归档后每条 `context.json` 消息的 `time` 有限且等于源
+  事件时间，`meta.eventStart/End` 等于消息 `time` 的 min/max+1；`buildRecallBlock`（`computeDates=true`）
+  标题为 `### 回忆 N · 归档于 <createdAt 带星期时分>（事件时间 <事件区间>） · α=…`，无独立 `事件时间：` 行；
+  `computeDates=false` 与冻结 1.6.0 树的 `buildRecallBlock` 逐字节一致（多种 falsy 配置变体 × 多组
+  fixtures 对比，标题与 preamble 均不变）；相对时间注解锚点等于消息自身 `time`（固定 2026-04-15 事件日、
+  归档日为 2026-11 → 注解 `昨天(2026-04-14)`，不是按归档日算出的日期）；降级渲染器与 `memory_recall`
+  标题在两种形态下分别与引擎/legacy 输出一致。
+- 独立复核（teammate `verifier`，只读）：复核结论 **PASS**（无 blocker/major）；其自写探针 6 种 falsy 配置变体
+  × 6 组 fixtures × live vs 冻结 1.6.0 = 36/36 逐字节一致；指出并已修复 3 项：降级渲染器旧标题、
+  `memory_recall` 标题裸归档日期、`eventStart=0` 渲染 1970；修复后其列出的 focused tests 与本轮全量均通过。
+
+### 28.2 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node --test test/recall-computable-block.test.mjs test-adapter/plugin-mock.test.mjs \
+  test-adapter/plugin-rules-1.6.0.test.mjs
+node tools/verify-1.4.0.mjs
+node tools/selfcheck.mjs && node tools/privacy-check.mjs
+```
+
+### 28.3 版本
+
+`package.json` / `engine/package.json` = **1.5.4**；`tools/gate-baseline.json` = **1316**；
+`docs/SPEC.md` §2/§6.7/§25/§26 与 README §1.15/§1.16/§3/§7 已同步 1.5.4 行为；`context.json` 只新增可选
+`messages[].time`，旧数据不回填、无需迁移。
+
+---
+
+## 29. v1.5.4 增量验证（2026-11-09）
+
+**范围**：① 版号统一为 1.5.4（1.7.0 → 1.5.4，含文档/注释）；② 归档评分时模型可见
+「去掉非真实对话部分」的真实对话全文（待评分 + 复核条目）；③ `memory_judge` 评分关键词上限
+30 → 16；④ `memory_recall` 满页提示移到条目之前（preamble 区）。
+
+### 29.1 测试与门禁（本机实测）
+
+- `node --test` = **1316 tests / 1314 pass / 0 fail / 2 skip**（2 skip 为 Node zstd 平台条件跳过）。
+  相对上一轮（1312）净增 4 例：`test-adapter/scoring-pressure.test.mjs` 新增「待评分条目渲染真实对话
+  全文（超过旧 160 字符窗口的尾部标记可见）」与「非真实对话消息（纯 tool 输出）不进入评分文本」；
+  同时改写了 v1.4.3/v1.4.4 的评分摘要测试（摘要 → 全文/过滤/无真实对话标注）、
+  `test-adapter/plugin-mock.test.mjs` 任务区块断言（`摘要=` 移除、原文全文、规则 3~16）、
+  `test-adapter/scoring-rubric.test.mjs`（3~16）、`test-adapter/category-keyword.test.mjs`
+  （16 词上限替换）、`test/recall-computable-block.test.mjs`（归档侧上限 16、查询/归档同为 16）；
+  `test/message-preview.test.mjs` 新增 2 例（JSON 对话行判定：QQ 对话 JSON 保留、普通工具 JSON 丢弃）。
+  `test-adapter/recall-tool-1.6.0.test.mjs` 新增满页提示位于第一个 `### 回忆` 之前的断言。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1314**；
+  **1314 unique / 1334 summed with e2e re-runs**）；e2e-adapter 12/12、e2e-real-data 8/8。
+- `test/config-consistency.test.mjs` 通过：版本 1.5.4、CHANGELOG 有 `## [1.5.4]` 段、
+  `DEFAULT_CONFIG` 与随包 `config.json` 的 `keywords.max=16` 一致、README §3 / SPEC §2 文档值一致。
+- 评分可见性人工核对：`记忆评分任务` 区块逐条为 `head + 原文： + 全对话`；纯 tool/system 消息被
+  `conversationalMessagesText` 丢弃；QQ JSON tool result 中携带的对话仍保留（`messagePreview`
+  判定 conversational）；无对话文件夹显示「（无真实对话内容：纯工具输出 / 协议消息，按过程日志评分）」；
+  超预算条目显示截断标记。
+- 满页提示位置人工核对：`renderRecallResult` 输出中 `【本页已满…】` 位于 header/count 与约束行之后、
+  第一个 `### 回忆` 之前（`text.indexOf('【本页已满') < text.indexOf('### 回忆 1')`）。
+
+### 29.2 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node --test test-adapter/scoring-pressure.test.mjs test-adapter/plugin-mock.test.mjs \
+  test-adapter/recall-tool-1.6.0.test.mjs test-adapter/category-keyword.test.mjs \
+  test/recall-computable-block.test.mjs
+node tools/verify-1.4.0.mjs
+```
+
+### 29.3 版本
+
+`package.json` / `engine/package.json` = **1.5.4**；`tools/gate-baseline.json` = **1316**；
+`keywords.max` = **16**（engine 默认 + 随包配置）；README §1.16 / SPEC §26 / CHANGELOG [1.5.4] 已同步。
+
+---
+
+## 30. v1.5.5 最终验证（2026-11-09）
+
+**范围**：① 关键词规则（覆盖所有事、信息密度决定数量、所有人物/地点必须包含、人物/地点/事件设置后复查、
+助手原话也要进 keywords 或 assistant 原话通道）；② 高相关命中保底配额（`recall.highRelevance`）；
+③ assistant 原话抽取修复（只抽真实对话、每轮最后回复优先、JSON/token 后置过滤）；④ 版本 1.5.4 → 1.5.5。
+
+### 30.1 测试与门禁（本机实测）
+
+- `node --test` = **1330 tests / 1328 pass / 0 fail / 2 skip**（2 skip 为 Node zstd 平台条件跳过）。
+  相对 1.5.4（1316）新增 14 例：`test/high-relevance-quota.test.mjs`（7）、
+  `test/assistant-keywords-1.5.5.test.mjs`（6）、prompt/config 断言（scoring-rubric、
+  plugin-mock rubric、config-consistency 的 `recall.highRelevance`）；同时更新既有
+  `audit-fix-archive`（纯数字不再进 assistant 关键词）与 `scoring-pressure`（rubric 增大后的
+  truncation 夹具窗口 4000→5000）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1330**；
+  **1330 unique / 1350 summed with e2e re-runs**）；e2e-adapter 12/12、e2e-real-data 8/8。
+- `test/config-consistency.test.mjs` 通过：版本 1.5.5、CHANGELOG 有 `## [1.5.5]` 段、
+  `recall.highRelevance` 在 `DEFAULT_CONFIG` 与随包 `config.json` 中一致。
+- 高相关人工核对：低 α 但命中 3 个查询关键词的记忆在 quota=1 的 fair 轮次中替换掉单关键词高 α 尾部命中；
+  `deterministic` 与分页路径不生效；助手原话/多子句保底命中不会被替换。适配器 `recall-block`
+  遥测已转发 `highRelevanceEnabled/Candidates/Picks/Replaced`（plugin-mock 断言），stats.jsonl 可观察保底触发。
+- 助手原话人工核对：`[tool-call …]` / JSON payload / `role=tool` 不产生关键词；content blocks 只取 text；
+  两个 turn 时第二个 turn 的最短回复仍获得槽位；`alpha/beta/keywords/mem-…/12345/readthroughseq` 被过滤。
+
+### 30.2 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node --test test/high-relevance-quota.test.mjs test/assistant-keywords-1.5.5.test.mjs \
+  test-adapter/scoring-rubric.test.mjs test-adapter/plugin-mock.test.mjs test/config-consistency.test.mjs
+node tools/verify-1.4.0.mjs
+```
+
+### 30.3 版本
+
+`package.json` / `engine/package.json` = **1.5.5**；`tools/gate-baseline.json` = **1330**；
+`recall.highRelevance` = `{enabled:true, minMatches:2, reserveSlots:2}`（engine 默认 + 随包配置一致）；
+README §1.17 / SPEC §6.2/§26 / CHANGELOG [1.5.5] 已同步。
+
+---
+
+## 31. v1.5.6 最终验证（2026-11-09）
+
+**范围**：① 评分期关键词规则——多话题文件夹必须覆盖**每个话题**的关键事实（每个话题至少 1 个能独立检索到
+它的关键词，不得只写第一个/最主要话题，也不得用泛词凑数）；② 记忆相关问题主动召回规则
+（`MEMORY_RULES_TEXT` 新增第 6 条（共 9 条）「记忆相关问题（v1.5.6）」）；③ 版本 1.5.5 → 1.5.6。
+
+### 31.1 测试与门禁（本机实测）
+
+- `node --test` = **1332 tests / 1330 pass / 0 fail / 2 skip**（2 skip 为 Node zstd 平台条件跳过）。
+  相对 1.5.5（1330）新增 2 例：`test-adapter/scoring-rubric.test.mjs`（多话题关键词规则：TOOL_DESCRIPTION
+  + `keywords` 参数说明）、`test-adapter/plugin-rules-1.6.0.test.mjs`（「记忆相关问题」规则文本/顺序/
+  规则 section 长度守卫）；同步更新 `test-adapter/plugin-mock.test.mjs` 的评分 rubric 关键词断言
+  （新增紧凑多话题句）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1332**；
+  **1332 unique / 1352 summed with e2e re-runs**）；e2e-adapter 12/12、e2e-real-data 8/8。
+- `test/config-consistency.test.mjs` 通过：版本 1.5.6、CHANGELOG 有 `## [1.5.6]` 段、
+  `package.json` 与 `engine/package.json` 版本一致。
+- **P0-1 任务区块预算回归**：完整多话题规则放在 `memory_judge` 工具描述与 `keywords` 参数说明里，评分
+  rubric 只加一句紧凑规则；修复过程中发现直接新增一条完整 rubric 条目（约 +90 tokens）会挤掉小窗口下的
+  待评分条目，导致 `compat-integration`（1000-token 窗口）与 `scoring-pressure` F-05-01（12000-token
+  窗口）失败；改为紧凑句（约 +27 tokens）后两者恢复通过，证明没有牺牲任务条目展示预算。
+- 规则 section 长度：9 条实测 **984 字符**（`plugin-rules` 守卫上限 1200），系统提示词常驻成本可控。
+
+### 31.2 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node --test test-adapter/scoring-rubric.test.mjs test-adapter/plugin-rules-1.6.0.test.mjs \
+  test-adapter/plugin-mock.test.mjs test-adapter/compat-integration.test.mjs \
+  test-adapter/scoring-pressure.test.mjs test/config-consistency.test.mjs
+node tools/verify-1.4.0.mjs
+```
+
+### 31.3 版本
+
+`package.json` / `engine/package.json` = **1.5.6**；`tools/gate-baseline.json` = **1332**；
+README §1.18 / SPEC §6.13/§27-28 / CHANGELOG [1.5.6] / `config.json` `_readme` 已同步；
+数据格式无变化，无需迁移。
+
+---
+
+## 32. v1.5.7 最终验证（2026-11-10）
+
+**范围**：Derpyu 白名单注入改为「第一次需要时先弹系统提示窗授权」——
+① 允许 = 与 1.5.6 相同的备份 + 原子注入，决定写入机器级 `$DSH_HOME/rofm/.compat-consent.json`（默认 `~/.dsh/rofm/`，只问一次）；
+② 不允许 = 记录 `denied`（`closed:"bundle"`）、当前进程立即注销，并关闭 rofm 在设置里的开关（在设置里重新打开 rofm = 视为允许并注入白名单；无 `pluginManager` 时回退 `enabled:false`）
+工具/section/监听器（默认关闭，后续可自行开启）；
+③ 未回答 = 保持 pending，绝不写第三方文件（Derpyu 通道回退启发式评分）；
+④ 新增浏览器半身 `client.js`（`dsh.client = {platform:"web", immediately:true, inject:[]}`）+
+同源认证接口 `GET/POST /api/rofm/derpyu-consent`；
+⑤ 新配置 `compat.derpyuConsent`（`"ask"` 默认 / `"allow"` 预授权）。
+
+### 32.1 测试与门禁（本机实测）
+
+- `node --test`（全量，node 24.21.0）= **1358 tests / 1356 pass / 0 fail / 2 skip**
+  （2 skip 为 Node zstd 平台条件跳过）。相对 1.5.6（1332）新增 **26** 例：
+  `test/compat-consent.test.mjs`（9）、`test-adapter/compat-consent.test.mjs`（8）、
+  `test/client-half.test.mjs`（9）；`test-adapter/compat-pipeline.test.mjs` 的“补丁机制”用例
+  改为 `derpyuConsent:"allow"` 预授权（断言内容不变，弹窗/pending/deny 由新用例覆盖）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**（`tools/gate-baseline.json` → **1358**；
+  **1358 unique / 1378 summed with e2e re-runs**）；e2e-adapter 12/12、e2e-real-data 8/8。
+- `test/config-consistency.test.mjs` 通过：版本 1.5.7、CHANGELOG 有 `## [1.5.7]` 段、
+  两个 `package.json` 版本一致、`config.json` 是合法 JSON 且与 `DEFAULT_CONFIG` 一致。
+- `test/release.test.mjs` 通过（CHANGELOG 当前段可被 release 工具提取；npm 包文件清单含 `client.js`）。
+- `node tools/privacy-check.mjs` = PASS（跟踪的 `config.json` 无本机 QQ 号/路径；
+  `.compat-consent.json` 与 `config.local.json` 都是 gitignored 的本机文件）。
+
+### 32.2 授权门禁行为核对（适配层 mock，不需要 DSH）
+
+`test-adapter/compat-consent.test.mjs` 用临时假 profile + 真实 `detectQqCompat` + mock
+`connection.fetch` 路由，逐条钉死：
+
+1. **pending 不写文件**：首次检测到 Derpyu 时 `autopatchStatus.status="pending-consent"`、
+   `autopatchApplied=false`；第三方文件 sha/内容不变、无 `.bak-rofm-*`、无决定文件；
+   GET 返回 `pending:true` + 用户指定原文 + 真实 `targetFile`；非法 POST 返回 400 且仍 pending。
+2. **允许**：`POST {"decision":"allow"}` 返回 `decision:"allowed"/patch:"patched"`，立即注入四工具名并备份；
+   `memory/.compat-consent.json` 写入 `allowed`；第二个标签页/重复点击幂等 `already:true`；
+   重启（新实例、同 memoryDir）不发弹窗、`status:"already"`。
+3. **拒绝**：`POST {"decision":"deny"}` 后写入 `denied` 决定 + `config.local.json` 的 `enabled:false`
+   （保留其它键）；当前实例 `consentDenied=true`，4 个工具/3 个 section 全部注销、事件监听器为 0、
+   section 渲染返回 `''`、引擎清空；consent API 本身保留（页面再问拿到 `pending:false/decision:"denied"`，
+   不会永远重试）；第三方文件保持 byte-identical（拒绝不回滚历史补丁，也不新增写入）。
+4. **坏 `config.local.json`**：不覆盖用户文件，仅返回 `warning`，仍写入 `denied` 并停用当前实例。
+5. **显式开关**：`derpyuConsent:"allow"` = 无弹窗直接注入（headless/CI 逃生门）；
+   `autoPatchDerpyu:false` = 永不弹窗、永不写文件（`status:"disabled"`）。
+6. **已拒绝后再开启**：决定文件 `denied` + `enabled:true` 时启动不发弹窗、不注入，
+   日志 WARN 说明 QQ 渠道回退 heuristic；删决定文件或设 `derpyuConsent:"allow"` 才恢复补丁路径。
+7. **`enabled:false` 启动早退**：检测、工具、section、路由、监听器都不注册（与 1.5.6 的早退语义一致）。
+
+### 32.3 浏览器半身核对
+
+- `node --check client.js` = OK；`test/client-half.test.mjs` 9/9 PASS：纯浏览器脚本可解析、
+  `window.__ModuleLoader__.load({id:"dsh-rofm"})`、`exports.name/inject=[]/apply`、
+  路由 `/api/rofm/derpyu-consent`、POST `{"decision":"allow"|"deny"}`、`ctx.effect` 清理、
+  `role=dialog`/`aria-modal`/主题变量 + fallback、**不内嵌**主文案（唯一真相在宿主）、
+  `package.json` 的 `dsh.client` 与 `exports["./client"]`、≤480 行。
+- 额外做了一次**未提交**的 DOM/fetch 桩运行（临时脚本，不进仓库）：模拟
+  `window.__ModuleLoader__`/`document`/`fetch` 执行 `apply`，6 个场景全过——
+  ①pending 弹窗→点允许→POST allow→显示 allowedNotice→2s 淡出移除→ctx 清理；
+  ②重复 apply 只保留 1 个弹窗；③POST 500 显示重试且按钮恢复；④`already:true` 立即关窗；
+  ⑤fetch 持续失败不弹窗、不抛未捕获异常；⑥dispose 后不再发请求。
+- **真实浏览器端到端尚未执行（限制，不是缺陷）**：本机 desktop profile 当前**没有 `dsh-rofm`
+  的 Loader row**（`package.json` 里仍是 link 依赖，但 `dsh.profile.bundles` 与
+  `cordis.patch.yml` 都不含它，`plugin_manager list_plugins` 也查不到该行），所以运行中的
+  DSH 不会加载本插件、也不会加载/client.js。启用/重装 bundle 行并重载 DSH 后，页面加载时会
+  自动轮询 `/api/rofm/derpyu-consent`；本机已有历史补丁（`.compat-state.json` 1 条记录），
+  因此第一次应看到弹窗：允许 → `already` 直接恢复模型评分；不允许 → rofm 关闭
+  （可在 `config.local.json` 改回 `enabled:true` 后重载重新开启）。
+
+### 32.4 数据 / 隐私 / 回滚
+
+- **无数据迁移**：`memory/` 的 meta/context/index 格式不变（engine 测试全绿）；本机真实库
+  `tools/selfcheck.mjs` 只读 PASS：3 store / 1264 folder / 1264 index entry、2 pending / 1262 scored、
+  124 行 stats、2 个 recall-state 文件；本轮未写入真实 `memory/`。
+- `.compat-consent.json` 是本机运行状态（不是记忆数据、不进 npm 包、不提交、不迁移）；
+  `config.local.json` 早已在 `.gitignore`；允许/拒绝决定只落本机。
+- **回滚**：删 `$DSH_HOME/rofm/.compat-consent.json`（默认 `~/.dsh/rofm/`）可在下次检测重新询问；`derpyuConsent:"allow"` 恢复
+  1.5.6 的自动补丁；拒绝后想完全恢复补丁可用 `.bak-rofm-*` 备份或手删 SAFE_EXACT 里四行（§3.2.5）。
+
+### 32.5 复跑命令
+
+```bash
+export PATH="<node-bin>:$PATH"
+cd <repo>
+node --test
+node --test test/compat-consent.test.mjs test-adapter/compat-consent.test.mjs test/client-half.test.mjs
+node --test test-adapter/compat-pipeline.test.mjs test-adapter/compat-integration.test.mjs
+node tools/verify-1.4.0.mjs
+```
+
+### 32.6 版本
+
+`package.json` / `engine/package.json` = **1.5.7**；`tools/gate-baseline.json` = **1358**
+（max skip 4；e2e 12/8）；README §1.19 + §3.2.5/§3.2.9 / SPEC §2 addendum + §29 /
+CHANGELOG [1.5.7] / `config.json` `_readme` 已同步；数据格式无变化，无需迁移。
+
+### 32.7 弹窗卡死事故与同类风险复查（2026-11-10）
+
+**现象**：首次真机弹窗出现后，点「允许」一直「提交失败，请重试」，弹窗无关闭出口，
+页面被遮罩卡住（用户切换到其它工具修复）。
+
+**根因**：DSH `connection.fetch` 的 exact Fetch 路由表按 **path 唯一定位**
+（`Map<path, route>`，方法集挂在路由值上）。v1.5.7 把 GET 与 POST 拆成两次
+`connection.fetch.register` 注册同一路径：第二次注册被宿主以 "already registered" 拒绝，
+异常被 catch 吞掉，实际只留下 GET 路由 → 弹窗能弹（GET 正常），提交 POST 404 →
+客户端重试提示，且当时弹窗没有关闭按钮 → 永久卡住。
+
+**修复**（同日）：① 改为**一次注册** `methods:['GET','POST']`，handler 按 `request.method`
+分发；② 适配层 mock 改成「同路径重复注册即抛错」，allow 用例直接走 `route.fetch` 提交，
+把双路由写法在测试层钉死；③ 浏览器半身新增 × / Esc 关闭出口与「接口不可用」提示，
+关闭后停止本页轮询（宿主保持 pending，刷新重新询问）。
+
+**同类风险复查与加固**：
+
+| 风险 | 处理 |
+|---|---|
+| 热重载/服务重挂载再次注册同一 path（第二个实例与旧实例重叠） | 宿主路由改为按 connection 的模块级 claimant bus：只注册一次，新实例接管 handler，最后一个 claim 释放时注销；适配层加入 `ctx.inject` 重入用例（只 1 条路由、无 duplicate 警告、GET 仍可用） |
+| 路由 handler 抛异常 → rejected promise（宿主 500/无响应） | 统一 catch 成 JSON 500，客户端显示可重试错误，不会挂死 |
+| POST 失败/接口消失时弹窗无法退出 | × / Esc + 「授权接口已不可用」提示；关闭后 `stopped` 停止轮询、宿主保持 pending |
+| 本页已作答但宿主仍 pending（决定没写成功）→ 30s 空转轮询 | 检测到 `settled && pending` 直接停止轮询，刷新后重新询问 |
+| 连续 404（插件被禁用）时无限轮询 | 6 次退避后停止，弹窗仍在时提示可关闭后刷新 |
+| 关闭与生命周期清理冲突（关闭后 dispose 不再清 DOM） | 生命周期幂等用独立的 `disposed` 标志，`dispose()` 始终清理 DOM/样式/监听器/定时器 |
+| 多标签页/重复点击 | 既有 `already:true` / `pending:false` 收敛 + 释放式 claim，不重复弹窗 |
+
+回归证据：`node --test test-adapter/compat-consent.test.mjs`（8/8，含重入用例）、
+`test/client-half.test.mjs`（9/9，含 ×/Esc 与停止轮询断言）、`test/compat-consent.test.mjs`（9/9）；
+全量 `node --test` = 1358 tests / 1356 pass / 0 fail / 2 skip；`node tools/verify-1.4.0.mjs`
+= 8/8 PASS（见 32.1）。真机复验：重载插件后弹窗出现，允许 → 决定写入
+`$DSH_HOME/rofm/.compat-consent.json`（本机实测 `decision:"allowed"`），再点 × 可正常关闭、页面不卡。
+
+### 32.8 安装/更新时序与「只问一次」语义（2026-11-12 加固）
+
+**判定链**（全部满足才弹）：rofm 被 DSH 加载 → compat 检测开启 → 检测到 qq-bridge/Derpyu →
+`autoPatchDerpyu !== false` → `derpyuConsent === "ask"` → **机器级**状态文件里没有决定 →
+Web GUI 页面加载了 `client.js` 并轮询到 `pending:true`。
+
+**授权决定位置（本轮加固）**：`$DSH_HOME/rofm/.compat-consent.json`（默认 `~/.dsh/rofm/`），
+不再放在插件安装目录的 `memory/`。因此 DSH 更新/重装（npm 包目录被替换）、改 `storage.dir`、
+换 profile 都不会丢失决定或重问；旧版放在 `memory/` 的安装级记录在首次读取时迁移。
+**拒绝 = 关闭设置开关，重新打开即允许**（2026-11-12 二次修订）：拒绝时记录 `closed:"bundle"`、当前进程
+立即停用，并异步关闭 rofm 在设置里的开关；之后在设置里重新打开 rofm，启动时自动升级为 `allowed`、
+注入白名单、不再弹窗。仅无 `pluginManager` 时回退为硬关闭（删状态文件或 `derpyuConsent:"allow"`）。
+
+**场景矩阵**：
+
+| # | 场景 | 能否正确响应 | 弹窗时机 | 备注 |
+|---|---|---|---|---|
+| 1 | 已有 qq-bridge + 旧 rofm，更新到本版本（AI 改文件 / DSH 更新） | 能 | 新版本插件重载或 DSH 重启后；页面加载 `client.js` 约 2.5s | 旧版没有状态文件→视为第一次；历史补丁不阻止弹窗；若同进程热更新自「双路由」旧构建，建议完全重启 DSH（旧路由可能残留，路由注册失败会 WARN） |
+| 2 | 已有 qq-bridge，AI/DSH 安装 rofm | 能 | rofm 启动后（`application: applied` 即生效）+ 页面刷新/动态加载 `client.js` 后约 2.5s | 安装前没有 rofm 半身；DSH 运行中安装时页面可能需刷新一次以加载新 client bundle，宿主 API 已 live |
+| 3 | 已有 rofm，AI/DSH 安装 qq-bridge | 能 | **刷新页面后**弹窗（页面加载首次查询） | 浏览器半身**没有常驻轮询**（未检测到 qq-bridge 时零后台轮询，普通 rofm 化）；页面若已打开需刷新一次；宿主在下次查询时按 profile mtime 重新检测 |
+| 4 | 对 AI 说「安装 rofm 和 qq-bridge」 | 能 | 两者装好后打开/刷新页面时弹窗 | 顺序无关；后装 qq-bridge 按场景 3 需刷新页面 |
+| 5 | 无论允许/不允许都只响应最开始一次 | 允许/拒绝都满足 | 只在决定缺失时弹 | 允许：只问一次；拒绝：不再弹，且在设置里重新打开 rofm 即按允许处理（不弹）；例外（安全降级）：状态文件写失败、被删除/损坏、`$DSH_HOME` 换到另一台机器/另一个账号时视为“未决定”会再问 |
+
+**回归证据**：`test-adapter/compat-consent.test.mjs` 的 pending 用例模拟“先 rofm 后装 qq-bridge”：
+先移除 fake profile 里的 qq-bridge → `GET` 返回 `detected:false`（客户端此时停止轮询），
+再恢复 → 下一次 `GET` 变回 `pending:true`（无需重启插件；页面已打开时需刷新才会发起该次查询）；deny 用例证明 deny 会关闭设置开关
+（mock `pluginManager` 收到 `('dsh-rofm', false)`），随后“用户重新打开 rofm”的新实例把决定升级为
+`allowed`、注入白名单并重新注册全部工具（不再弹窗）；旧 `memory/` 的 legacy deny 则保持硬关闭
+（工具/section/路由均为 0）。全量 `node --test` 通过；
+`node tools/verify-1.4.0.mjs` 8/8 PASS。
+
+**仍然存在的边界**（有意保留，避免误改第三方文件）：无 GUI/无浏览器页面时保持 pending（不弹也不写）；
+热更新自旧构建且旧路由未注销时，新实例路由注册失败只 WARN + 需完全重启；状态文件写失败会退回“下次再问”。
+
+### 32.9 拒绝后「设置里重新打开 rofm」语义修订（2026-11-12 二次修订）
+
+用户要求：**拒绝后只要在设置里重新打开 rofm，就可以正常使用 rofm（包括注入白名单）**。原
+「拒绝=常驻关闭、只能删状态文件/显式 allow」的语义无法通过设置开关恢复，已改为：
+
+- 拒绝时：`writeConsent('denied', {closed:'bundle'})` → 当前进程 `disableRuntime()`（工具/section/
+  监听器注销）→ 异步调用宿主 `pluginManager.setBundleEnabled('dsh-rofm', false)`，把 rofm 在
+  “设置 → 插件”里的开关关掉；不再写 `config.local.json enabled:false`。
+- 用户在设置里重新打开 rofm：插件重新加载，`start()` 读到 `denied + closed:"bundle"` → 视为
+  **自行开启 = 允许**：升级状态为 `allowed`、清掉遗留 `config.local.json enabled:false`、执行
+  `refreshAutopatch`（注入白名单）、正常注册全部工具；**不再弹窗**。
+- 回退路径（宿主没有 `pluginManager` 服务 / 关闭开关失败）：记录 `closed:"hard"` 并写
+  `config.local.json enabled:false`，保持旧的硬关闭；重新开启需删状态文件（会重新询问）或
+  `compat.derpyuConsent:"allow"`。
+- 测试（适配层 mock `pluginManager`）：deny 后断言 `pluginManager.setBundleEnabled('dsh-rofm', false)`
+  被调用、决定 `closed:"bundle"`、`config.local.json` 没有 `enabled` 键；随后用同一状态新建插件
+  （模拟用户重新打开）→ 断言不弹窗、`consentDenied=false`、`autopatchApplied=true`、工具全部注册、
+  状态升级为 `allowed`。无 `pluginManager` 的分支断言 `closed:"hard"` + `enabled:false` + 重启仍
+  inert。单元测试补 `closed` 往返与 `clearLocalDisable`。全量 `node --test` = 1358 tests / 0 fail；
+  `node tools/verify-1.4.0.mjs` = 8/8 PASS。
+
+### 32.10 零后台轮询修订（2026-11-12）
+
+用户要求：**没检测到 qq-bridge 时连轮询都完全停掉**（普通 rofm 不得有后台请求）。
+
+- `client.js` 的非 pending 分支现在直接 `stopped = true`：没有 qq-bridge / 已决定 / 预授权 /
+  补丁关闭 → 页面加载首次查询后即停止，不再有 30s 常驻复查。
+- 失败重试（2.5s→30s 退避、连续 404 六次停止）仅用于页面加载时宿主接口尚未就绪的握手，
+  不再用于「等 qq-bridge 后装」。
+- 已知代价（文档已同步）：qq-bridge 在本页面打开之后才安装 → 需要**刷新页面**才会弹窗
+  （宿主持久保持 pending，刷新后首次 GET 即弹）；rofm 未加载页面时安装 qq-bridge，则下次打开页面弹。
+- 回归：`test/client-half.test.mjs` 改为断言源码里不存在 `watchLater` 常驻复查、且非 pending
+  必须停止轮询；`node --test` = 1358 tests / 0 fail；`tools/verify-1.4.0.mjs` = 8/8 PASS。
+
+## 33. v1.5.8：插件图标替换（2026-11-13）
+
+### 33.1 变更
+
+- **图标**：`icon.svg` → `icon.png`。源图是用户提供的 1024×1024「水面涟漪」插画；用 Pillow
+  （LANCZOS）缩放到 256×256，再按 22% 圆角做 alpha 遮罩（四角透明），输出 151,242 B 的 PNG。
+- **清单**：`package.json` 顶层新增 `"icon": "icon.png"`；`exports["./icon"]` 由 `./icon.svg` 改为
+  `./icon.png`；`files` 里 `icon.svg` → `icon.png`；仓库根的 `icon.svg` 删除。README 目录树与
+  §3 的图标说明同步。
+- 运行时、数据格式、配置项均未改动（无迁移）。
+
+### 33.2 与 DSH 插件显示元信息规范的核对
+
+本机 DSH 0.2.2-rc.2 的 `package-meta`（`iconOf()`）规定：
+
+- 顶层 `package.json` 的 `icon`（相对清单目录）**优先**，没有才用 `<specifier>/icon` 导出资源；
+  顶层 icon 的解析前提是包导出 `./package.json`（本包已导出）；
+- 图标必须留在清单目录 / 包目录内，扩展名只接受 `.svg` / `.png` / `.jpg` / `.jpeg` / `.webp`；
+- 原始字节 ≤ 256 KiB（`MAX_ICON_BYTES = 256 * 1024`）；
+- 宿主把它转成 `data:<mime>;base64,…`，插件页用 `<img>`（CSS `object-fit: contain`；行图标 30px、
+  卡片 40px 容器）渲染，解码失败回退内置默认图。
+
+本包：PNG、151,242 B（< 256 KiB）、位于包根、路径相对清单目录。`npm pack --dry-run` 确认
+`icon.png` 在 tarball 内，且 `memory/` 只有 `.gitkeep`（无运行数据）。
+
+### 33.3 验证（2026-11-13，node v24.21.0）
+
+- `node --test` = **1358 tests / 1354 pass / 0 fail / 4 skip**（用例数与 1.5.7 相同；4 个 skip 是本机
+  平台条件跳过，`tools/gate-baseline.json` 的 `maxFullSuiteSkipped` = 4 内）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**：privacy / unit-tests（1358 / 1354 pass / 0 fail /
+  4 skip）/ simulate / selfcheck / cli-help / memory-audit / time-view / e2e-adapter 12/12 /
+  e2e-real-data 8/8；`steps: 8/8 PASS · node:test cases: 1358 unique`。
+- `npm pack --dry-run` = `dsh-rofm-1.5.8.tgz`，62 files，package 957.8 kB / unpacked 2.6 MB
+  （含 `icon.png` 151.2 kB），未包含任何 `memory/sessions/*` 运行数据。
+- `tools/privacy-check.mjs` PASS（跟踪文件无本机私有值）。
+
+### 33.4 未覆盖
+
+- **视觉渲染未截图**：插件页图标由 DSH Web GUI 渲染，本仓库没有浏览器截图能力（与 §3 的限制相同）。
+  机制层（解析顺序、扩展名白名单、256 KiB 上限、data URL 渲染路径）已按宿主源码核对；
+  DSH 重载插件行 / 重启后即可在「设置 → 插件」看到新图标。
+
+## 34. v1.5.9：Derpyu 唤醒提示词归档还原（2026-11-15）
+
+### 34.1 变更
+
+- 新增纯模块 `lib/wake-prompt.js`：识别 Derpyu 唤醒提示词，归档副本还原为
+  `【本次消息快照】` 的对话行（`[QQ 唤醒快照]` + `[at] sender：text`），
+  自动召回查询也只使用这段对话；无新对话的唤醒跳过本轮自动召回。
+- 生效条件严格限定为：compat 检测命中 Derpyu + 会话 id 为 `qqb-*` +
+  `compat.derpyuWakeSanitize !== false`。未装桥 / compat off / onebot / WebUI / 子代理
+  与 1.5.8 行为一致。
+- 只改归档副本与召回查询：活会话消息、turn 保护、桥接行为、token-meter 释放核算不动；
+  folder 标题取首条聊天行，`meta.stats` 用清洗后正文；旧数据不迁移。
+- 配置新增 `compat.derpyuWakeSanitize`（默认 `true`，`false` 一键回滚）。
+
+### 34.2 验证（2026-11-15，node v24.21.0）
+
+- `node --test` = **1379 tests / 1375 pass / 0 fail / 4 skip**（新增 21 例：
+  `test/wake-prompt.test.mjs` 13、`test/passive-archive.test.mjs` 2、
+  `test/compat.test.mjs` 1、`test-adapter/plugin-mock.test.mjs` 5）。
+- `node tools/verify-1.4.0.mjs` = **8/8 PASS**：privacy / unit-tests（1379 / 1375 pass /
+  0 fail / 4 skip）/ simulate / selfcheck / cli-help / memory-audit / time-view /
+  e2e-adapter 12/12 / e2e-real-data 8/8；`steps: 8/8 PASS · node:test cases: 1379 unique`。
+- 关键断言：全卡唤醒只出对话、无 `【角色卡`/`【会话令牌】`；空快照/超时唤醒为一行标记；
+  pretty JSON 走括号配对回退；截断 JSON 只留失败标记；普通消息/onebot/一代小唤醒/半角伪造
+  原样返回；Derpyu folder 正文与标题干净，`entry.tokens` 仍为测量值；
+  非 Derpyu 会话与 `derpyuWakeSanitize=false` 保持模板原样；空唤醒不产生召回块。
+
+### 34.3 未覆盖
+
+- 本机当前会话里没有可直接复现的真实桥接唤醒样本，验证使用与一条真实唤醒同构的
+  fixture（角色卡 + 令牌 + 快照 + 尾部指令）；上线后可用 CLI 日志
+  `wake sanitize: kind=wake-snapshot, template N chars -> conversation M chars` 观察真机字符数。
+- 旧数据（已入库的模板 folder）不在本版范围：不迁移、不删除、不重写。

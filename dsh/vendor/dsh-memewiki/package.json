@@ -1,0 +1,57 @@
+{
+  "name": "dsh-memewiki",
+  "version": "0.1.20",
+  "description": "梗百科：6792 条梗/黑话词库，自动查梗并注入上下文，不让模型硬猜。支持一键下载社区最新词库、提交新梗，与社区共创。",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./client": "./lib/client.js"
+  },
+  "files": [
+    "lib",
+    "data",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "meme",
+    "梗百科",
+    "meme-wiki"
+  ],
+  "author": "thawline",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thawline/dsh-memewiki.git"
+  },
+  "homepage": "https://github.com/thawline/dsh-memewiki#readme",
+  "bugs": {
+    "url": "https://github.com/thawline/dsh-memewiki/issues"
+  }
+}

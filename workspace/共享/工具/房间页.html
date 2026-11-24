@@ -1,0 +1,1339 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>她的房间</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0e15;
+    font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  canvas{display:block;width:100%;height:100%;cursor:crosshair}
+  #hud{position:fixed;left:16px;bottom:14px;color:#dfe4f2;font-size:13px;line-height:1.7;
+    background:rgba(15,19,32,.66);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 14px}
+  #hud b{color:#7c93ff}
+  #tip{position:fixed;left:50%;top:16px;transform:translateX(-50%);color:#cfd6e6;font-size:13px;
+    background:rgba(15,19,32,.66);border:1px solid rgba(255,255,255,.1);border-radius:99px;padding:6px 14px;pointer-events:none}
+  #err{position:fixed;left:12px;right:12px;top:12px;display:none;white-space:pre-wrap;
+    background:rgba(130,25,35,.94);color:#ffe9ec;font:12.5px/1.5 ui-monospace,Consolas,monospace;
+    padding:10px 12px;border-radius:10px;z-index:99}
+  #build{display:none;position:fixed;left:36px;top:36px;width:320px;
+    background:rgba(15,19,32,.93);border:1px solid rgba(255,255,255,.12);border-radius:16px;
+    padding:0 0 12px;color:#dfe4f2;box-shadow:0 18px 50px rgba(0,0,0,.5);z-index:20}
+  #build.on{display:block}
+  #buildHead{display:flex;align-items:center;justify-content:space-between;
+    padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.08);cursor:move;user-select:none}
+  #buildHead b{font-size:13.5px}
+  #buildHead span{color:#6b7488;font-size:12px}
+  #buildBody{padding:12px 14px 0;max-height:50vh;overflow:auto}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .cell{position:relative;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:6px 4px 4px;
+    text-align:center;cursor:pointer;background:rgba(255,255,255,.02)}
+  .cell:hover{border-color:#7c93ff;background:rgba(77,107,254,.12)}
+  .cell .thumb{font-size:19px;line-height:1.4}
+  .cell .nm{font-size:10.5px;color:#9aa3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cell .cnt{position:absolute;right:3px;top:2px;font-size:10.5px;color:#0d1017;background:#7c93ff;
+    border-radius:99px;padding:0 5px;font-weight:600}
+  .sect{color:#6b7488;font-size:11.5px;margin:10px 0 6px}
+  #actions{display:none;position:fixed;left:50%;bottom:34px;transform:translateX(-50%);
+    background:rgba(15,19,32,.94);border:1px solid rgba(255,255,255,.14);border-radius:16px;
+    padding:10px 12px;color:#dfe4f2;z-index:30;align-items:center;gap:8px;box-shadow:0 16px 40px rgba(0,0,0,.5)}
+  #actions.on{display:flex}
+  #actions .name{font-size:13px;margin-right:6px;color:#9fb4ff}
+  #actions button{all:unset;cursor:pointer;font-size:13px;padding:7px 14px;border-radius:99px;
+    background:#2a3350;color:#dfe4f2}
+  #actions button:hover{background:#3a4670}
+  #actions button.danger{background:#7a2530;color:#ffd9de}
+  #actions #btnClose{background:#ffffff;color:#5a6478;border:1px solid rgba(255,255,255,.18)}
+  #actions #btnClose:hover{background:#c0392b;color:#fff;border-color:#c0392b}
+  #actions button.primary{background:#4d6bfe;color:#fff}
+
+  /* ESC_CONFIRM 2026-11-02：Esc 弹「是否返回」确认；有别的可取消的东西时先取消那个 */
+  #confirm{display:none;position:fixed;inset:0;background:rgba(6,9,15,.55);z-index:60;
+    align-items:center;justify-content:center}
+  #confirm.on{display:flex}
+  #confirmBox{width:min(90vw,320px);background:linear-gradient(180deg,#1a2133,#121826);
+    border:1px solid rgba(255,255,255,.14);border-radius:18px;padding:22px 20px;text-align:center;
+    box-shadow:0 24px 60px rgba(0,0,0,.6)}
+  #confirmBox p{margin:0 0 18px;font-size:15px;color:#e8ebf2}
+  #confirmBox .btns{display:flex;gap:10px}
+  #confirmBox button{all:unset;cursor:pointer;flex:1;text-align:center;padding:10px 0;border-radius:12px;
+    font-size:14px;font-weight:600}
+  /* EXIT_DISTINCT：退出是危险动作，用红色；留下是中性，用灰蓝 */
+  /* HOVER_RED：退出/取消平时是白的，鼠标压上去才变红 */
+  #yes{background:#ffffff;color:#c0392b;border:1px solid #e6c9c5}
+  #yes:hover{background:#c0392b;color:#fff;border-color:#c0392b;box-shadow:0 6px 18px rgba(192,57,43,.3)}
+  #no{background:#2a3350;color:#cfd6e6;border:1px solid rgba(255,255,255,.12)}
+  #no:hover{background:#333d5e}
+  #confirmBox .hint{color:#8a92a6;font-size:12px;margin:-8px 0 16px}
+
+  /* ROOM_THEME_UI 2026-11-02：房间界面的 UI 跟着主面板主题走 */
+  body[data-theme^="light"]{--ui-bg:rgba(255,255,255,.92);--ui-line:#dfe6f4;--ui-txt:#1b2233;--ui-dim:#5d6577}
+  body[data-theme^="light"] #hud{background:var(--ui-bg);color:var(--ui-txt);border-color:var(--ui-line)}
+  body[data-theme^="light"] #hud b{color:#3b5bdb}
+  body[data-theme^="light"] #tip{background:var(--ui-bg);color:var(--ui-txt);border-color:var(--ui-line)}
+  body[data-theme^="light"] #build{background:var(--ui-bg);color:var(--ui-txt);border-color:var(--ui-line);box-shadow:0 18px 50px rgba(30,50,100,.18)}
+  body[data-theme^="light"] #buildHead{border-bottom-color:var(--ui-line)}
+  body[data-theme^="light"] #buildHead span{color:var(--ui-dim)}
+  body[data-theme^="light"] .sect{color:var(--ui-dim)}
+  body[data-theme^="light"] .cell{background:#f6f9ff;border-color:var(--ui-line)}
+  body[data-theme^="light"] .cell:hover{border-color:#4d6bfe;background:#eef3ff}
+  body[data-theme^="light"] .cell .nm{color:var(--ui-dim)}
+  body[data-theme^="light"] .cell .cnt{background:#4d6bfe;color:#fff}
+  body[data-theme^="light"] #actions{background:var(--ui-bg);border-color:var(--ui-line);box-shadow:0 16px 40px rgba(30,50,100,.2)}
+  body[data-theme^="light"] #actions .name{color:#3b5bdb}
+  body[data-theme^="light"] #actions button{background:#eef2fb;color:#2b3550}
+  body[data-theme^="light"] #actions button:hover{background:#e2e9f8}
+  body[data-theme^="light"] #actions button.primary{background:#4d6bfe;color:#fff}
+  body[data-theme^="light"] #actions button.danger{background:#ffe2e6;color:#a52332}
+  body[data-theme^="light"] #confirmBox{background:linear-gradient(180deg,#ffffff,#f4f8ff);border-color:var(--ui-line)}
+  body[data-theme^="light"] #confirmBox p{color:var(--ui-txt)}
+  body[data-theme^="light"] #no{background:#eef2fb;color:#2b3550;border-color:#dfe6f4}
+  body[data-theme^="light"] #yes{background:#fff;color:#c0392b;border-color:#e6c9c5}
+  body[data-theme^="light"] #yes:hover{background:#c0392b;color:#fff}
+  body[data-theme^="light"] #actions #btnClose{background:#fff;color:#5a6478;border-color:#dfe6f4}
+  body[data-theme^="light"] #actions #btnClose:hover{background:#c0392b;color:#fff}
+  body[data-theme^="light"] #confirmBox .hint{color:#6b7488}
+</style></head>
+<body>
+<div id="err"></div>
+<div id="tip">鼠标中键锁/放鼠标 · WASD 走 · B 建筑模式</div>
+<div id="hud">她的房间 · <b id="fnum">0</b> 件 · 舒服度 <b id="comfort">0</b></div>
+
+<div id="build">
+  <div id="buildHead"><b>建筑模式</b><span>B 关闭 · 拖我移动</span></div>
+  <div id="buildBody">
+    <div class="sect">能摆的（点一下拿起）</div>
+    <div class="grid" id="bagGrid"></div>
+  </div>
+</div>
+
+<div id="actions">
+  <span class="name" id="selName">—</span>
+  <button id="btnMove">移动</button>
+  <button id="btnRot" class="primary">旋转</button>
+  <button id="btnStore" class="danger">收回</button>
+  <button id="btnClose">取消</button>
+</div>
+
+<div id="confirm"><div id="confirmBox">
+  <p>要退出房间吗？</p><div class="hint">退出会回到面板，房间里的摆放都存着</div>
+  <div class="btns"><button id="yes">退出房间</button><button id="no">留在这儿</button></div>
+</div></div>
+<script>
+// ROOM_THEME_UI：跟主面板共用同一份主题记忆（localStorage 的 fish-theme）
+(function () {
+  function apply(t) {
+    if (['light-white', 'light-blue', 'dark'].indexOf(t) < 0) t = 'dark';
+    document.body.dataset.theme = t;
+  }
+  var saved = 'dark';
+  try { saved = localStorage.getItem('fish-theme') || 'dark' } catch (e) {}
+  apply(saved);
+  addEventListener('storage', function (ev) { if (ev.key === 'fish-theme') apply(ev.newValue) });
+  window.applyRoomUiTheme = apply;
+})();
+</script>
+<script type="importmap">
+{ "imports": { "three": "/three/three.module.js" } }
+</script>
+<script type="module">
+// GLTF_LAMP 2026-11-02：用模块版 three + GLTFLoader，台灯换成 Blender 做的真模型
+import * as THREE from '/three/three.module.js'
+import { GLTFLoader } from '/three/GLTFLoader.js'
+window.onerror = function (m, f, l) {
+  var e = document.getElementById('err');
+  e.style.display = 'block'; e.textContent = '出错：' + m + '\n' + f + ':' + l;
+};
+
+var WIDTH = 7, DEPTH = 8, HEIGHT = 3.2;
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x121726);
+scene.fog = new THREE.Fog(0x121726, 20, 36);
+
+var camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 200);
+var renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+addEventListener('resize', function () {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// LIGHT_NAME_FIX 2026-11-02：起个名，applyStateMood 里要调它
+var hemi = new THREE.HemisphereLight(0xd6e4ff, 0x3a4058, 1.15);
+scene.add(hemi);
+var keyLight = new THREE.DirectionalLight(0xffe6c2, 1.2);
+keyLight.position.set(3, 7, 4); keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+keyLight.shadow.camera.left = -8; keyLight.shadow.camera.right = 8;
+keyLight.shadow.camera.top = 8; keyLight.shadow.camera.bottom = -8;
+scene.add(keyLight);
+var fillLight = new THREE.DirectionalLight(0x8fa8ff, 0.4);
+fillLight.position.set(-5, 4, -5); scene.add(fillLight);
+
+var matFloor = new THREE.MeshStandardMaterial({ color: 0x4a3b40, roughness: 0.9 });
+var matWall = new THREE.MeshStandardMaterial({ color: 0x3a4463, roughness: 0.95 });
+var matCeil = new THREE.MeshStandardMaterial({ color: 0x1d2336, roughness: 1 });
+
+// ROOM_THEME_LIGHT 2026-11-02：三套主题（深/蓝/亮）换材质色调 + 重新打光
+var ROOM_THEME = (function () {
+  var q = new URLSearchParams(location.search).get('theme')
+  if (q) return q
+  try { return localStorage.getItem('fish-room-theme') || 'dark' } catch (e) { return 'dark' }
+})()
+
+var THEMES = {
+  dark:  { bg: 0x121726, floor: 0x4a3b40, wall: 0x3a4463, ceil: 0x1d2336, key: 1.2, hemi: 1.15 },
+  blue:  { bg: 0x0f1c2e, floor: 0x3d4a5c, wall: 0x2f4668, ceil: 0x16233a, key: 1.35, hemi: 1.3 },
+  light: { bg: 0xf3f4f8, floor: 0xd8c9b8, wall: 0xe8eaf2, ceil: 0xffffff, key: 2.1, hemi: 2.0 },
+}
+
+function applyRoomTheme(name) {
+  var t = THEMES[name] || THEMES.dark
+  ROOM_THEME = (name in THEMES) ? name : 'dark'
+  try { localStorage.setItem('fish-room-theme', ROOM_THEME) } catch (e) {}
+  scene.background = new THREE.Color(t.bg)
+  if (scene.fog) {
+    scene.fog.color = new THREE.Color(t.bg)
+    scene.fog.near = ROOM_THEME === 'light' ? 40 : 20
+    scene.fog.far = ROOM_THEME === 'light' ? 90 : 36
+  }
+  matFloor.color.setHex(t.floor)
+  matWall.color.setHex(t.wall)
+  matCeil.color.setHex(t.ceil)
+  // CEIL_EMIT 亮色天花太暗：给一点自发光，避免开灯还是灰顶
+  matCeil.emissive.setHex(ROOM_THEME === 'light' ? 0x8a8a8a : 0x000000)
+  if (matWall.emissive) matWall.emissive.setHex(ROOM_THEME === 'light' ? 0x2a2a2a : 0x000000)
+  keyLight.intensity = t.key
+  hemi.intensity = t.hemi
+}
+applyRoomTheme(ROOM_THEME)
+
+addEventListener('keydown', function (e) {
+  if (e.code !== 'KeyT' || e.repeat) return
+  var order = ['dark', 'blue', 'light']
+  var i = order.indexOf(ROOM_THEME)
+  applyRoomTheme(order[(i + 1) % order.length])
+  var tip = document.getElementById('tip')
+  if (tip) tip.textContent = '主题：' + ({ dark: '深色', blue: '蓝色', light: '亮色' }[ROOM_THEME]) + ' · 再按 T 切换'
+})
+
+var SURFACES = [];
+function slab(w, h, d, mat, x, y, z, isFloor) {
+  var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z); m.receiveShadow = true; m.userData.floor = !!isFloor;
+  scene.add(m); return m;
+}
+SURFACES.push(slab(WIDTH, 0.1, DEPTH, matFloor, 0, -0.05, 0, true));
+slab(WIDTH, 0.1, DEPTH, matCeil, 0, HEIGHT + 0.05, 0);
+slab(WIDTH, HEIGHT, 0.1, matWall, 0, HEIGHT / 2, -DEPTH / 2 - 0.05);
+slab(WIDTH, HEIGHT, 0.1, matWall, 0, HEIGHT / 2, DEPTH / 2 + 0.05);
+slab(0.1, HEIGHT, DEPTH, matWall, -WIDTH / 2 - 0.05, HEIGHT / 2, 0);
+slab(0.1, HEIGHT, DEPTH, matWall, WIDTH / 2 + 0.05, HEIGHT / 2, 0);
+
+var grid = new THREE.GridHelper(WIDTH, 14, 0x4a5476, 0x333b55);
+grid.position.y = 0.012; scene.add(grid);
+
+var THUMB = { 台灯: '💡', 水杯: '🥤', 鱼缸: '🐟', 书架: '📚', 软垫: '🟪', 小地毯: '🟫', 窗帘: '🪟', 音箱: '🔊', 床: '🛏️', 书桌: '🗄️' };
+
+// MAT_CLONE_FIX 2026-11-02：网格可能是多材质（数组），clone 前要分开处理
+function cloneMat(o, ghost) {
+  if (Array.isArray(o.material)) {
+    o.material = o.material.map(function (m) {
+      var c = m.clone();
+      if (ghost) { c.transparent = true; c.opacity = 0.4 }
+      return c;
+    });
+  } else if (o.material) {
+    o.material = o.material.clone();
+    if (ghost) { o.material.transparent = true; o.material.opacity = 0.4 }
+  }
+}
+
+function makeFurniture(name, ghost) {
+  var g = new THREE.Group();
+  // 有对应模型就先用模型（半透明用幽灵材质）
+  if (SMALL_TEMPLATES[name]) {
+    var tg = SMALL_TEMPLATES[name].clone(true);
+    tg.traverse(function (o) {
+      if (o.isMesh) {
+        o.castShadow = !ghost; o.receiveShadow = !ghost;
+        cloneMat(o, ghost);
+      }
+    });
+    g.add(tg);
+    return g;
+  }
+  function mat(color, rough, emissive) {
+    var m = new THREE.MeshStandardMaterial({ color: color, roughness: rough == null ? 0.85 : rough });
+    if (emissive) { m.emissive = new THREE.Color(emissive); m.emissiveIntensity = 0.6; }
+    if (ghost) { m.transparent = true; m.opacity = 0.4; }
+    return m;
+  }
+  function bx(w, h, d, color, x, y, z) {
+    var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(color));
+    m.position.set(x, y, z);
+    if (!ghost) { m.castShadow = true; m.receiveShadow = true; }
+    g.add(m); return m;
+  }
+  if (name === '台灯') {
+    if (LAMP_TEMPLATE) {
+      // 有 Blender 模型就用模型，没有就退回方块版（保证不空）
+      var m2 = LAMP_TEMPLATE.clone(true);
+      m2.traverse(function (o) {
+        if (o.isMesh) {
+          o.castShadow = !ghost; o.receiveShadow = !ghost;
+          cloneMat(o, ghost);
+        }
+      });
+      g.add(m2);
+      if (!ghost) { var pl2 = new THREE.PointLight(0xffc07a, 0.9, 5); pl2.position.set(0, 0.35, 0); g.add(pl2) }
+    } else {
+      bx(0.16, 0.03, 0.16, 0x556070, 0, 0.015, 0);
+      bx(0.035, 0.32, 0.035, 0x6b7688, 0, 0.19, 0);
+      var sh = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.16, 12), mat(0xffca8a, 0.6, 0xff9d4a));
+      sh.position.set(0, 0.4, 0); g.add(sh);
+      if (!ghost) { var pl = new THREE.PointLight(0xffc07a, 0.8, 5); pl.position.set(0, 0.3, 0); g.add(pl) }
+    }
+  } else if (name === '水杯') {
+    var c = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.042, 0.12, 12), mat(0xbfd4ff, 0.5));
+    c.position.y = 0.06; if (!ghost) c.castShadow = true; g.add(c);
+  } else if (name === '软垫') {
+    bx(0.5, 0.12, 0.5, 0x8b6fae, 0, 0.06, 0);
+  } else if (name === '小地毯') {
+    bx(1.5, 0.02, 1.0, 0x7a4f5f, 0, 0.011, 0);
+  } else if (name === '鱼缸') {
+    bx(0.7, 0.24, 0.4, 0x3c4757, 0, 0.12, 0);
+    var gl = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.34, 0.34), mat(0x5aa7d8, 0.15));
+    if (!ghost) { gl.material.transparent = true; gl.material.opacity = 0.45 }
+    gl.position.y = 0.42; g.add(gl);
+  } else if (name === '书架') {
+    if (SHELF_TEMPLATE) {
+      var sg = SHELF_TEMPLATE.clone(true);
+      sg.traverse(function (o) {
+        if (o.isMesh) {
+          o.castShadow = !ghost; o.receiveShadow = !ghost;
+          cloneMat(o, ghost);
+        }
+      });
+      g.add(sg);
+      return g;
+    }
+    bx(0.9, 1.6, 0.28, 0x4a3f36, 0, 0.8, 0);
+    for (var i = 0; i < 4; i++) bx(0.82, 0.04, 0.24, 0x6b5847, 0, 0.3 + i * 0.38, 0);
+  } else if (name === '窗帘') {
+    bx(1.2, 1.9, 0.06, 0x8f9ad0, 0, 1.6, 0);
+  } else if (name === '音箱') {
+    bx(0.22, 0.34, 0.22, 0x2b2b33, -0.22, 0.17, 0);
+    bx(0.22, 0.34, 0.22, 0x2b2b33, 0.22, 0.17, 0);
+  } else if (name === '床') {
+    if (BED_TEMPLATE) {
+      var bg = BED_TEMPLATE.clone(true);
+      bg.traverse(function (o) {
+        if (o.isMesh) {
+          o.castShadow = !ghost; o.receiveShadow = !ghost;
+          cloneMat(o, ghost);
+        }
+      });
+      g.add(bg);
+      return g;
+    }
+    bx(1.9, 0.4, 2.3, 0x4b4258, 0, 0.2, 0);
+    bx(1.8, 0.18, 2.2, 0x8b7f9e, 0, 0.49, 0);
+    bx(1.6, 0.14, 0.55, 0xa79bc0, 0, 0.64, -0.85);
+  } else if (name === '书桌') {
+    if (DESK_TEMPLATE) {
+      var dg = DESK_TEMPLATE.clone(true);
+      dg.traverse(function (o) {
+        if (o.isMesh) {
+          o.castShadow = !ghost; o.receiveShadow = !ghost;
+          cloneMat(o, ghost);
+        }
+      });
+      g.add(dg);
+      return g;
+    }
+    bx(2.0, 0.08, 0.85, 0x5a4b3f, 0, 0.88, 0);
+    bx(0.09, 0.88, 0.09, 0x3e342c, -0.8, 0.44, 0);
+    bx(0.09, 0.88, 0.09, 0x3e342c, 0.8, 0.44, 0);
+  } else {
+    bx(0.4, 0.4, 0.4, 0x777777, 0, 0.2, 0);
+  }
+  return g;
+}
+
+var homeGroups = {}, builtinGroups = {};
+var ghost = null, ghostName = '', buildMode = false, placing = false, selected = null, moving = null;
+
+function addHome(it, builtin) {
+  var g = makeFurniture(it.n, false);
+  g.position.set(Number(it.x), Number(it.y || 0), Number(it.z));
+  g.rotation.y = Number(it.rot || 0);
+  g.userData = { name: it.n, builtin: !!builtin };
+  g.traverse(function (o) { if (o.isMesh) o.userData.furn = it.n });
+  scene.add(g);
+  (builtin ? builtinGroups : homeGroups)[it.n] = g;
+  SURFACES.push(g);
+}
+function refreshHome(s) {
+  Object.keys(homeGroups).forEach(function (k) { scene.remove(homeGroups[k]); delete homeGroups[k] });
+  Object.keys(builtinGroups).forEach(function (k) { scene.remove(builtinGroups[k]); delete builtinGroups[k] });
+  SURFACES = SURFACES.filter(function (o) { return o.userData.floor });
+  (s.builtin || []).forEach(function (it) { addHome(it, true) });
+  (s.home || []).forEach(function (it) { addHome(it, false) });
+  document.getElementById('fnum').textContent = (s.home || []).length;
+}
+
+// 用模型替换方块版「她」：沿用原来的位置和朝向
+function swapHer() {
+  if (!HER_TEMPLATE || !her) return
+  while (her.children.length) her.remove(her.children[0])
+  var m = HER_TEMPLATE.clone(true)
+  m.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } })
+  her.add(m)
+}
+
+var her = new THREE.Group();
+window.__her = her; // EXPOSE_HER 创建后立刻挂出去
+// EXPOSE_MODULE 2026-11-02：模块作用域的东西挂出来，给后面的普通脚本用（头顶气泡）
+window.__THREE = THREE;
+window.__scene = scene;
+
+her.position.set(-2.0, 0, -0.6); her.rotation.y = 1.15; scene.add(her);
+(function buildHer() {
+  var skinM = new THREE.MeshStandardMaterial({ color: 0xf2d7c9, roughness: 0.75 });
+  var hairMs = new THREE.MeshStandardMaterial({ color: 0x3f63d8, roughness: 0.55 });
+  var finMs = new THREE.MeshStandardMaterial({ color: 0x2f4fb8, roughness: 0.6 });
+  var dressMs = new THREE.MeshStandardMaterial({ color: 0x1f3f8f, roughness: 0.7 });
+  var b = new THREE.Mesh(new THREE.ConeGeometry(0.27, 0.95, 14), dressMs);
+  b.position.y = 0.47; b.castShadow = true; her.add(b);
+  var h = new THREE.Mesh(new THREE.SphereGeometry(0.24, 20, 16), skinM);
+  h.position.y = 1.1; h.castShadow = true; her.add(h);
+  var ht = new THREE.Mesh(new THREE.SphereGeometry(0.26, 20, 16, 0, Math.PI * 2, 0, Math.PI * 0.62), hairMs);
+  ht.position.y = 1.14; her.add(ht);
+  var hb = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.5, 6, 12), hairMs);
+  hb.position.set(0, 0.82, -0.16); her.add(hb);
+  [-1, 1].forEach(function (s) {
+    var e = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.24, 4), finMs);
+    e.position.set(s * 0.24, 1.18, 0); e.rotation.z = s * Math.PI / 2.4; her.add(e);
+  });
+  var tl = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.66, 8), finMs);
+  tl.position.set(0, 0.34, -0.44); tl.rotation.x = -Math.PI / 2.1; her.add(tl);
+  [-1, 1].forEach(function (s) {
+    var eye = new THREE.Mesh(new THREE.SphereGeometry(0.032, 10, 8), new THREE.MeshStandardMaterial({ color: 0x141a2a }));
+    eye.position.set(s * 0.085, 1.12, 0.215); her.add(eye);
+  });
+  her.userData.tail = tl;
+})();
+
+var yaw = 0, pitch = -0.05;
+var pos = new THREE.Vector3(0.6, 1.62, 3.6);
+var locked = false;
+
+var downPt = null;
+renderer.domElement.addEventListener('mousedown', function (e) {
+  // 2026-11-02 MIDDLE_LOCK：只用中键控制鼠标锁定，左键留给点家具
+  if (e.button === 0) { downPt = { x: e.clientX, y: e.clientY }; }
+  if (e.button === 1) {
+    e.preventDefault();
+    if (locked) { if (document.exitPointerLock) document.exitPointerLock(); }
+    else renderer.domElement.requestPointerLock();
+  }
+});
+addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+document.addEventListener('pointerlockchange', function () {
+  locked = document.pointerLockElement === renderer.domElement;
+  document.getElementById('tip').textContent = locked
+    ? '移动鼠标看四周 · WASD 走 · B 建筑模式 · Esc 放开鼠标'
+    : '鼠标中键锁/放鼠标 · WASD 走 · B 建筑模式';
+});
+document.addEventListener('mousemove', function (e) {
+  // 2026-11-02 MOVE_FIX：正在挪东西时，鼠标只用来挪它，不转视角
+  if (moving || placing) { moveCursorTarget(e); return; }
+  if (rotating) { rotating.rotation.y -= e.movementX * 0.012; return; }
+  if (locked) {
+    yaw -= e.movementX * 0.0022;
+    pitch = Math.max(-1.2, Math.min(1.2, pitch - e.movementY * 0.0022));
+  }
+});
+
+// ROT_MODE 2026-11-02：360 度自由旋转——点「旋转」后鼠标左右移动即可转，左键保存
+var rotating = null;
+var raycaster = new THREE.Raycaster();
+function pointerToSurface(clientX, clientY) {
+  var ndc = new THREE.Vector2((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  var hits = raycaster.intersectObjects(SURFACES, true);
+  return hits.length ? hits[0].point : null;
+}
+function moveCursorTarget(e) {
+  var p = pointerToSurface(e.clientX, e.clientY);
+  if (!p) return;
+  var obj = moving || ghost;
+  if (!obj) return;
+  obj.position.set(
+    Math.max(-WIDTH / 2 + 0.35, Math.min(WIDTH / 2 - 0.35, p.x)),
+    Math.max(0, p.y),
+    Math.max(-DEPTH / 2 + 0.35, Math.min(DEPTH / 2 - 0.35, p.z))
+  );
+}
+
+var keys = {};
+// 2026-11-02 CLEAR_KEYS：按键粘住的根因是「松手那一下收不到」——切标签、点面板、锁鼠标都会丢 keyup。
+// 所以除了正常 keyup，还在失焦/切页/鼠标锁定变化时把所有键清干净。
+function clearKeys() { for (var k in keys) keys[k] = false; }
+window.addEventListener('blur', clearKeys);
+document.addEventListener('visibilitychange', function () { if (document.hidden) clearKeys(); });
+document.addEventListener('pointerlockchange', clearKeys);
+addEventListener('keydown', function (e) {
+  keys[e.code] = true;
+  if (e.code === 'KeyB') { toggleBuild(); e.preventDefault(); }
+  if (e.code === 'KeyR') { var o = moving || ghost; if (o) o.rotation.y += Math.PI / 4; }
+  if (e.code === 'Escape') {
+    // ESC_CONFIRM：有正在做的事先撤掉，什么都没做才问「要不要返回」
+    if (rotating) { rotating = null; loadState(); document.getElementById('tip').textContent = '鼠标中键锁/放鼠标 · WASD 走 · B 建筑模式'; return; }
+    if (moving) { moving = null; loadState(); return; }
+    if (placing) { cancelGhost(); return; }
+    if (selected) { closeSelection(); return; }
+    if (buildMode) { toggleBuild(); return; }
+    var c = document.getElementById('confirm');
+    if (c.classList.contains('on')) { c.classList.remove('on'); return; }
+    c.classList.add('on');
+    if (document.exitPointerLock) document.exitPointerLock();
+  } else closeSelection();
+});
+// 2026-11-02 补回：松手必须真的取消按键，否则按一下会一直走
+addEventListener('keyup', function (e) { keys[e.code] = false; });
+
+renderer.domElement.addEventListener('mouseup', function (e) {
+  if (rotating) { saveOne(rotating); rotating = null; document.getElementById('tip').textContent='鼠标中键锁/放鼠标 · WASD 走 · B 建筑模式'; return; }
+  if (placing && ghost) dropGhost();
+  else if (moving) finishMove();
+  // PICK_FIX_OK 2026-11-02 点家具 → 操作条（接在 else 链上）
+  // PICK_FURNITURE 2026-11-02：点一下屋里的家具 → 底部弹操作条（移动/旋转/收回/取消）
+  else if (downPt && e.button === 0) {
+    var dx2 = e.clientX - downPt.x, dy2 = e.clientY - downPt.y;
+    if (dx2 * dx2 + dy2 * dy2 < 25 && !locked) {
+      var ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      var list = Object.values(homeGroups).concat(Object.values(builtinGroups));
+      var hit = raycaster.intersectObjects(list, true)[0];
+      if (hit) {
+        var node = hit.object;
+        while (node && !(node.userData && node.userData.name)) node = node.parent;
+        if (node) selectFurniture(node);
+      } else {
+        closeSelection();
+      }
+    }
+    downPt = null;
+  }
+});
+
+function toggleBuild() {
+  buildMode = !buildMode;
+  document.getElementById('build').classList.toggle('on', buildMode);
+  if (!buildMode) { cancelGhost(); closeSelection(); }
+  renderPanel();
+}
+function startGhost(name) {
+  cancelGhost(); closeSelection();
+  placing = true; ghostName = name;
+  if (document.exitPointerLock) document.exitPointerLock();
+  ghost = makeFurniture(name, true);
+  ghost.position.copy(pos).setY(0);
+  scene.add(ghost);
+  document.getElementById('tip').textContent = '移动鼠标选位置 · 左键放下 · R 转向 · Esc 取消';
+  renderPanel();
+}
+function dropGhost() {
+  if (!ghost) return;
+  fetch('/room-place', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ item: ghostName, x: ghost.position.x, y: ghost.position.y, z: ghost.position.z, rot: ghost.rotation.y })
+  }).then(function (r) { return r.json() }).then(function (j) {
+    if (j.ok) { cancelGhost(); loadState(); } else alert(j.msg || '没放下');
+  });
+}
+function cancelGhost() {
+  if (ghost) { scene.remove(ghost); ghost = null; }
+  ghostName = ''; placing = false;
+  document.getElementById('tip').textContent = '鼠标中键锁/放鼠标 · WASD 走 · B 建筑模式';
+  renderPanel();
+}
+function selectFurniture(root) {
+  selected = root;
+  document.getElementById('selName').textContent = root.userData.name + (root.userData.builtin ? '（自带）' : '');
+  document.getElementById('btnStore').style.display = '';
+  document.getElementById('actions').classList.add('on');
+}
+function closeSelection() {
+  selected = null; moving = null;
+  document.getElementById('actions').classList.remove('on');
+}
+document.getElementById('btnMove').onclick = function () {
+  if (!selected) return;
+  moving = selected; selected = null;
+  if (document.exitPointerLock) document.exitPointerLock();
+  document.getElementById('actions').classList.remove('on');
+  document.getElementById('tip').textContent = '移动鼠标挪位置 · 左键放下 · R 转向';
+};
+document.getElementById('btnRot').onclick = function () {
+  if (!selected) return;
+  rotating = selected; selected = null;
+  document.getElementById('actions').classList.remove('on');
+  document.getElementById('tip').textContent = '左右移动鼠标旋转 · 左键确认 · Esc 取消';
+};
+document.getElementById('btnStore').onclick = function () {
+  if (!selected) return;
+  fetch('/room-remove', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ item: selected.userData.name })
+  }).then(function (r) { return r.json() }).then(function (j) { if (j.ok) { closeSelection(); loadState(); } });
+};
+document.getElementById('btnClose').onclick = closeSelection;
+
+function finishMove() {
+  if (!moving) return;
+  saveOne(moving); moving = null;
+  document.getElementById('tip').textContent = '鼠标中键锁/放鼠标 · WASD 走 · B 建筑模式';
+}
+function saveOne(obj) {
+  fetch('/room-place', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      item: obj.userData.name, builtin: !!obj.userData.builtin,
+      x: obj.position.x, y: obj.position.y, z: obj.position.z, rot: obj.rotation.y
+    })
+  }).then(function (r) { return r.json() }).then(function () { loadState() });
+}
+
+var STATE = { home: [], bag: [], builtin: [] };
+function renderPanel() {
+  if (!buildMode) return;
+  var bag = document.getElementById('bagGrid');
+  var counts = {};
+  (STATE.bag || []).forEach(function (n) { counts[n] = (counts[n] || 0) + 1 });
+  var names = Object.keys(counts);
+  bag.innerHTML = names.length
+    ? names.map(function (n) {
+        return '<div class="cell" data-item="' + n + '"><div class="thumb">' + (THUMB[n] || '📦') + '</div>' +
+          '<div class="nm">' + n + '</div><div class="cnt">' + counts[n] + '</div></div>';
+      }).join('')
+    : '<div class="sect" style="grid-column:1/-1">包里空的，去面板「出门」买</div>';
+  bag.querySelectorAll('[data-item]').forEach(function (el) {
+    el.onclick = function () { startGhost(el.dataset.item) };
+  });
+}
+
+(function () {
+  var box = document.getElementById('build'), head = document.getElementById('buildHead');
+  var sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+  head.addEventListener('mousedown', function (e) {
+    dragging = true; sx = e.clientX; sy = e.clientY;
+    var r = box.getBoundingClientRect(); ox = r.left; oy = r.top; e.preventDefault();
+  });
+  addEventListener('mousemove', function (e) {
+    if (!dragging) return;
+    box.style.left = Math.max(0, Math.min(innerWidth - 120, ox + e.clientX - sx)) + 'px';
+    box.style.top = Math.max(0, Math.min(innerHeight - 60, oy + e.clientY - sy)) + 'px';
+  });
+  addEventListener('mouseup', function () { dragging = false });
+})();
+
+var clock = new THREE.Clock(), t = 0;
+function tick() {
+  var dt = Math.min(0.05, clock.getDelta()); t += dt;
+  var sp = 2.7 * dt;
+  var fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  var right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+  if (!placing && !moving) {
+    if (keys['KeyW']) pos.addScaledVector(fwd, sp);
+    if (keys['KeyS']) pos.addScaledVector(fwd, -sp);
+    if (keys['KeyA']) pos.addScaledVector(right, -sp);
+    if (keys['KeyD']) pos.addScaledVector(right, sp);
+  }
+  pos.x = Math.max(-WIDTH / 2 + 0.4, Math.min(WIDTH / 2 - 0.4, pos.x));
+  pos.z = Math.max(-DEPTH / 2 + 0.4, Math.min(DEPTH / 2 - 0.4, pos.z));
+  camera.position.copy(pos);
+  var dir = new THREE.Vector3(
+    -Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+  camera.lookAt(pos.x + dir.x, pos.y + dir.y, pos.z + dir.z);
+
+  // POSE_MOVE 2026-11-02：慢悠悠挪到该在的地方（困了去床边、闷了蹲角）
+  (function(){
+    var hp = her.userData.homePos;
+    if (!hp) return;
+    her.position.x += (hp.x - her.position.x) * 0.02;
+    her.position.z += (hp.z - her.position.z) * 0.02;
+  })();
+
+  // LOOK_AT_PLAYER 2026-11-02：离她近了会慢慢转过来看你，远了就自己晃
+  (function(){
+    var dx = pos.x - her.position.x;
+    var dz = pos.z - her.position.z;
+    var dist = Math.sqrt(dx*dx + dz*dz);
+    var target = her.rotation.y;
+    if (dist < 3.2) {
+      // 面向玩家（模型正面朝 +z，所以用 atan2(dx, dz)）
+      target = Math.atan2(dx, dz);
+      // 一点点侧头，不死板
+      target += Math.sin(t * 0.9) * 0.05;
+    } else {
+      // 没人靠近就自己慢慢张望
+      target = 1.15 + Math.sin(t * 0.35) * 0.35;
+    }
+    // 缓动，别突然扭脖子
+    var diff = ((target - her.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    her.rotation.y += diff * Math.min(1, 0.06);
+  })();
+  // 呼吸：整体轻微起伏 + 细微缩放
+  her.position.y = Math.sin(t * 1.2) * 0.012;
+  var breath = 1 + Math.sin(t * 1.2) * 0.006;
+  her.scale.set(breath, 1 + Math.sin(t * 1.2) * 0.004, breath);
+  if (her.userData.tail) her.userData.tail.rotation.z = Math.sin(t * 1.4) * 0.1;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+document.getElementById('yes').onclick = function () {
+  // 回面板（8790 → 8787，同 host）
+  location.href = location.protocol + '//' + location.hostname + ':8787/';
+};
+document.getElementById('no').onclick = function () {
+  document.getElementById('confirm').classList.remove('on');
+};
+
+// STATE_LIGHT 2026-11-02：屋子跟着她状态变——不多说话，光说了算
+function applyStateMood(s) {
+  // HUD_FIX2 2026-11-02：先更新 HUD 再动场景，前面哪怕出错也不影响这行
+  try {
+    var hud = document.getElementById('hud');
+    if (hud) {
+      var ha = document.getElementById('hudAct');
+      if (!ha) {
+        ha = document.createElement('span');
+        ha.id = 'hudAct';
+        ha.style.marginLeft = '10px';
+        ha.style.color = '#9fb4ff';
+        hud.appendChild(ha);
+      }
+      // SICK_HUD 2026-11-08（批次224）：房间页没有立绘素材，就把「病着」写在状态行上。
+      ha.textContent = '· 这会儿在' + (s.activity || '待命')
+        + (s.病 ? '（病着：' + s.病.名 + ' ' + Math.round(Number(s.病.重 || 0) * 100) + '%）' : '');
+    }
+  } catch (e) { /* 忽略 */ }
+
+  try {
+    var energy = (s.energy == null) ? 60 : Number(s.energy);
+    var strain = s.strain && s.strain['档'] ? String(s.strain['档']) : '';
+    var mood = String((s.mood && s.mood.label) || '');
+
+    var k = 0.45 + Math.max(0, Math.min(100, energy)) / 100 * 0.9;
+    keyLight.intensity = k;
+    hemi.intensity = 0.55 + k * 0.45;
+
+    // 主题底色优先；状态只在深/蓝主题下压暗或发红
+    var _t = THEMES[ROOM_THEME] || THEMES.dark
+    var bg = new THREE.Color(ROOM_THEME === 'light' ? _t.bg : (strain ? 0x1d1114
+      : (mood.indexOf('闷') >= 0 || mood.indexOf('烦') >= 0) ? 0x0f1524
+      : (mood.indexOf('不错') >= 0 || mood.indexOf('开心') >= 0) ? 0x141a2b : _t.bg))
+    scene.background = bg;
+    if (scene.fog) scene.fog.color = bg;
+    // 亮色下灯光别跟着精力掉太多，否则白墙发灰
+    if (ROOM_THEME === 'light') { keyLight.intensity = _t.key * (0.78 + (k - 0.45) * 0.22); hemi.intensity = _t.hemi }
+
+    if (strain) {
+      if (!window.__strainLight) {
+        window.__strainLight = new THREE.PointLight(0xff6b5e, 0.55, 9);
+        window.__strainLight.position.set(0, 2.4, 0);
+        scene.add(window.__strainLight);
+      }
+    } else if (window.__strainLight) {
+      scene.remove(window.__strainLight);
+      window.__strainLight = null;
+    }
+
+    // POSE_BY_STATE 2026-11-02：困/累去床边、闷了蹲墙角、平常原位
+    var lowEnergy = energy < 30;
+    var sleepyNow = strain || String(s.activity || '').indexOf('瞌睡') >= 0;
+    var down = mood.indexOf('闷') >= 0 || mood.indexOf('烦') >= 0 || mood.indexOf('低落') >= 0;
+    if (sleepyNow || lowEnergy) her.userData.homePos = { x: -2.2, z: 1.9, rot: 2.4 };
+    else if (down) her.userData.homePos = { x: -3.0, z: -2.6, rot: 0.9 };
+    else her.userData.homePos = { x: -2.0, z: -0.6, rot: 1.15 };
+  } catch (e) {
+    var d = document.getElementById('err');
+    if (d) { d.style.display = 'block'; d.textContent = '状态联动出错：' + (e && e.message || e) }
+  }
+}
+
+function loadState() {
+  return fetch('/room-state').then(function (r) { return r.json() }).then(function (s) {
+    STATE = s; refreshHome(s);
+    applyStateMood(s);
+    document.getElementById('comfort').textContent = s.comfort || 0;
+    renderPanel();
+  }).catch(function () {});
+}
+
+// 先拉模型，拉到就重画（拿不到就用方块版，不影响玩）
+var LAMP_TEMPLATE = null, SHELF_TEMPLATE = null, DESK_TEMPLATE = null, BED_TEMPLATE = null;
+// SMALL_TEMPLATES 2026-11-02：水杯/鱼缸/软垫/小地毯/窗帘/音箱 六件走同一个 glb
+var SMALL_TEMPLATES = {};
+// HER_TEMPLATE：她本人的模型，加载到就替换掉方块拼的那个
+var HER_TEMPLATE = null;
+new GLTFLoader().load('/models/whale_girl.glb', function (g5) {
+  HER_TEMPLATE = g5.scene;
+  HER_TEMPLATE.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } });
+  swapHer();
+}, undefined, function () { console.log('她本人的模型没拉到，继续用方块版') });
+new GLTFLoader().load('/models/small_items.glb', function (g4) {
+  ['水杯', '鱼缸', '软垫', '小地毯', '窗帘', '音箱'].forEach(function (n) {
+    var o = g4.scene.getObjectByName(n);
+    if (o) { o.traverse(function (m) { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true } }); SMALL_TEMPLATES[n] = o }
+  });
+  loadState();
+}, undefined, function () { console.log('小家具模型没拉到，用方块版') });
+new GLTFLoader().load('/models/furniture2.glb', function (g3) {
+  g3.scene.traverse(function (o) {
+    if (o.name === 'Desk') DESK_TEMPLATE = o;
+    if (o.name === 'Bed') BED_TEMPLATE = o;
+  });
+  [DESK_TEMPLATE, BED_TEMPLATE].forEach(function (t) {
+    if (t) t.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } });
+  });
+  loadState();
+}, undefined, function () { console.log('书桌/床模型没拉到，用方块版') });
+new GLTFLoader().load('/models/bookshelf.glb', function (g2) {
+  SHELF_TEMPLATE = g2.scene;
+  SHELF_TEMPLATE.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } });
+  loadState();
+}, undefined, function () { console.log('书架模型没拉到，用方块版') });
+new GLTFLoader().load('/models/desk_lamp.glb', function (gltf) {
+  LAMP_TEMPLATE = gltf.scene;
+  LAMP_TEMPLATE.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true } });
+  loadState();
+}, undefined, function () { console.log('模型没拉到，用方块版台灯'); });
+
+loadState(); tick();
+</script>
+<!-- CHAT_OVERLAY 2026-11-02 按 E 跟她说话（代码出自 WorkBuddy，已验） -->
+<script>
+(function () {
+  var chatBox = null;
+
+  function initChat() {
+    var style = document.createElement('style');
+    style.textContent = ''
+      + '#chatBox{position:fixed;left:16px;bottom:16px;width:420px;max-width:92vw;height:480px;max-height:70vh;'
+      + 'background:#1e1e24;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.5);'
+      + 'display:none;flex-direction:column;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#eee;z-index:9999;}'
+      + '#chatBox.open{display:flex;}'
+      + '#chatBox .chatHead{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#2a2a33;border-bottom:1px solid #3a3a45;font-size:14px;font-weight:600;}'
+      + '#chatBox .chatClose{background:none;border:none;color:#888;font-size:18px;cursor:pointer;line-height:1;}'
+      + '#chatBox .chatClose:hover{color:#fff;}'
+      + '#chatBox #chatLog{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;}'
+      + '#chatBox .msg{max-width:75%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.45;word-break:break-word;}'
+      + '#chatBox .me{align-self:flex-end;background:#0a84ff;color:#fff;border-bottom-right-radius:4px;}'
+      + '#chatBox .other{align-self:flex-start;background:#3a3a45;color:#ddd;border-bottom-left-radius:4px;}'
+      + '#chatBox .err{align-self:center;color:#888;font-size:12px;}'
+      + '#chatBox .chatFoot{display:flex;gap:8px;padding:10px;border-top:1px solid #3a3a45;background:#2a2a33;}'
+      + '#chatBox #chatInput{flex:1;background:#1e1e24;border:1px solid #3a3a45;border-radius:8px;color:#eee;padding:8px 10px;font-size:13px;outline:none;font-family:inherit;}'
+      + '#chatBox #chatInput:focus{border-color:#0a84ff;}'
+      + '#chatBox #chatSend{background:#0a84ff;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit;}'
+      + '#chatBox #chatSend:hover{background:#0a74e0;}';
+    document.head.appendChild(style);
+
+    chatBox = document.createElement('div');
+    chatBox.id = 'chatBox';
+
+    var head = document.createElement('div');
+    head.className = 'chatHead';
+    var title = document.createElement('span');
+    title.textContent = '{{ALT_BOT_DISPLAY}}';
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'chatClose';
+    closeBtn.id = 'chatClose';
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', function () { closeChat(); });
+    head.appendChild(title);
+    head.appendChild(closeBtn);
+
+    var log = document.createElement('div');
+    log.id = 'chatLog';
+
+    var foot = document.createElement('div');
+    foot.className = 'chatFoot';
+    var input = document.createElement('input');
+    input.id = 'chatInput';
+    input.type = 'text';
+    input.placeholder = '说点什么…';
+    input.autocomplete = 'off';
+    var sendBtn = document.createElement('button');
+    sendBtn.id = 'chatSend';
+    sendBtn.textContent = '发送';
+    foot.appendChild(input);
+    foot.appendChild(sendBtn);
+
+    chatBox.appendChild(head);
+    chatBox.appendChild(log);
+    chatBox.appendChild(foot);
+    document.body.appendChild(chatBox);
+
+    sendBtn.addEventListener('click', function () { send(); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.keyCode === 13) {
+        e.stopPropagation();
+        send();
+      }
+      if (e.key === 'Escape' || e.keyCode === 27) {
+        closeChat();
+      }
+    });
+
+    document.addEventListener('keydown', function (e) {
+      var key = e.key || String.fromCharCode(e.keyCode || e.which);
+      var tag = (document.activeElement && document.activeElement.tagName) || '';
+      var isTyping = tag === 'INPUT' || tag === 'TEXTAREA';
+      if ((key === 'e' || key === 'E') && !isTyping) {
+        e.preventDefault();
+        toggleChat();
+      } else if (key === 'Escape' && chatBox && chatBox.classList.contains('open')) {
+        closeChat();
+      }
+    });
+  }
+
+  function appendMsg(cls, text) {
+    var log = document.getElementById('chatLog');
+    if (!log) return;
+    var el = document.createElement('div');
+    el.className = cls;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function send() {
+    var input = document.getElementById('chatInput');
+    var text = (input.value || '').trim();
+    if (!text) return;
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/room-say', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        appendMsg('msg me', text);
+        input.value = '';
+      } else {
+        appendMsg('err', '没送出去');
+      }
+    };
+    xhr.onerror = function () {
+      appendMsg('err', '没送出去');
+    };
+    xhr.send(JSON.stringify({ text: text }));
+  }
+
+  function openChat() {
+    if (!chatBox) initChat();
+// CHAT_POLL_HOOK 2026-11-02：轮询 /room-chat，把她的话显示在同一个浮层里
+try { startChatPoll(function (id) { return document.getElementById(id) }); } catch (e) {}
+
+    chatBox.classList.add('open');
+    var input = document.getElementById('chatInput');
+    if (input) setTimeout(function () { input.focus(); }, 0);
+  }
+
+  function closeChat() {
+    if (!chatBox) return;
+    chatBox.classList.remove('open');
+  }
+
+  function toggleChat() {
+    if (chatBox && chatBox.classList.contains('open')) {
+      closeChat();
+    } else {
+      openChat();
+    }
+  }
+
+  // 暴露接口到 window
+  window.initChat = initChat;
+  window.openChat = openChat;
+  window.closeChat = closeChat;
+  window.toggleChat = toggleChat;
+})();
+
+initChat();
+</script>
+<script>
+(function () {
+  var timer = null;
+  var cursor = 0;
+  var seen = {};
+
+  function pad(n) {
+    return n < 10 ? '0' + n : '' + n;
+  }
+
+  function fmtTime(at) {
+    var d = new Date(at);
+    if (isNaN(d.getTime())) return String(at || '');
+    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function isPlaceholder(el) {
+    var t = (el.textContent || '').replace(/^\s+|\s+$/g, '');
+    return el.children.length === 0 && t === '';
+  }
+
+  function renderBubble(el, item) {
+    var row = document.createElement('div');
+    var hers = item.from === 'her';
+    row.style.cssText = 'display:flex;justify-content:' +
+      (hers ? 'flex-start' : 'flex-end') +
+      ';margin:6px 8px;';
+
+    var bubble = document.createElement('div');
+    bubble.style.cssText =
+      'max-width:70%;padding:8px 12px;border-radius:12px;color:#fff;' +
+      'background:' + (hers ? '#999' : '#4a90d9') + ';word-break:break-word;';
+
+    var text = document.createElement('div');
+    text.appendChild(document.createTextNode(String(item.text == null ? '' : item.text)));
+
+    var time = document.createElement('div');
+    time.style.cssText =
+      'font-size:10px;opacity:.8;margin-top:2px;text-align:right;';
+    time.appendChild(document.createTextNode(fmtTime(item.at)));
+
+    bubble.appendChild(text);
+    bubble.appendChild(time);
+    row.appendChild(bubble);
+    el.appendChild(row);
+  }
+
+  function scrollToBottom(el) {
+    try {
+      el.scrollTop = el.scrollHeight;
+    } catch (e) {}
+  }
+
+  function startChatPoll(getEl, opt) {
+    stopChatPoll();
+    cursor = 0;
+    seen = {};
+    opt = opt || {};
+
+    function tick() {
+      var el;
+      try {
+        el = getEl('chatLog');
+      } catch (e) {
+        el = null;
+      }
+      if (!el) return;
+
+      fetch('/room-chat')
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (!data || data.ok !== true || !data.items) return;
+          var items = data.items;
+          var hadContent = !isPlaceholder(el);
+
+          for (var i = cursor; i < items.length; i++) {
+            var item = items[i];
+            var fp = String(item && item.at) + '|' + String(item && item.text);
+            if (seen[fp]) continue;
+            seen[fp] = true;
+            renderBubble(el, item);
+          }
+          if (items.length > cursor) {
+            cursor = items.length;
+            scrollToBottom(el);
+          }
+        })
+        .catch(function () {
+          /* silent skip on error */
+        });
+    }
+
+    tick();
+    timer = setInterval(tick, 3000);
+    return stopChatPoll;
+  }
+
+  function stopChatPoll() {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  // SKIP_ME 2026-11-02：from === 'me' 的跳过，自己的话由本地气泡负责
+  var _origStart = startChatPoll;
+  startChatPoll = function (getEl, opt) { return _origStart(getEl, opt); };
+window.startChatPoll = startChatPoll;
+  window.stopChatPoll = stopChatPoll;
+})();
+
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var DEFAULTS = {
+    maxWidth: 512,
+    fontSize: 34,
+    color: '#1b1b1b',
+    background: '#ffffff'
+  };
+
+  function mergeOpt(opt) {
+    var o = {};
+    var k;
+    for (k in DEFAULTS) {
+      if (Object.prototype.hasOwnProperty.call(DEFAULTS, k)) {
+        o[k] = DEFAULTS[k];
+      }
+    }
+    if (opt) {
+      for (k in opt) {
+        if (Object.prototype.hasOwnProperty.call(opt, k)) {
+          o[k] = opt[k];
+        }
+      }
+    }
+    return o;
+  }
+
+  // 按每行最多约 maxChars 个汉字切分（半个汉字宽度按 1 计）
+  function wrapText(text, maxChars) {
+    var lines = [];
+    var current = '';
+    var width = 0;
+    var i, ch;
+    for (i = 0; i < text.length; i++) {
+      ch = text.charAt(i);
+      // 全角字符计 1，半角计 0.5
+      width += ch.charCodeAt(0) > 0xFF ? 1 : 0.5;
+      if (width > maxChars) {
+        lines.push(current);
+        current = ch;
+        width = ch.charCodeAt(0) > 0xFF ? 1 : 0.5;
+      } else {
+        current += ch;
+      }
+      if (ch === '\n') {
+        lines.push(current.substring(0, current.length - 1));
+        current = '';
+        width = 0;
+      }
+    }
+    if (current.length > 0) {
+      lines.push(current);
+    }
+    return lines;
+  }
+
+  function drawBubble(canvas, text, opt) {
+    var DPR = 2;
+    var PAD = 24;
+    var RADIUS = 18;
+    var TAIL = 20;   // 尾巴高度
+    var TAIL_W = 28; // 尾巴宽度
+    var CHAR_W = opt.fontSize;             // 一个汉字宽度约等于字号
+    var LINE_H = Math.round(opt.fontSize * 1.45);
+
+    var maxChars = Math.floor((opt.maxWidth - PAD * 2) / CHAR_W);
+    if (maxChars < 4) { maxChars = 4; }
+
+    var lines = wrapText(String(text), maxChars);
+    var textW = 0;
+    var i, w;
+    for (i = 0; i < lines.length; i++) {
+      w = 0;
+      (function () {
+        var s = lines[i];
+        var j;
+        for (j = 0; j < s.length; j++) {
+          w += s.charCodeAt(j) > 0xFF ? CHAR_W : CHAR_W * 0.5;
+        }
+      })();
+      if (w > textW) { textW = w; }
+    }
+    textW = Math.round(textW);
+
+    var cssW = Math.round(textW + PAD * 2);
+    var cssH = PAD * 2 + lines.length * LINE_H + TAIL;
+    if (cssW > opt.maxWidth) { cssW = opt.maxWidth; }
+
+    canvas.width = cssW * DPR;
+    canvas.height = cssH * DPR;
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    // 气泡主体（不含尾巴）
+    var bodyH = cssH - TAIL;
+
+    function roundRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.arcTo(x + w, y, x + w, y + r, r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+      ctx.lineTo(x + r, y + h);
+      ctx.arcTo(x, y + h, x, y + h - r, r);
+      ctx.lineTo(x, y + r);
+      ctx.arcTo(x, y, x + r, y, r);
+      ctx.closePath();
+    }
+
+    ctx.fillStyle = opt.background;
+    // 主体
+    roundRect(0, 0, cssW, bodyH, RADIUS);
+    ctx.fill();
+    // 尾巴（朝下，居中）
+    ctx.beginPath();
+    ctx.moveTo(cssW / 2 - TAIL_W / 2, bodyH - 1);
+    ctx.lineTo(cssW / 2, bodyH + TAIL - 1);
+    ctx.lineTo(cssW / 2 + TAIL_W / 2, bodyH - 1);
+    ctx.closePath();
+    ctx.fill();
+
+    // 文字
+    ctx.fillStyle = opt.color;
+    ctx.font = opt.fontSize + 'px "PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], cssW / 2, PAD + LINE_H / 2 + i * LINE_H);
+    }
+
+    return { width: cssW, height: cssH };
+  }
+
+  function applyScale(sprite, w, h) {
+    var BASE_W = 1.6; // 世界单位
+    sprite.scale.set(BASE_W, BASE_W * (h / w), 1);
+  }
+
+  window.makeSpeechBubble = function (THREE, text, opt) {
+    var o = mergeOpt(opt);
+    var canvas = document.createElement('canvas');
+    var size = drawBubble(canvas, text, o);
+
+    var texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+
+    var material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false
+    });
+
+    var sprite = new THREE.Sprite(material);
+    sprite.userData.bubbleCanvas = canvas;
+    sprite.userData.bubbleOpt = o;
+
+    applyScale(sprite, size.width, size.height);
+    return sprite;
+  };
+
+  window.setBubbleText = function (sprite, text, THREE) {
+    if (!sprite || !sprite.userData || !sprite.userData.bubbleCanvas) {
+      return;
+    }
+    var canvas = sprite.userData.bubbleCanvas;
+    var o = sprite.userData.bubbleOpt;
+    var size = drawBubble(canvas, text, o);
+
+    var material = sprite.material;
+    var oldTexture = material.map;
+
+    var texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    material.map = texture;
+    material.needsUpdate = true;
+
+    if (oldTexture) {
+      oldTexture.dispose();
+    }
+
+    applyScale(sprite, size.width, size.height);
+  };
+
+  window.showBubble = function (sprite, ms) {
+    if (!sprite) { return; }
+    sprite.visible = true;
+    if (sprite.userData.bubbleTimer) {
+      clearTimeout(sprite.userData.bubbleTimer);
+      sprite.userData.bubbleTimer = null;
+    }
+    if (typeof ms === 'number' && ms > 0) {
+      sprite.userData.bubbleTimer = setTimeout(function () {
+        sprite.visible = false;
+        sprite.userData.bubbleTimer = null;
+      }, ms);
+    }
+  };
+
+  window.hideBubble = function (sprite) {
+    if (!sprite) { return; }
+    if (sprite.userData && sprite.userData.bubbleTimer) {
+      clearTimeout(sprite.userData.bubbleTimer);
+      sprite.userData.bubbleTimer = null;
+    }
+    sprite.visible = false;
+  };
+})();
+
+
+// BUBBLE_HOOK 2026-11-02：她说的话浮在头顶
+var herBubble = null
+var lastHerLine = ''
+var bubbleTimer = null
+
+function initHerBubble() {
+  if (herBubble || !window.__her) return
+  herBubble = window.makeSpeechBubble(window.__THREE, ' ', {})
+  herBubble.visible = false
+  window.__scene.add(herBubble)
+}
+
+function refreshHerBubble() {
+  initHerBubble()
+  if (!herBubble) return
+  fetch('/room-chat').then(function (r) { return r.json() }).then(function (j) {
+    var items = (j && j.items) || []
+    for (var i = items.length - 1; i >= 0; i -= 1) {
+      if (items[i].from === 'her') {
+        var line = items[i].text
+        if (line && line !== lastHerLine) {
+          lastHerLine = line
+          window.setBubbleText(herBubble, line, window.__THREE)
+          herBubble.position.set(window.__her.position.x, 2.05, window.__her.position.z)
+          window.showBubble(herBubble, 9000)
+        }
+        break
+      }
+    }
+  }).catch(function () {})
+}
+
+setInterval(function () {
+  if (!herBubble || !herBubble.visible) refreshHerBubble()
+}, 5000)
+setTimeout(refreshHerBubble, 3000)
+
+</script>
+</body></html>

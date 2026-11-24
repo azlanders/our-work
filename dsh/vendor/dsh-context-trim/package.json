@@ -1,0 +1,36 @@
+{
+  "name": "dsh-context-trim",
+  "version": "1.0.0",
+  "description": "哈基米上下文瘦身与增量差分插件：超长工具结果入口截断 + 指令文件行级 Myers 增量差分 + 保护核心 QQ 工具链",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "context",
+    "trim",
+    "diff",
+    "prompt-cache"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

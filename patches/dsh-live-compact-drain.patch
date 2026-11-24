@@ -1,0 +1,66 @@
+--- a/dsh-live-compact/plan.js
++++ b/dsh-live-compact/plan.js
+@@ -632,6 +632,40 @@
+     start = prev;
+     tokens += items[prev].tokens || 0;
+   }
++  return { start, end, tokens, gain: nonUserGain(items, start, end) };
++}
++
++// DRAIN_OLD 2026-11-23：收尾时如果最近的几轮全是 user/tool 且没地方下刀，
++// 原来的 walkOffTail + expandBack 会返回空段，压缩就卡在同一水位反复
++// “drain stopped”。这里退一步，压更早的对话，保留最后两轮用户消息不碰。
++function oldestDrainSpan(items, lastUser, chunkMin, chunkMax, keepUsers = 2) {
++  if (lastUser < 0) return null;
++  let seen = 0;
++  let keepFrom = -1;
++  for (let index = lastUser; index >= 0; index -= 1) {
++    if (items[index].type !== "user") continue;
++    seen += 1;
++    if (seen > keepUsers) {
++      keepFrom = index;
++      break;
++    }
++  }
++  if (keepFrom < 0) return null;
++  let end = keepFrom - 1;
++  while (end >= 0 && (items[end].type === "user" || items[end].checkpoint)) end -= 1;
++  if (end < 0) return null;
++  let start = end;
++  let tokens = items[end].tokens || 0;
++  while (start > 0) {
++    const prev = start - 1;
++    if (items[prev].checkpoint) break;
++    if (tokens + (items[prev].tokens || 0) > chunkMax) break;
++    start = prev;
++    tokens += items[prev].tokens || 0;
++  }
++  while (start < end && items[start].balancedBefore === false) start += 1;
++  if (start >= end || tokens < chunkMin) return null;
++  if (!balanced(items, start, end)) return null;
+   return { start, end, tokens, gain: nonUserGain(items, start, end) };
+ }
+ 
+@@ -676,7 +710,7 @@
+   // Below the urgent line, cloud only pointer-cuts an oversized tool. One newly aged result does not rewrite the prefix.
+   if (cloud && !draining) return pointer;
+   const end = walkOffTail(items, limit);
+-  if (end < 0) return pointer;
++  if (end < 0) return draining ? (oldestDrainSpan(items, lastUser, chunkMin, Math.min(chunkMax, 16000)) || pointer) : pointer;
+   if (!cloud) {
+     if (lastUser >= 0 && end <= lastUser) return pointer;
+     if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
+@@ -689,10 +723,9 @@
+   const phase = expandBack(items, end, 0, { crossUser: false, chunkMax });
+   // 不跨 user 去凑 1000。不够就跳过。
+   // Do not walk across users to manufacture 1000 tokens. Under that, skip.
+-  if (phase.gain < chunkMin) return pointer;
+-  if (phase.tokens > chunkMax || !balanced(items, phase.start, phase.end)) return null;
+-  if (lastUser >= phase.start && lastUser <= phase.end) return null;
+-  return phase;
++  if (phase.gain >= chunkMin && phase.tokens <= chunkMax && balanced(items, phase.start, phase.end) && !(lastUser >= phase.start && lastUser <= phase.end)) return phase;
++  if (!draining) return pointer;
++  return oldestDrainSpan(items, lastUser, chunkMin, Math.min(chunkMax, 16000)) || pointer;
+ }
+ 
+ // pointerOnly 扩到 tool-call 之后，这一段仍不能包含最后一条 user 或 checkpoint。

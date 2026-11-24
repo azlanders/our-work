@@ -1,0 +1,13 @@
+--- a/dsh-onebot-channel/lib/poll.js
++++ b/dsh-onebot-channel/lib/poll.js
+@@ -803,6 +803,10 @@
+         : Boolean(opts && opts.isPrivate)
+       if (existsSync(ip) && __isOwner) {
+         let inner = 快读Text(ip).trim()
++        // INNER_TRIM 2026-11-24：内心.md 的前两段是数值快照（精力/困意/心情/体力感/好感/熟悉/
++        // 怨/别扭/亲近），同一轮「你现在的状态」和「[态]」已经各报过一遍。这里只留增量
++        // （今日记录/愿望/怕/惦记/心里话/锚/梦素材），别让同一组数字在一轮里出现四遍。
++        inner = inner.replace(/^精力 \d+\/100；困意 \d+\/100；心情 [^；]*；体力感 [^；]*；对主人：好感 \d+\/100；熟悉 \d+\/100；怨 \d+\/100；别扭 \d+\/100；亲近 [^；]*；?/, '').trim()
+         // INNER_CUT 2026-11-05（批次103）：原来硬切 220 字，长一点就断在句子中间。
+         // 按句末切；实在找不到句号才补省略号。
+         if (inner.length > 220) {

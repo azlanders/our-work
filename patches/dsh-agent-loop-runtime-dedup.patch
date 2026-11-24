@@ -1,0 +1,39 @@
+--- a/dsh-agent-loop/lib/index.js
++++ b/dsh-agent-loop/lib/index.js
+@@ -866,14 +866,35 @@
+ 				step,
+ 				message
+ 			}, intent);
++			// RUNTIME_DEDUP 2026-11-23：runtime-context 每轮都会变（时间/状态/天气），但旧快照
++			// 一直留在表面，SOUL.md 和状态段跟着复制四五份，输入 token 翻倍。append 新快照前把
++			// 表面里所有旧快照压成一句 CLEARED，历史里只留最新一份完整内容。
++			const evictPrevContext = () => {
++				for (const seq of [...this.session.surface.nodes]) {
++					const event = this.session.eventAt(seq);
++					if (event?.type !== "user/message" || event.data?.source?.kind !== SOURCE) continue;
++					if (textOf(event.data) === CLEARED) continue;
++					this.session.append("user/message", createUserMessage({
++						content: [{ type: "text", text: CLEARED }],
++						source: { kind: SOURCE }
++					}), {
++						surfaceOp: { op: "replace", startSeq: seq, endSeq: seq },
++						sourceEventSeqs: [seq]
++					});
++				}
++			};
+ 			let contextAdmitted = false;
+ 			if (firstAttempt) for (const message of decision.messages) if (message.source.kind === "runtime-context") {
+ 				if (context !== void 0 && !contextAdmitted) {
++					evictPrevContext();
+ 					this.session.append("user/message", context, { surfaceOp: "append" });
+ 					contextAdmitted = true;
+ 				}
+ 			} else this.session.append("user/message", message, { surfaceOp: "append" });
+-			if (context !== void 0 && !contextAdmitted) this.session.append("user/message", context, { surfaceOp: "append" });
++			if (context !== void 0 && !contextAdmitted) {
++				evictPrevContext();
++				this.session.append("user/message", context, { surfaceOp: "append" });
++			}
+ 			firstAttempt = false;
+ 			const request = this.buildRequest(config, preparedCall, assembly.tools, {
+ 				turn,

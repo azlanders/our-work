@@ -1,0 +1,15 @@
+# Host stock stays disabled so this engine can register ctx.compaction.
+# The entry installs its preset listener before constructing the engine.
+# takeoverPresets controls future preset loads, not existing session engines.
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  disabled: true
+- insert:
+    - id: compaction-spine
+      name: dsh-live-compact
+      config:
+        takeoverPresets: true
+        # Runtime resolves explicit settings > environment > the 1.1.1 defaults.
+        # Keep defaults out of the base patch so reset can restore env fallback.
+
+

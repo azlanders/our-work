@@ -1,0 +1,9 @@
+# dsh-mnemonic —— 自研长期记忆插件（纯 host，无客户端半区、无额外进程）
+- insert:
+    - id: dsh-mnemonic
+      name: dsh-mnemonic
+      # config:
+      #   injectChars: 600      # 每轮回忆块上限（字）
+      #   cardChars: 300        # 常驻状态卡上限（字）
+      #   limit: 3              # 每轮最多几条
+      #   minScore: 2.4         # 分数闸门：过不了就不注入，宁缺毋滥

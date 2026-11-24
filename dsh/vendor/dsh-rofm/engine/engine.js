@@ -1,0 +1,1481 @@
+/**
+ * dsh-rofm engine — cached engine facade.
+ *
+ * `MemoryEngine` is the only object the DSH adapter (or the CLI) needs:
+ * it keeps the parsed `index.json` in memory and only reloads it when the file
+ * mtime changed. The warm `recall()` path therefore does exactly one `statSync`
+ * plus (only for hits) one `context.json` read per recalled folder; for 1 000
+ * folders that is well under 20 ms on a normal machine.
+ *
+ * Thread-safety: none needed — the engine is single-process and synchronous
+ * (documented contract, docs/SPEC.md §7).
+ */
+
+import fs from 'node:fs'
+import path from 'node:path'
+import {
+    defaultConfigPath,
+    loadConfig,
+    mergeConfig,
+    normalizeBeta,
+    resolveMemoryDir,
+    validateConfig,
+} from './config.js'
+import { commitCompression, planCompression } from './compress.js'
+import { buildEventIndex, resolveEventQuery } from './event-index.js'
+import { buildRecallBlock, loadRecallAdditions, recall as runRecall } from './recall.js'
+// BATCH655：建索引前就排除「只有工具回执」的 folder（647 只做了装填时跳过）。
+import { 只有工具回执 } from './only-tool-receipts.js'
+import { queryWindowOf } from './temporal-cn.js'
+import { recencyCacheBucket, recencyConfig } from './recency.js'
+import {
+    buildRecallIndex,
+    countCandidates,
+    deserializeLanes,
+    emptyLanes,
+    lanesFingerprint,
+    PAGINATE_MAX_K,
+    querySeeds,
+    selectRecall,
+    serializeLanes,
+} from './recall-index.js'
+import { buildTimeIndex, folderTimeRange, normalizeTimeQuery, queryTimeIndex, timeFallbackLadder } from './time-index.js'
+import {
+    appendStats,
+    cleanupCommitJournals,
+    ensureMemoryDir,
+    memoryPaths,
+    readFolder as readFolderFromStore,
+    readStats,
+    refreshIndex,
+} from './store.js'
+import { formatReport, summarizeStats } from './stats.js'
+
+/**
+ * B-03 (1.4.1): fallback for `recall.fairness.roundBudget.maxChars` when the
+ * config object carries no valid value (mirrors engine/config.js DEFAULT_CONFIG).
+ */
+const DEFAULT_ROUND_BUDGET_CHARS = 20000
+
+/** Clamp an optional integer option (offset/limit/round…) without throwing. */
+function clampInt(value, min, max, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  const truncated = Math.trunc(number)
+  if (truncated < min) return min
+  if (truncated > max) return max
+  return truncated
+}
+
+/** Normalize an optional id collection (Set, array or any iterable) to a Set. */
+function toIdSet(value) {
+  if (value instanceof Set) return value
+  const set = new Set()
+  if (value === null || value === undefined) return set
+  if (typeof value === 'object' && typeof value[Symbol.iterator] === 'function') {
+    for (const id of value) if (typeof id === 'string') set.add(id)
+  }
+  return set
+}
+
+/** Round to two decimals (telemetry) without ever returning -0. */
+function round2(value) {
+  if (!Number.isFinite(value)) return 0
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100
+  return Object.is(rounded, -0) ? 0 : rounded
+}
+
+/** Zeroed recall stats for early-return paths (event ambiguity, browsing, …). */
+function emptyRecallStats(context) {
+  const ctx = context && typeof context === 'object' ? context : {}
+  return {
+    userKeywords: [],
+    matchedFolders: 0,
+    excludedFolders: 0,
+    timeFiltered: 0,
+    eventFiltered: 0,
+    attempts: 0,
+    addedFolders: 0,
+    addedChars: 0,
+    addedTokens: 0,
+    contextChars: Number.isFinite(ctx.chars) ? ctx.chars : null,
+    windowTokens: Number.isFinite(ctx.windowTokens) ? ctx.windowTokens : null,
+    addedPercentOfContext: null,
+    addedPercentOfWindow: null,
+    byGeneration: {},
+    elapsedMs: 0,
+    candidates: 0,
+    candidatesAll: 0,
+    lanesPicked: null,
+    pops: 0,
+    frontierHits: 0,
+    registerDrops: 0,
+    reInjections: 0,
+    degraded: false,
+    filteredByAlpha: 0,
+  }
+}
+
+/** Same ordering rules as the v1.3.0 recall renderer (`recall.sort`). */
+function sortRecallAdditions(additions, sortMode) {
+  const list = Array.isArray(additions) ? additions.slice() : []
+  const createdAtOf = (addition) => (Number.isFinite(Number(addition?.createdAt)) ? Number(addition.createdAt) : 0)
+  const idCompare = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  if (sortMode === 'alpha') list.sort((a, b) => (b.rankAlpha ?? b.alpha) - (a.rankAlpha ?? a.alpha) || createdAtOf(a) - createdAtOf(b) || idCompare(a, b))
+  else if (sortMode === 'generation') list.sort((a, b) => a.generation - b.generation || createdAtOf(a) - createdAtOf(b) || idCompare(a, b))
+  else list.sort((a, b) => createdAtOf(a) - createdAtOf(b) || idCompare(a, b))
+  return list
+}
+
+/**
+ * Unique candidate counts for one query: |C(Q)| (all keyword matches above the
+ * α floor) and |C(Q) ∩ W| (inside the time window).
+ *
+ * The selector's own counters are lane/pop oriented (and count per-lane work),
+ * so telemetry and the time-miss classification measure the two set sizes here.
+ * O(sum of posting lengths), Set-deduplicated.
+ */
+function uniqueCandidateCounts(index, seeds, options = {}) {
+  const entries = index && Array.isArray(index.entries) ? index.entries : []
+  const postings = index && index.postings instanceof Map ? index.postings : new Map()
+  const minAlpha = Number(options.minAlpha)
+  const alphaFloor = Number.isFinite(minAlpha) ? Math.min(1, Math.max(0, minAlpha)) : 0
+  const timeIds = options.timeIds instanceof Set ? options.timeIds : null
+  const eventIds = options.eventIds instanceof Set ? options.eventIds : null
+  const seen = new Set()
+  let all = 0
+  let inWindow = 0
+  let inEvent = 0
+  for (const seed of Array.isArray(seeds) ? seeds : []) {
+    const posting = postings.get(seed)
+    if (!Array.isArray(posting)) continue
+    for (const at of posting) {
+      if (seen.has(at)) continue
+      seen.add(at)
+      const entry = entries[at]
+      if (!entry) continue
+      if (alphaFloor > 0 && entry.alpha < alphaFloor) continue
+      all += 1
+      if (timeIds && !timeIds.has(entry.id)) continue
+      inWindow += 1
+      if (eventIds && !eventIds.has(entry.id)) continue
+      inEvent += 1
+    }
+  }
+  return { all, inWindow, inEvent }
+}
+
+export class MemoryEngine {
+  /**
+   * @param {{
+   *   memoryDir?: string,
+   *   config?: object,
+   *   configPath?: string,
+   *   overrides?: object,
+   *   baseDir?: string,
+   *   rng?: () => number,
+   * }} [options]
+   */
+  constructor(options = {}) {
+    const opts = options && typeof options === 'object' ? options : {}
+    this.configPath = opts.configPath
+    this._explicitMemoryDir = !!opts.memoryDir
+    if (opts.config && typeof opts.config === 'object') {
+      this.cfg = Array.isArray(opts.config.warnings) ? opts.config : validateConfig(opts.config)
+    } else {
+      let configPath = opts.configPath
+      if (!configPath) {
+        const shared = defaultConfigPath()
+        if (fs.existsSync(shared)) configPath = shared
+      }
+      this.cfg = loadConfig(configPath, opts.overrides)
+    }
+    this.baseDir = opts.baseDir
+    this.memoryDir = opts.memoryDir ? path.resolve(String(opts.memoryDir)) : resolveMemoryDir(this.cfg, opts.baseDir)
+    this.rng = typeof opts.rng === 'function' ? opts.rng : undefined
+    this._cache = { index: null, mtimeMs: -1, size: -1 }
+    /** v1.4.0 in-memory time index (never persisted; plan §3.3.1). */
+    this._timeIndexCache = undefined
+    /** v1.4.0 in-memory event index (never persisted; plan §3.4 event constraint). */
+    this._eventIndexCache = undefined
+    /** v1.4.0 deterministic recall index (wave-2). */
+    this._recallIndexCache = undefined
+    this._recallBodiesCache = undefined
+    /** BATCH655：只有工具回执的 folder id（建索引前排除用）。 */
+    this._recallToolOnlyIds = undefined
+    /** v1.4.0 in-memory FAIR-DRI lane state when the caller does not pass one. */
+    this._lanes = undefined
+    this._round = 0
+    this._loaded = false
+  }
+
+  /** Synchronously load/rebuild the index and start caching it. */
+  load() {
+    this._refresh()
+    this._loaded = true
+    // v1.4.0: drop commit journals left behind by a crashed archival run. This
+    // never deletes memory folders (in-process rollback owns that); it only
+    // clears the stale intent records so they cannot accumulate forever.
+    try {
+      cleanupCommitJournals(this.memoryDir)
+    } catch {
+      /* best effort */
+    }
+    return this
+  }
+
+  /** Drop the in-memory index cache and reload it from disk (forced refresh). */
+  reload() {
+    this._cache = { index: null, mtimeMs: -1, size: -1 }
+    this._loaded = false
+    return this.load()
+  }
+
+  get loaded() {
+    return this._loaded
+  }
+
+  get config() {
+    return this.cfg
+  }
+
+  get index() {
+    return this._refresh().index
+  }
+
+  _refresh() {
+    ensureMemoryDir(this.memoryDir)
+    const result = refreshIndex(this.memoryDir, this.cfg, this._cache)
+    this._cache = { index: result.index, mtimeMs: result.mtimeMs, size: result.size ?? -1 }
+    this._loaded = true
+    return result
+  }
+
+  _statIndexMtime() {
+    return this._statIndexState().mtimeMs
+  }
+
+  _statIndexState() {
+    try {
+      const { indexPath } = memoryPaths(this.memoryDir, this.cfg)
+      const stat = fs.statSync(indexPath)
+      return { mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch {
+      return { mtimeMs: -1, size: -1 }
+    }
+  }
+
+  /**
+   * Deep-merge `partial` into the config, then reload index/folders.
+   * @param {object} partial
+   * @returns {object} the new validated config
+   */
+  setConfig(partial) {
+    this.cfg = validateConfig(mergeConfig(this.cfg, partial || {}))
+    if (!this._explicitMemoryDir) this.memoryDir = resolveMemoryDir(this.cfg, this.baseDir)
+    this._cache = { index: null, mtimeMs: -1, size: -1 }
+    // v1.4.0 derived caches are config-fingerprint keyed; drop them eagerly.
+    this._timeIndexCache = undefined
+    this._eventIndexCache = undefined
+    this._recallIndexCache = undefined
+    this._recallBodiesCache = undefined
+    this._recallToolOnlyIds = undefined
+    this._lanes = undefined
+    this._round = 0
+    this._loaded = false
+    this.load()
+    return this.cfg
+  }
+
+  /** Plan only (nothing written). `opts.cfg` overrides the engine config for
+   * one pass (used by the adapter's emergency passes with a larger percentage).
+   *
+   * v1.4.0 forwards the robustness options the adapter needs: `protectTurn` /
+   * `protectSeq` (never archive the current turn, P0-3), `pendingCount` /
+   * `allowSmallWindow` / `maxFolders` (scoring pressure + small-window sanity,
+   * P1-6) and `eventTimes` (optional per-message times for eventStart/eventEnd).
+   */
+  planCompression(messages, usedPercent, opts = {}) {
+    const options = opts && typeof opts === 'object' ? opts : {}
+    return planCompression({
+      messages,
+      usedPercent,
+      cfg: options.cfg && typeof options.cfg === 'object' ? options.cfg : this.cfg,
+      sessionId: options.sessionId,
+      now: options.now,
+      turn: options.turn,
+      totalUsedTokens: options.totalUsedTokens,
+      windowTokens: options.windowTokens,
+      // v1.4.0 robustness (all optional, ignored by older compress.js)
+      protectTurn: options.protectTurn,
+      protectSeq: options.protectSeq,
+      pendingCount: options.pendingCount,
+      allowSmallWindow: options.allowSmallWindow,
+      maxFolders: options.maxFolders,
+      eventTimes: options.eventTimes,
+      seqStart: options.seqStart,
+      seqEnd: options.seqEnd,
+      contentHash: options.contentHash,
+    })
+  }
+
+  /**
+   * Plan + commit: move the earliest part of the context into memory folders.
+   * @param {any[]} messages complete model-visible conversation (MemMessage[])
+   * @param {number} usedPercent
+   * @param {{ sessionId?: string, now?: number, turn?: number, totalUsedTokens?: number,
+   *   windowTokens?: number, source?: object }} [opts]
+   */
+  compress(messages, usedPercent, opts = {}) {
+    const options = opts && typeof opts === 'object' ? opts : {}
+    const plan = this.planCompression(messages, usedPercent, options)
+    if (!plan.shouldCompress) {
+      return { plan, committed: false, folders: [], removed: [], keep: plan.keep, warnings: plan.warnings, skipped: 0 }
+    }
+    const committed = commitCompression(plan, {
+      memoryDir: this.memoryDir,
+      cfg: this.cfg,
+      sessionId: options.sessionId,
+      turn: options.turn,
+      source: options.source,
+      // v1.4.0 commit transaction: idempotency key + journal options
+      seqStart: options.seqStart,
+      seqEnd: options.seqEnd,
+      contentHash: options.contentHash,
+      idempotencyKey: options.idempotencyKey,
+    })
+    this._cache = { index: committed.index, ...this._statIndexState() }
+    if (committed.refused === true) {
+      // The safety cap refused the whole archive: report it as NOT committed so
+      // callers never replace the conversation with a note that covers nothing.
+      return { ...committed, plan, committed: false, refused: true }
+    }
+    return { ...committed, plan, committed: true }
+  }
+
+  /**
+   * Recall memory folders for the latest user text and append the recall
+   * telemetry event (`stats.jsonl`).
+   *
+   * v1.4.0 adds three things on top of the v1.3.0 signature (all optional):
+   *   - `mode`: 'fair' | 'deterministic' | 'legacy' (defaults to cfg.recall.mode);
+   *   - `timeFrom` / `timeTo` / `granularity`: time-constrained recall (§6.8);
+   *   - `offset` / `limit`: deterministic pagination of the matched candidates;
+   *   - `lanes` / `round` / `blockIds` / `ledger`: the FAIR-DRI lane state the
+   *     adapter persists in `recall-state.json` v3.
+   *
+   * @param {string} userText
+   * @param {{ chars?: number, tokens?: number, windowTokens?: number, sessionId?: string }} [context]
+   * @param {{ excludeIds?: Iterable<string>, minAlpha?: number,
+   *   offset?: number, limit?: number, mode?: string,
+   *   paginate?: boolean,
+   *   timeFrom?: string|number, timeTo?: string|number, granularity?: string,
+   *   lanes?: object, round?: number, blockIds?: Iterable<string>, ledger?: Iterable<string> }} [options]
+   *   `excludeIds`: folders already in the injected recall block — never
+   *   re-added, never counted against `firstGenMax`, but still usable as keyword
+   *   bridges for new folders. `minAlpha`: optional α floor (v1.3.0 QQ compat),
+   *   folders below it behave exactly like unscored ones.
+   *   `paginate` (1.4.1): stable page cursor semantics — select a fixed window
+   *   `min(candidates, 10000)` from a **snapshot** of `lanes` (never written
+   *   back), exclude only `blockIds`, then return `picks.slice(offset, offset+limit)`
+   *   with an exact `page.hasMore`. Ignores `ledger`/`excludeIds`/roundBudget so
+   *   page N is reproducible; an offset past the window is an empty page.
+   */
+  recall(userText, context = {}, options = {}) {
+    const ctx = context && typeof context === 'object' ? context : {}
+    const opts = options && typeof options === 'object' ? options : {}
+    const refreshed = this._refresh()
+    const mode = this.recallMode(opts)
+    const timePlan = this._recallTimePlan(opts)
+    const eventPlan = this._recallEventPlan(opts)
+    // Pure browsing works in every mode (it is a lookup, not a recall decision):
+    // `memory_recall` without keywords returns the folders inside the requested
+    // time window and/or event, ordered by event start.
+    // Browsing needs an *enforced* filter: an `event.mode='index'`/
+    // `time.mode='index'` window alone must not turn into an unconstrained
+    // "browse the whole library" (C-05, 1.4.1; the event side already checked).
+    const browsing =
+      typeof userText === 'string' &&
+      userText.trim().length === 0 &&
+      ((timePlan.active === true && timePlan.enforced === true) ||
+        (eventPlan.active === true && eventPlan.enforced === true))
+    // C-05: make the "normalized but not enforced" case explicit instead of
+    // silently returning the whole library.
+    if (typeof userText === 'string' && userText.trim().length === 0 && timePlan.active === true && timePlan.enforced !== true) {
+      timePlan.warnings = [
+        ...(Array.isArray(timePlan.warnings) ? timePlan.warnings : []),
+        'recall: time.mode is "index" (window normalized, not enforced); pure time browsing needs time.mode="constrain"',
+      ]
+    }
+    // Event ambiguity: never guess. Return BOTH events so the model can decide
+    // whether they are the same event (and ask the user when it cannot tell).
+    const ambiguous = eventPlan.active === true && eventPlan.status === 'similar'
+    let result
+    if (ambiguous) {
+      result = {
+        additions: [],
+        stats: emptyRecallStats(ctx),
+        warnings: [],
+        paginated: true,
+        ambiguous: true,
+        page: { offset: clampInt(opts.offset, 0, 1_000_000, 0), limit: 0, returned: 0, candidates: 0, hasMore: false },
+      }
+    } else if (browsing) {
+      const configuredFirstGenMax = Number.isFinite(Number(this.cfg?.recall?.firstGenMax))
+        ? Math.max(0, Math.floor(Number(this.cfg.recall.firstGenMax)))
+        : 10
+      result = this._browseRecall({
+        index: this.recallIndex(),
+        opts,
+        timePlan,
+        eventPlan,
+        context: ctx,
+        offset: clampInt(opts.offset, 0, 1_000_000, 0),
+        take: Number.isFinite(Number(opts.limit)) && Number(opts.limit) > 0
+          ? Math.min(1000, Math.floor(Number(opts.limit)))
+          : configuredFirstGenMax,
+        warnings: [],
+      })
+    } else if (mode === 'legacy') {
+      result = null
+    } else {
+      result = this._deterministicRecall({
+        userText,
+        context: ctx,
+        options: opts,
+        index: refreshed.index,
+        mode,
+        timePlan,
+        eventPlan,
+        startedAt: typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance.now() : undefined,
+      })
+    }
+    if (!result) {
+      result = runRecall({
+        userText,
+        cfg: this.cfg,
+        index: refreshed.index,
+        rng: this.rng,
+        context: ctx,
+        memoryDir: this.memoryDir,
+        excludeIds: opts.excludeIds,
+        // v1.3.0: α floor for QQ channel recalls (non-owner group member, D4).
+        minAlpha: opts.minAlpha,
+        // v1.4.0: first-generation filters (C(Q) ∩ W ∩ E).
+        timeIds: timePlan.ids,
+        eventIds: eventPlan.ids,
+        // TEMPORAL_CN (批次280)：调用方可以指定「现在」是哪一刻。
+        // 评测/回放里必须用题目给的逻辑时间，否则「昨天」会按真实时钟算，
+        // 窗口整体错位。不传 = 用当前时间（线上行为不变）。
+        now: opts.now,
+      })
+    }
+    const stats = result.stats || {}
+    const additions = Array.isArray(result.additions) ? result.additions : []
+    // Time/event input warnings (ignored/failed/normalized) are part of the result
+    // the adapter and the model tool surface; never drop them.
+    for (const plan of [timePlan, eventPlan]) {
+      if (Array.isArray(plan.warnings) && plan.warnings.length > 0) {
+        result.warnings = [...(Array.isArray(result.warnings) ? result.warnings : []), ...plan.warnings]
+      }
+    }
+
+    // --- v1.4.0 pagination ---------------------------------------------------
+    // The deterministic selector already paginated (it needs offset+limit to
+    // build the page); the legacy path is sliced here for signature parity.
+    let offset = 0
+    let limit = additions.length
+    let pageItems = additions
+    let page
+    if (result.paginated === true && result.page) {
+      page = result.page
+      offset = page.offset
+      limit = page.limit
+    } else {
+      offset = clampInt(opts.offset, 0, 1_000_000, 0)
+      const limitRaw = Number(opts.limit)
+      limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(1000, Math.floor(limitRaw)) : additions.length
+      pageItems = offset > 0 || limit < additions.length ? additions.slice(offset, offset + limit) : additions
+      page = {
+        offset,
+        limit,
+        total: additions.length,
+        returned: pageItems.length,
+        hasMore: offset + limit < additions.length,
+      }
+    }
+
+    // --- v1.4.0 miss classification (drives the memory_recall strike logic) --
+    const matchedFolders = Number(stats.matchedFolders) || 0
+    const timeFiltered = Number(stats.timeFiltered) || 0
+    const eventFiltered = Number(stats.eventFiltered) || 0
+    const preFilterCandidates = matchedFolders + timeFiltered + eventFiltered
+    const afterTimeFilter = matchedFolders + eventFiltered
+    let missType = null
+    if (pageItems.length === 0) {
+      if (ambiguous) missType = 'event-ambiguous'
+      else if (result.browse === true) missType = timePlan.active ? 'time' : eventPlan.active ? 'event' : 'keyword'
+      else if (preFilterCandidates === 0) missType = 'keyword'
+      else if (timePlan.active && afterTimeFilter === 0) missType = 'time'
+      else if (eventPlan.active && eventPlan.enforced && matchedFolders === 0) missType = 'event'
+    }
+
+    const eventInfo = eventPlan.active && eventPlan.visible !== false
+      ? {
+          status: eventPlan.status,
+          requested: eventPlan.requested,
+          label: eventPlan.label,
+          count: eventPlan.count,
+          candidates: eventPlan.candidates,
+          enforced: eventPlan.enforced,
+        }
+      : null
+
+    const timeWindow = timePlan.active
+      ? {
+          from: timePlan.normalized.from,
+          to: timePlan.normalized.to,
+          level: timePlan.normalized.level,
+          granularity: timePlan.normalized.granularity,
+          widenedTo: result.timeWindow?.widenedTo ?? null,
+          requested: timePlan.normalized.requested,
+          enforced: timePlan.enforced,
+          hardWindow: timePlan.hardWindow === true,
+          hits: timePlan.hits,
+          timezone: timePlan.timezone,
+        }
+      : null
+
+    appendStats(this.memoryDir, this.cfg, {
+      type: 'recall',
+      time: Date.now(),
+      sessionId: typeof ctx.sessionId === 'string' ? ctx.sessionId : null,
+      userKeywords: Array.isArray(stats.userKeywords) ? stats.userKeywords : [],
+      contextChars: Number.isFinite(stats.contextChars) ? stats.contextChars : null,
+      windowTokens: Number.isFinite(stats.windowTokens) ? stats.windowTokens : null,
+      matchedFolders: stats.matchedFolders || 0,
+      excludedFolders: stats.excludedFolders || 0,
+      attempts: stats.attempts || 0,
+      addedFolders: stats.addedFolders || 0,
+      addedChars: stats.addedChars || 0,
+      addedTokens: stats.addedTokens || 0,
+      addedPercentOfContext: Number.isFinite(stats.addedPercentOfContext) ? stats.addedPercentOfContext : null,
+      addedPercentOfWindow: Number.isFinite(stats.addedPercentOfWindow) ? stats.addedPercentOfWindow : null,
+      byGeneration: stats.byGeneration || {},
+      latencyMs: stats.elapsedMs || 0,
+      // --- v1.4.0 telemetry (contract §7) ---
+      mode,
+      candidates: Number.isFinite(stats.candidates) ? stats.candidates : stats.matchedFolders || 0,
+      lanesPicked: stats.lanesPicked || null,
+      pops: Number.isFinite(stats.pops) ? stats.pops : null,
+      frontierHits: Number.isFinite(stats.frontierHits) ? stats.frontierHits : null,
+      registerDrops: Number.isFinite(stats.registerDrops) ? stats.registerDrops : null,
+      reInjections: Number.isFinite(stats.reInjections) ? stats.reInjections : null,
+      categorySeeds: Array.isArray(stats.categorySeeds) ? stats.categorySeeds : [],
+      degraded: stats.degraded === true,
+      timeFiltered,
+      // --- v1.4.0 event constraint telemetry ---
+      eventStatus: eventInfo ? eventInfo.status : 'absent',
+      eventLabel: eventInfo ? eventInfo.label : null,
+      eventFiltered,
+      timeWindow: timeWindow ? { from: timeWindow.from, to: timeWindow.to, level: timeWindow.level, widenedTo: timeWindow.widenedTo } : null,
+      offset,
+      limit,
+      hasMore: page.hasMore,
+      missType,
+      added: pageItems.map((addition) => ({
+        id: addition.id,
+        generation: addition.generation,
+        alpha: addition.alpha,
+        beta: Number.isFinite(Number(addition.beta)) ? normalizeBeta(addition.beta) : 0,
+        probability: addition.probability,
+        chars: addition.chars,
+        tokens: addition.tokens,
+        lane: typeof addition.lane === 'string' ? addition.lane : null,
+      })),
+    })
+
+    return {
+      ...result,
+      additions: pageItems,
+      page,
+      timeWindow,
+      eventInfo,
+      missType,
+      mode,
+      lanes: result.lanes,
+    }
+  }
+
+  /** Resolve the effective recall selector for one call. */
+  recallMode(options) {
+    const raw = options && typeof options.mode === 'string' ? options.mode : undefined
+    const candidates = [raw, this.cfg?.recall?.mode, 'fair']
+    for (const candidate of candidates) {
+      if (candidate === 'deterministic' || candidate === 'legacy' || candidate === 'fair') return candidate
+    }
+    return 'fair'
+  }
+
+  /**
+   * v1.4.0 time assistance: normalize the raw `timeFrom`/`timeTo`/`granularity`
+   * inputs and resolve the folder-id filter for the first generation.
+   * Never throws: a bad time input degrades to "no time constraint" + warning.
+   */
+  _recallTimePlan(options) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const hasInput = opts.timeFrom !== undefined || opts.timeTo !== undefined || opts.granularity !== undefined
+    const timeCfg = this.cfg?.time && typeof this.cfg.time === 'object' ? this.cfg.time : {}
+    const timezone = typeof timeCfg.timezone === 'string' && timeCfg.timezone ? timeCfg.timezone : ''
+    const inactive = { active: false, normalized: null, ids: null, hits: 0, enforced: false, timezone, warnings: [] }
+    if (!hasInput) return inactive
+    if (timeCfg.mode === 'off') {
+      return { ...inactive, warnings: ['recall: time arguments ignored because time.mode is "off"'] }
+    }
+    try {
+      const normalized = normalizeTimeQuery({ timeFrom: opts.timeFrom, timeTo: opts.timeTo, granularity: opts.granularity }, this.cfg, Date.now())
+      const timeIndex = this.timeIndex()
+      const query = queryTimeIndex(timeIndex, normalized, this.cfg)
+      // A caller-provided explicit *range* (both endpoints) is a HARD window: it
+      // must not silently widen, because "no memory in that range" is exactly the
+      // signal the model needs ("the time may be wrong — ask the user"). A single
+      // day/month/year is a SOFT window and follows the fallback ladder.
+      const hasFrom = opts.timeFrom !== undefined && opts.timeFrom !== null && opts.timeFrom !== ''
+      const hasTo = opts.timeTo !== undefined && opts.timeTo !== null && opts.timeTo !== ''
+      return {
+        active: true,
+        normalized,
+        // `ids === null` means "not constrained" (time.mode is index/off, or the
+        // window covers everything): the selector must not filter then.
+        ids: query.ids,
+        hits: query.count,
+        enforced: query.ids !== null,
+        hardWindow: hasFrom && hasTo,
+        timezone,
+        warnings: Array.isArray(normalized.warnings) ? normalized.warnings : [],
+      }
+    } catch (error) {
+      return { ...inactive, warnings: [`recall: time query failed (${error && error.message ? error.message : error}); ignored`] }
+    }
+  }
+
+  /**
+   * The in-memory (never persisted) time index, rebuilt lazily when the loaded
+   * index or the configured timezone changes (plan §3.3.1).
+   */
+  timeIndex() {
+    const refreshed = this._refresh()
+    const timezone = typeof this.cfg?.time?.timezone === 'string' ? this.cfg.time.timezone : ''
+    const folders = Array.isArray(refreshed.index.folders) ? refreshed.index.folders : []
+    const key = `${refreshed.mtimeMs}|${folders.length}|${timezone}`
+    if (this._timeIndexCache && this._timeIndexCache.key === key) return this._timeIndexCache.value
+    const value = buildTimeIndex(folders, this.cfg)
+    this._timeIndexCache = { key, value }
+    return value
+  }
+
+  /**
+   * Public helper for `memory_recall` / CLI / tests: normalized window + the
+   * matching folder-id set for one raw time query.
+   */
+  timeWindowFor(input = {}, now = Date.now()) {
+    const opts = input && typeof input === 'object' ? input : {}
+    const timeCfg = this.cfg?.time && typeof this.cfg.time === 'object' ? this.cfg.time : {}
+    const normalized = normalizeTimeQuery({ timeFrom: opts.timeFrom, timeTo: opts.timeTo, granularity: opts.granularity }, this.cfg, now)
+    const timeIndex = this.timeIndex()
+    const query = queryTimeIndex(timeIndex, normalized, this.cfg)
+    return {
+      normalized,
+      from: normalized.from,
+      to: normalized.to,
+      level: normalized.level,
+      granularity: normalized.granularity,
+      requested: normalized.requested,
+      widenedTo: null,
+      enforced: query.ids !== null,
+      hits: query.count,
+      ids: query.ids,
+      timezone: typeof timeCfg.timezone === 'string' ? timeCfg.timezone : '',
+      warnings: Array.isArray(normalized.warnings) ? normalized.warnings : [],
+    }
+  }
+
+  /**
+   * The in-memory event index, rebuilt lazily when the loaded index or the event
+   * settings change (never persisted; the canonical label lives in folder meta).
+   */
+  eventIndex() {
+    const refreshed = this._refresh()
+    const folders = Array.isArray(refreshed.index.folders) ? refreshed.index.folders : []
+    const eventCfg = this.cfg && typeof this.cfg.event === 'object' && this.cfg.event ? this.cfg.event : {}
+    const similarity = eventCfg.similarity && typeof eventCfg.similarity === 'object' ? eventCfg.similarity : {}
+    const key = `${refreshed.mtimeMs}|${refreshed.size ?? -1}|${folders.length}|${eventCfg.maxLabelLength ?? ''}|${similarity.metric ?? ''}|${similarity.threshold ?? ''}`
+    if (this._eventIndexCache && this._eventIndexCache.key === key) return this._eventIndexCache.value
+    const value = buildEventIndex(folders, this.cfg)
+    this._eventIndexCache = { key, value }
+    return value
+  }
+
+  /**
+   * v1.4.0 event constraint: resolve the model-submitted `event` argument into a
+   * folder-id filter (ANDed with any time window). Never throws; a bad value
+   * degrades to "no constraint" + warning.
+   *
+   * Statuses: absent (no `event` argument) | empty (explicit "空") | exact |
+   * similar (ambiguous — the caller must return both events to the model) |
+   * unknown (no memory carries that event) | disabled (`event.mode` is not
+   * 'constrain').
+   */
+  _recallEventPlan(options) {
+    const opts = options && typeof options === 'object' ? options : {}
+    const hasInput = Object.prototype.hasOwnProperty.call(opts, 'event') && opts.event !== undefined && opts.event !== null
+    const eventCfg = this.cfg?.event && typeof this.cfg.event === 'object' ? this.cfg.event : {}
+    const inactive = {
+      active: false,
+      status: 'absent',
+      requested: '',
+      label: null,
+      ids: null,
+      candidates: [],
+      count: null,
+      enforced: false,
+      warnings: [],
+    }
+    if (!hasInput) return inactive
+    if (eventCfg.mode === 'off') {
+      return { ...inactive, active: true, status: 'off', visible: false, warnings: ['recall: event arguments ignored because event.mode is "off"'] }
+    }
+    const submitted = typeof opts.event === 'string' ? opts.event : String(opts.event)
+    try {
+      const resolved = resolveEventQuery(this.eventIndex(), submitted, this.cfg)
+      const constrained = eventCfg.mode === 'constrain' && (resolved.status === 'exact' || resolved.status === 'unknown')
+      let count = null
+      if (resolved.status === 'exact' && resolved.ids instanceof Set) count = resolved.ids.size
+      else if (resolved.status === 'unknown') count = 0
+      return {
+        active: true,
+        visible: true,
+        status: resolved.status,
+        requested: resolved.requested,
+        label: resolved.label || null,
+        // `ids === null` means "not constrained" (empty/similar/disabled).
+        ids: constrained ? resolved.ids : null,
+        candidates: Array.isArray(resolved.candidates) ? resolved.candidates : [],
+        count,
+        enforced: constrained,
+        warnings: Array.isArray(resolved.warnings) ? resolved.warnings : [],
+      }
+    } catch (error) {
+      return {
+        ...inactive,
+        active: true,
+        status: 'disabled',
+        warnings: [`recall: event query failed (${error && error.message ? error.message : error}); ignored`],
+      }
+    }
+  }
+
+  /**
+   * Public helper for tools/tests: resolve one raw event submission.
+   */
+  eventQueryFor(event) {
+    return this._recallEventPlan({ event })
+  }
+
+  /**
+   * v1.4.0 FAIR-DRI recall (engine/recall-index.js): deterministic selection with
+   * the rare-term / high-α / register / probe / rotation / recycle lanes.
+   *
+   * Returns `null` for `mode === 'legacy'` callers (see recall()). The lane state
+   * is mutable and *replaced* by the selector's normalized copy, so the caller
+   * (the adapter, via recall-state.json v3) must persist `result.lanes`.
+   */
+  _deterministicRecall(input) {
+    const request = input && typeof input === 'object' ? input : {}
+    const opts = request.options && typeof request.options === 'object' ? request.options : {}
+    const cfg = this.cfg
+    const recallCfg = cfg && typeof cfg.recall === 'object' && cfg.recall ? cfg.recall : {}
+    const timeCfg = cfg && typeof cfg.time === 'object' && cfg.time ? cfg.time : {}
+    const timePlan = request.timePlan || { active: false, ids: null, enforced: false, normalized: null }
+    const eventPlan = request.eventPlan || { active: false, ids: null, enforced: false }
+    const eventIds = eventPlan.ids instanceof Set ? eventPlan.ids : null
+    const mode = request.mode === 'deterministic' ? 'deterministic' : 'fair'
+    const userText = typeof request.userText === 'string' ? request.userText : ''
+
+    // --- page window ---------------------------------------------------------
+    // B-01 (1.4.1): `opts.paginate=true` selects a *fixed* candidate window
+    // (`min(candidates, PAGINATE_MAX_K)`) from a snapshot of the lane state and
+    // slices the page out of it, so page N is stable for a given state/query and
+    // pages never overlap or skip candidates. Callers that do not opt in keep the
+    // historical window (`k = offset+take+1`).
+    const paginate = opts.paginate === true
+    const offset = clampInt(opts.offset, 0, 1_000_000, 0)
+    const limitRaw = Number(opts.limit)
+    const requestedLimit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(1000, Math.floor(limitRaw)) : null
+    // B-05 (1.4.1): `recall.firstGenMax=0` is the documented "recall disabled"
+    // quota; the engine wrapper used to force it to 1 and inject one memory in
+    // fair/deterministic mode (legacy already returned 0).
+    const configuredFirstGenMax = Number.isFinite(Number(recallCfg.firstGenMax))
+      ? Math.max(0, Math.floor(Number(recallCfg.firstGenMax)))
+      : 10
+    const take = requestedLimit ?? configuredFirstGenMax
+
+    const index = this.recallIndex()
+    const baseLanes = opts.lanes && typeof opts.lanes === 'object' && opts.lanes
+      ? opts.lanes
+      : this._lanes && typeof this._lanes === 'object'
+        ? this._lanes
+        : emptyLanes()
+    const fallbackRound = Number.isFinite(Number(baseLanes.round)) ? Number(baseLanes.round) + 1 : 1
+    const round = clampInt(opts.round, 1, 2_000_000_000, Math.max(1, fallbackRound))
+    const hopsRaw = Number(opts.hops)
+    const hops = Number.isFinite(hopsRaw) ? Math.max(0, Math.floor(hopsRaw)) : recallCfg.hops
+    const warnings = []
+    // BATCH655：空壳现在在建索引时就被排除，不再逐条经过 loadRecallAdditions，
+    // 647/649 那条「skipped tool-only folder」告警会永远看不到。
+    // 改成一条汇总：数量 + 占全部 folder 的比例，仍然每轮只出一条。
+    {
+      const 空壳数 = this._recallToolOnlyIds instanceof Set ? this._recallToolOnlyIds.size : 0
+      const 总数 = Array.isArray(this._refresh().index?.folders) ? this._refresh().index.folders.length : 0
+      if (空壳数 > 0) warnings.push(`recall: 已排除 ${空壳数} 个只有工具回执的 folder（共 ${总数} 个，不进关键词/正文匹配，也不占名额）`)
+    }
+
+    // --- pure time browsing (no keywords): the time window *is* the query ----
+    // `memory_recall` without keywords is a documented 1.4.0 mode (plan §3.3.3
+    // "纯时间浏览"): every scored folder inside the window, ordered by event start.
+    // C-05 (1.4.1): only an *enforced* window may turn empty keywords into a
+    // browse — `time.mode='index'` must not return the whole library.
+    const browsing = userText.trim().length === 0 && timePlan.active === true && timePlan.enforced === true
+    if (browsing) {
+      return this._browseRecall({ index, opts, timePlan, offset, take, warnings, context: request.context })
+    }
+    // B-05: quota 0 → an empty round that consumes no lane state.
+    if (take <= 0) {
+      const ctx0 = request.context && typeof request.context === 'object' ? request.context : {}
+      return {
+        additions: [],
+        stats: {
+          userKeywords: [],
+          matchedFolders: 0,
+          excludedFolders: 0,
+          attempts: 0,
+          addedFolders: 0,
+          addedChars: 0,
+          addedTokens: 0,
+          contextChars: Number.isFinite(ctx0.chars) ? ctx0.chars : null,
+          windowTokens: Number.isFinite(ctx0.windowTokens) ? ctx0.windowTokens : null,
+          addedPercentOfContext: null,
+          addedPercentOfWindow: null,
+          byGeneration: {},
+          elapsedMs: 0,
+          candidates: 0,
+          candidatesAll: 0,
+          lowCandidates: 0,
+          lanesPicked: {},
+          pops: 0,
+          frontierHits: 0,
+          registerDrops: 0,
+          reInjections: 0,
+          degraded: baseLanes.degraded === true,
+          timeFiltered: 0,
+          eventFiltered: 0,
+          filteredByAlpha: 0,
+          round,
+        },
+        warnings,
+        lanes: baseLanes,
+        candidateIds: null,
+        timeWindow: { widenedTo: null, level: timePlan.normalized ? timePlan.normalized.level : null },
+        paginated: true,
+        page: { offset, limit: 0, returned: 0, candidates: 0, hasMore: false },
+      }
+    }
+
+    // --- time fallback ladder (plan §3.3.3): L0 → day3 → month → year → all --
+    const attempts = [{ ids: timePlan.active ? timePlan.ids : null, widenedTo: null, level: timePlan.normalized ? timePlan.normalized.level : null }]
+    const canLadder = timePlan.active === true && timePlan.enforced === true && timePlan.hardWindow !== true && timeCfg.mode === 'constrain'
+    if (canLadder) {
+      try {
+        const timeIndex = this.timeIndex()
+        for (const rung of timeFallbackLadder(timePlan.normalized, cfg)) {
+          const query = queryTimeIndex(timeIndex, rung, cfg)
+          attempts.push({
+            // ids === null means "no constraint" (the `all` rung): never filter.
+            ids: query.ids,
+            widenedTo: rung.widenedTo,
+            level: rung.level,
+          })
+        }
+      } catch (error) {
+        warnings.push(`recall: time ladder failed (${error && error.message ? error.message : error}); using the requested window`)
+      }
+    }
+    // -------------------------------------------------------------------------
+    // TEMPORAL_CN (批次280)：时间词兜底档。
+    //
+    // 默认模式是 fair/deterministic，走的是 selectRecall（recall-index.js），
+    // 不是 recall.js —— 所以只在 recall.js 里加通道是不生效的（这条我踩过一次）。
+    //
+    // 这里给 attempts **末尾**加一档：关键词/时间阶梯全都捞不到东西时，才按
+    // 「查询里的时间词 → 绝对日期区间」去撞 folder 的事件时间。
+    // 追加在末尾 = 天然「只补不抢」：前面任何一档有结果都不会走到这里。
+    // 解析不出时间词就不加这一档（绝不猜）。
+    if (!timePlan.active) {
+      try {
+        const tz = typeof timeCfg.timezone === 'string' && timeCfg.timezone ? timeCfg.timezone : 'Asia/Shanghai'
+        const nowInput = opts.now !== undefined && opts.now !== null ? opts.now : Date.now()
+        const nowDate = nowInput instanceof Date ? nowInput : new Date(Number(nowInput) || nowInput)
+        const win = queryWindowOf(userText, {
+          now: Number.isFinite(nowDate.getTime()) ? nowDate : new Date(),
+          timeZone: tz,
+        })
+        if (win) {
+          const ids = new Set()
+          for (const folder of index.folders || []) {
+            if (!folder || typeof folder.id !== 'string') continue
+            const start = Number(folder.eventStart)
+            if (!Number.isFinite(start)) continue
+            const end = Number.isFinite(Number(folder.eventEnd)) ? Number(folder.eventEnd) : start + 1
+            if (start < win.toMs && end > win.fromMs) ids.add(folder.id)
+          }
+          if (ids.size > 0) {
+            attempts.push({ ids, widenedTo: null, level: 'temporal-cn', temporal: true, window: win })
+          }
+        }
+      } catch {
+        // 时间解析异常绝不能让召回失败：不加这一档就等于现状。
+      }
+    }
+
+    const minResults = Math.max(1, Number(timeCfg.fallbackMinResults) || 1)
+    // A failed (too narrow) rung must not advance cursor/register/recycle state:
+    // every attempt starts from this pre-round snapshot and only the chosen
+    // attempt's lane state is committed at the end.
+    const laneSnapshot = serializeLanes(baseLanes)
+    let chosen
+    if (paginate) {
+      // B-01: choose the ladder rung by *candidate count* (not by offset), so all
+      // pages of one query see the same window. The selection then runs on a
+      // lane snapshot and its lane mutations are discarded below.
+      let attemptChosen = null
+      for (let step = 0; step < attempts.length; step += 1) {
+        const attempt = attempts[step]
+        let candidates = 0
+        try {
+          const seedList = querySeeds(index, userText, cfg).seeds
+          candidates = countCandidates(index, seedList, { minAlpha: opts.minAlpha, timeIds: attempt.ids, eventIds })
+        } catch {
+          candidates = 0
+        }
+        attemptChosen = { attempt, candidates }
+        if (candidates > 0) break
+        if (!canLadder) break
+      }
+      const pageWindow = Math.min(Math.max(0, attemptChosen.candidates), PAGINATE_MAX_K)
+      const pageLanes = deserializeLanes(laneSnapshot)
+      const pageResult = pageWindow > 0
+        ? selectRecall(index, userText, {
+            cfg,
+            lanes: pageLanes,
+            round,
+            mode,
+            // B-01: the exclusion set is only the ids currently in the block; the
+            // ever-surfaced ledger must not shift items between pages.
+            blockIds: opts.blockIds,
+            ledger: undefined,
+            excludeIds: undefined,
+            minAlpha: opts.minAlpha,
+            timeIds: attemptChosen.attempt.ids,
+            eventIds,
+            k: pageWindow,
+            paginate: true,
+          })
+        : { picks: [], stats: {}, hasMore: false, warnings: [] }
+      if (Array.isArray(pageResult.warnings)) {
+        for (const warning of pageResult.warnings) if (!warnings.includes(warning)) warnings.push(warning)
+      }
+      chosen = { result: pageResult, attempt: attemptChosen.attempt }
+    } else {
+      const k = requestedLimit === null && offset === 0 ? take : Math.min(2000, offset + take + 1)
+      for (let step = 0; step < attempts.length; step += 1) {
+        const attempt = attempts[step]
+        const lanesForAttempt = deserializeLanes(laneSnapshot)
+        const result = selectRecall(index, userText, {
+          cfg,
+          lanes: lanesForAttempt,
+          round,
+          mode,
+          blockIds: opts.blockIds,
+          ledger: opts.ledger,
+          excludeIds: opts.excludeIds,
+          minAlpha: opts.minAlpha,
+          timeIds: attempt.ids,
+          eventIds,
+          k,
+          hops,
+        })
+        if (Array.isArray(result.warnings) && result.warnings.length > 0) {
+          for (const warning of result.warnings) if (!warnings.includes(warning)) warnings.push(warning)
+        }
+        if (!chosen) chosen = { result, attempt }
+        if ((result.picks || []).length >= minResults) {
+          chosen = { result, attempt }
+          break
+        }
+        if (!canLadder) break
+      }
+    }
+
+    const result = chosen.result
+    const attempt = chosen.attempt
+    const selectStats = result.stats || {}
+    const allPicks = Array.isArray(result.picks) ? result.picks : []
+    const pagePicks = allPicks.slice(offset, offset + take)
+    const pageHasMore = allPicks.length > offset + take
+
+    // --- 时间路（批次282）：查询里带时间词的，把那个窗口的块补进**剩余名额** ---
+    //
+    // 为什么需要单独一路：正文 bigram 救不了「三个月前」这类题 —— 正文里不会
+    // 出现「三个月前」四个字，词面永远对不上；只有把查询里的时间词换算成事件
+    // 时间区间，再去撞 folder 的 eventStart/eventEnd 才行。
+    //
+    // 只补不抢：先把关键词/正文选出来的名额占住，只填剩下的空位（最多 2 块）。
+    // 解析不出时间词、窗口为空、或者名额已经满了，都等于没这一路。
+    if (!paginate && take > 0 && pagePicks.length < take) {
+      try {
+        const tz = timeCfg && typeof timeCfg.timezone === 'string' && timeCfg.timezone ? timeCfg.timezone : 'Asia/Shanghai'
+        const nowRaw = opts.now !== undefined && opts.now !== null ? opts.now : Date.now()
+        const nowDate = nowRaw instanceof Date ? nowRaw : new Date(Number(nowRaw) || nowRaw)
+        const win = Number.isFinite(nowDate.getTime())
+          ? queryWindowOf(userText, { now: nowDate, timeZone: tz })
+          : null
+        if (win && Number.isFinite(win.fromMs) && Number.isFinite(win.toMs) && win.toMs > win.fromMs) {
+          const used = new Set(pagePicks.map((pick) => pick.id))
+          const center = (win.fromMs + win.toMs) / 2
+          const near = []
+          for (const entry of index.entries) {
+            if (!entry || used.has(entry.id)) continue
+            const folder = entry.folder && typeof entry.folder === 'object' ? entry.folder : {}
+            const start = Number(folder.eventStart)
+            if (!Number.isFinite(start)) continue
+            const end = Number.isFinite(Number(folder.eventEnd)) ? Number(folder.eventEnd) : start + 1
+            if (start >= win.toMs || end <= win.fromMs) continue
+            near.push({ entry, distance: Math.abs(start - center) })
+          }
+          near.sort(
+            (left, right) =>
+              left.distance - right.distance ||
+              Number(right.entry.alpha) - Number(left.entry.alpha) ||
+              (left.entry.id < right.entry.id ? -1 : left.entry.id > right.entry.id ? 1 : 0),
+          )
+          const room = Math.min(take - pagePicks.length, 2)
+          for (const item of near.slice(0, room)) {
+            pagePicks.push({
+              id: item.entry.id,
+              alpha: item.entry.alpha,
+              rankAlpha: Number.isFinite(Number(item.entry.rankAlpha)) ? Number(item.entry.rankAlpha) : item.entry.alpha,
+              createdAt: item.entry.createdAt,
+              generation: 1,
+              lane: 'time',
+            })
+          }
+        }
+      } catch {
+        // 时间路纯属加分项：解析/遍历出任何问题都当没有这一路，绝不让召回失败。
+      }
+    }
+
+    // --- load the folder bodies (same shape as the legacy path) -------------
+    const picked = []
+    for (const pick of pagePicks) {
+      const at = index.byId.get(pick.id)
+      const entry = at === undefined ? null : index.entries[at]
+      picked.push({
+        folder: entry && entry.folder ? entry.folder : { id: pick.id, alpha: pick.alpha, createdAt: pick.createdAt },
+        id: pick.id,
+        generation: Number.isFinite(pick.generation) ? pick.generation : 1,
+        alpha: Number.isFinite(pick.alpha) ? pick.alpha : 0,
+        rankAlpha: Number.isFinite(Number(pick.rankAlpha)) ? Number(pick.rankAlpha) : undefined,
+        createdAt: Number.isFinite(pick.createdAt) ? pick.createdAt : 0,
+        probability: 1,
+        roll: 1,
+        lane: pick.lane,
+      })
+    }
+    const loadWarnings = []
+    const loadedAdditions = loadRecallAdditions(picked, { memoryDir: this.memoryDir, warnings: loadWarnings })
+    // B-01: a page is exactly `picks.slice(offset, offset+limit)` — re-sorting the
+    // page would break the "page N == next limit of one ordered list" contract.
+    const additions = paginate ? loadedAdditions : sortRecallAdditions(loadedAdditions, recallCfg.sort)
+    for (const warning of loadWarnings) warnings.push(warning)
+
+    // --- B-03 (1.4.1): per-round character budget ---------------------------
+    // `recall.fairness.roundBudget.maxChars` was documented but never read. A
+    // single round now keeps the highest-priority prefix that fits and drops the
+    // tail (lowest priority lanes) with a warning + telemetry instead of
+    // injecting an unbounded block. At least one folder is always kept, mirroring
+    // `trimBlock`'s hard-cap behaviour.
+    const roundBudget = { maxChars: null, dropped: 0, chars: null }
+    if (!paginate) {
+      const fairCfg = recallCfg.fairness && typeof recallCfg.fairness === 'object' ? recallCfg.fairness : {}
+      const budgetCfg = fairCfg.roundBudget && typeof fairCfg.roundBudget === 'object' ? fairCfg.roundBudget : {}
+      const configuredBudget = Number(budgetCfg.maxChars)
+      const maxChars = Number.isFinite(configuredBudget) && configuredBudget > 0 ? Math.floor(configuredBudget) : DEFAULT_ROUND_BUDGET_CHARS
+      let usedChars = additions.length > 0 ? Number(additions[0].chars) || 0 : 0
+      let kept = additions.length > 0 ? 1 : 0
+      while (kept < additions.length) {
+        const chars = Number(additions[kept].chars) || 0
+        if (usedChars + chars > maxChars) break
+        usedChars += chars
+        kept += 1
+      }
+      const dropped = additions.length - kept
+      if (dropped > 0) {
+        additions.splice(kept)
+        roundBudget.maxChars = maxChars
+        roundBudget.dropped = dropped
+        roundBudget.chars = usedChars
+        warnings.push(
+          `recall: round char budget recall.fairness.roundBudget.maxChars=${maxChars} exceeded; kept ${kept} folder(s) ` +
+            `(${usedChars} chars), dropped ${dropped} lowest-priority pick(s)`,
+        )
+      }
+    }
+
+    // --- stats (v1.3.0 field names + v1.4.0 lanes) -------------------------
+    const ctx = request.context && typeof request.context === 'object' ? request.context : {}
+    // `matchedFolders` keeps the v1.3.0 meaning: candidates *inside* the time
+    // window (the legacy path counts after its first-generation filter). The
+    // selector's own counters are lane/pop oriented, so the two unique candidate
+    // counts are measured here — O(sum of posting lengths), not per-lane work.
+    let candidatesInWindow = Number(selectStats.candidates) || 0
+    let candidatesAll = candidatesInWindow
+    let timeFiltered = Number(selectStats.filteredByTime) || 0
+    let eventFiltered = Number(selectStats.filteredByEvent) || 0
+    try {
+      const seedList = querySeeds(index, userText, cfg).seeds
+      const counts = uniqueCandidateCounts(index, seedList, {
+        minAlpha: opts.minAlpha,
+        // B-07 (1.4.1): use the *chosen* ladder rung's window. Re-counting the
+        // originally requested window made "returned 1, candidates 0" telemetry.
+        timeIds: attempt.ids instanceof Set ? attempt.ids : null,
+        eventIds,
+      })
+      candidatesAll = counts.all
+      timeFiltered = Math.max(0, counts.all - counts.inWindow)
+      eventFiltered = Math.max(0, counts.inWindow - counts.inEvent)
+      candidatesInWindow = counts.inEvent
+    } catch {
+      /* keep the selector counters when the recount fails */
+    }
+    let userKeywords = []
+    try {
+      userKeywords = querySeeds(index, userText, cfg).userKeywords
+    } catch {
+      userKeywords = []
+    }
+    let addedChars = 0
+    let addedTokens = 0
+    const byGeneration = {}
+    for (const addition of additions) {
+      addedChars += Number(addition.chars) || 0
+      addedTokens += Number(addition.tokens) || 0
+      const key = String(addition.generation)
+      byGeneration[key] = (byGeneration[key] || 0) + 1
+    }
+    const contextChars = Number.isFinite(ctx.chars) ? ctx.chars : null
+    const windowTokens = Number.isFinite(ctx.windowTokens) ? ctx.windowTokens : null
+    // Lane attribution covers the injected page only: the +1 lookahead pick is a
+    // pagination probe, not part of the round's block. sum(lanesPicked) therefore
+    // always equals additions.length.
+    const lanesPicked = {}
+    for (const addition of additions) {
+      const lane = typeof addition.lane === 'string' && addition.lane ? addition.lane : 'hi'
+      lanesPicked[lane] = (lanesPicked[lane] || 0) + 1
+    }
+    const stats = {
+      userKeywords,
+      matchedFolders: candidatesInWindow,
+      excludedFolders: Number(selectStats.excludedSkips) || 0,
+      attempts: Number(selectStats.pops) || 0,
+      addedFolders: additions.length,
+      addedChars,
+      addedTokens,
+      contextChars,
+      windowTokens,
+      addedPercentOfContext: contextChars > 0 ? round2((addedChars / contextChars) * 100) : null,
+      addedPercentOfWindow: windowTokens > 0 ? round2((addedTokens / windowTokens) * 100) : null,
+      byGeneration,
+      elapsedMs: round2(typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance.now() - (request.startedAt ?? performance.now()) : 0),
+      // v1.4.0 lane telemetry (contract §7)
+      candidates: candidatesInWindow,
+      candidatesAll,
+      lowCandidates: Number(selectStats.lowCandidates) || 0,
+      lanesPicked,
+      pops: Number(selectStats.pops) || 0,
+      frontierHits: Number(selectStats.frontierHits) || 0,
+      registerDrops: Number(selectStats.registerDrops) || 0,
+      reInjections: Number(selectStats.reInjections) || 0,
+      degraded: selectStats.degraded === true,
+      timeFiltered,
+      eventFiltered,
+      filteredByAlpha: Number(selectStats.filteredByAlpha) || 0,
+      categorySeeds: Array.isArray(selectStats.categorySeeds) ? selectStats.categorySeeds : [],
+      // B-03 (1.4.1): per-round character budget telemetry (null/0 = no drop).
+      roundBudgetMaxChars: roundBudget.maxChars,
+      roundBudgetDropped: roundBudget.dropped,
+      roundBudgetChars: roundBudget.chars,
+      round,
+    }
+
+    // Commit the winning lane state (the selector returns a normalized copy).
+    // B-01: a paginated call never advances/writes back lane state — the pages
+    // must be reproducible from the same snapshot on every request.
+    if (!paginate && result.lanes && typeof result.lanes === 'object') {
+      this._lanes = result.lanes
+      this._round = Number.isFinite(result.lanes.round) ? result.lanes.round : round
+    }
+    const hasMore = paginate ? pageHasMore : pageHasMore || result.hasMore === true
+
+    return {
+      additions,
+      stats,
+      warnings,
+      lanes: paginate ? baseLanes : result.lanes,
+      // σ-ordered ids of C(Q)∩W: `engine.trimBlock` uses this set to trim
+      // "not in the current query" entries first (plan §3.2.4).
+      candidateIds: !paginate && Array.isArray(result.candidateIds) ? result.candidateIds : null,
+      timeWindow: { widenedTo: attempt.widenedTo ?? null, level: attempt.level ?? null },
+      paginated: true,
+      page: {
+        offset,
+        limit: take,
+        returned: additions.length,
+        candidates: candidatesInWindow,
+        hasMore,
+      },
+    }
+  }
+
+  /**
+   * Pure time browsing (v1.4.0 §3.3.3): `memory_recall` called without keywords
+   * returns the scored folders inside the requested time window, ordered by the
+   * folder's event start (`eventStart` when known, else `createdAt`).
+   *
+   * No lane state is consumed (browsing is not a "recall decision"), but folders
+   * already injected into the current block (`excludeIds`) are skipped so the
+   * answer is not a duplicate of what the model already sees.
+   */
+  _browseRecall(input) {
+    const request = input && typeof input === 'object' ? input : {}
+    const opts = request.opts && typeof request.opts === 'object' ? request.opts : {}
+    const timePlan = request.timePlan || {}
+    const eventPlan = request.eventPlan || {}
+    const ctx = request.context && typeof request.context === 'object' ? request.context : {}
+    const index = request.index || this.recallIndex()
+    const offset = clampInt(request.offset, 0, 1_000_000, 0)
+    // B-05 (1.4.1): a 0 quota (recall.firstGenMax=0) must yield an empty page,
+    // not the historical fallback to 10.
+    const take = Number.isFinite(request.take) ? Math.max(0, Math.floor(request.take)) : 10
+    const warnings = Array.isArray(request.warnings) ? request.warnings : []
+    const windowIds = timePlan.ids instanceof Set ? timePlan.ids : null
+    const eventIds = eventPlan.ids instanceof Set ? eventPlan.ids : null
+    const excluded = toIdSet(opts.excludeIds)
+    const minAlphaRaw = Number(opts.minAlpha)
+    const alphaFloor = Number.isFinite(minAlphaRaw) ? Math.min(1, Math.max(0, minAlphaRaw)) : 0
+
+    const candidates = []
+    for (const entry of index.entries) {
+      if (windowIds && !windowIds.has(entry.id)) continue
+      if (eventIds && !eventIds.has(entry.id)) continue
+      if (alphaFloor > 0 && entry.alpha < alphaFloor) continue
+      if (excluded.has(entry.id)) continue
+      const folder = entry.folder && typeof entry.folder === 'object' ? entry.folder : {}
+      let range = null
+      try {
+        range = folderTimeRange(folder)
+      } catch {
+        range = null
+      }
+      const start = Number.isFinite(range?.start) ? range.start : Number(entry.createdAt) || 0
+      candidates.push({ entry, start })
+    }
+    candidates.sort(
+      (left, right) =>
+        left.start - right.start ||
+        Number(left.entry.createdAt) - Number(right.entry.createdAt) ||
+        (left.entry.id < right.entry.id ? -1 : left.entry.id > right.entry.id ? 1 : 0),
+    )
+
+    const pageCandidates = candidates.slice(offset, offset + take)
+    const picked = pageCandidates.map((candidate) => ({
+      folder: candidate.entry.folder || { id: candidate.entry.id, alpha: candidate.entry.alpha, createdAt: candidate.entry.createdAt },
+      id: candidate.entry.id,
+      generation: 1,
+      alpha: candidate.entry.alpha,
+      createdAt: candidate.entry.createdAt,
+      probability: 1,
+      roll: 1,
+      lane: 'browse',
+    }))
+    const loadWarnings = []
+    // C-02 (1.4.1): pure time browsing is documented as ordered by event start
+    // (SPEC §6.8); `recall.sort` re-sorted it by createdAt and the CLI/engine API
+    // returned the wrong order. `picked` is already in event-start order.
+    const additions = loadRecallAdditions(picked, { memoryDir: this.memoryDir, warnings: loadWarnings })
+    for (const warning of loadWarnings) warnings.push(warning)
+
+    let addedChars = 0
+    let addedTokens = 0
+    for (const addition of additions) {
+      addedChars += Number(addition.chars) || 0
+      addedTokens += Number(addition.tokens) || 0
+    }
+    const contextChars = Number.isFinite(ctx.chars) ? ctx.chars : null
+    const windowTokens = Number.isFinite(ctx.windowTokens) ? ctx.windowTokens : null
+    const stats = {
+      userKeywords: [],
+      matchedFolders: candidates.length,
+      excludedFolders: 0,
+      attempts: 0,
+      addedFolders: additions.length,
+      addedChars,
+      addedTokens,
+      contextChars,
+      windowTokens,
+      addedPercentOfContext: contextChars > 0 ? round2((addedChars / contextChars) * 100) : null,
+      addedPercentOfWindow: windowTokens > 0 ? round2((addedTokens / windowTokens) * 100) : null,
+      byGeneration: additions.length > 0 ? { 1: additions.length } : {},
+      elapsedMs: 0,
+      candidates: candidates.length,
+      candidatesAll: candidates.length,
+      lowCandidates: 0,
+      lanesPicked: null,
+      pops: 0,
+      frontierHits: 0,
+      registerDrops: 0,
+      reInjections: 0,
+      degraded: false,
+      timeFiltered: 0,
+      filteredByAlpha: 0,
+      browse: true,
+      round: Number.isFinite(Number(this._round)) ? this._round : 0,
+    }
+    return {
+      additions,
+      stats,
+      warnings,
+      lanes: this._lanes,
+      timeWindow: { widenedTo: null, level: timePlan.normalized ? timePlan.normalized.level : null },
+      paginated: true,
+      browse: true,
+      page: {
+        offset,
+        limit: take,
+        returned: additions.length,
+        candidates: candidates.length,
+        hasMore: take > 0 && offset + take < candidates.length,
+      },
+    }
+  }
+
+  /** The in-memory deterministic recall index (rebuilt when the index/config changed). */
+  recallIndex() {
+    const refreshed = this._refresh()
+    const folders = Array.isArray(refreshed.index.folders) ? refreshed.index.folders : []
+    // 衰减权重是建索引时按“现在”算的；桶过期后重建，避免长进程一直用旧权重。
+    const decayBucket = recencyCacheBucket(Date.now(), recencyConfig(this.cfg))
+    const key = `${refreshed.mtimeMs}|${refreshed.size ?? -1}|${folders.length}|${lanesFingerprint(this.cfg)}|rec:${decayBucket}`
+    if (this._recallIndexCache && this._recallIndexCache.key === key) return this._recallIndexCache.value
+    // BATCH655 2026-11-17：空壳 folder 必须在**建索引之前**排除。
+    // 647 的过滤发生在 loadRecallAdditions（选完名额、读正文时才跳过），
+    // 于是 1433 个只有工具回执的 folder 照旧参与关键词/正文 posting、
+    // 照旧抢 firstGenMax 名额，跳过后不补位 —— 台账里「不占名额/整体更快」不成立。
+    // recallBodies() 本来就要把每个 folder 的 messages 读一遍（读 5542 个约 0.1s，
+    // 且跟索引共用 mtime/size/块数 缓存），顺手记下「有没有一句人话」几乎零成本。
+    const bodies = this.recallBodies(folders)
+    const 空壳 = this._recallToolOnlyIds
+    const 可召回 = 空壳 instanceof Set && 空壳.size > 0
+      ? folders.filter((f) => !(f && typeof f.id === 'string' && 空壳.has(f.id)))
+      : folders
+    const value = buildRecallIndex(可召回, this.cfg, { bodies })
+    this._recallIndexCache = { key, value }
+    return value
+  }
+
+  /**
+   * 正文路（批次282）：把所有 folder 的正文读成 Map<id, text>，给 recallIndex 建倒排。
+   *
+   * 为什么要单独一个缓存：recallIndex 只拿得到 index.json 里的元数据（关键词/
+   * 时间/α），正文在每块目录的 context.json 里。769 块的读取 + 解析约几百毫秒，
+   * 所以跟 recallIndex 用同一把钥匙（mtime/size/块数）缓存，归档一次才重建一次。
+   *
+   * 读不到、坏掉、没有正文的块直接跳过：**绝不因为一块坏掉就让召回失败**。
+   * 单块只取前 8000 字（跟 bodyRoute.maxCharsPerFolder 对齐，尾部多是语气词）。
+   *
+   * @param {Array<object>} folders
+   * @returns {Map<string,string>}
+   */
+  recallBodies(folders) {
+    const refreshed = this._refresh()
+    const list = Array.isArray(folders) ? folders : []
+    const key = `${refreshed.mtimeMs}|${refreshed.size ?? -1}|${list.length}`
+    if (this._recallBodiesCache && this._recallBodiesCache.key === key) {
+      // 缓存命中也要把空壳集合带出来 —— 否则第二次召回会退回「空壳照抢名额」。
+      this._recallToolOnlyIds = this._recallBodiesCache.toolOnly
+      return this._recallBodiesCache.value
+    }
+    const value = new Map()
+    // BATCH655：顺手记下「一句 user/assistant 都没有」的 folder id。
+    // 建索引时按这个集合直接排除，而不是等 loadRecallAdditions 才跳
+    // （那样它已经抢过 firstGenMax 名额，跳过后也不补位）。
+    const 空壳 = new Set()
+    const cap = 8000
+    for (const folder of list) {
+      if (!folder || typeof folder.id !== 'string') continue
+      let loaded
+      try {
+        loaded = readFolderFromStore(this.memoryDir, folder.id)
+      } catch {
+        continue
+      }
+      const messages = Array.isArray(loaded && loaded.messages) ? loaded.messages : []
+      if (只有工具回执(messages)) 空壳.add(folder.id)
+      const parts = []
+      let used = 0
+      for (const message of messages) {
+        const content = message && typeof message.content === 'string' ? message.content : ''
+        if (!content) continue
+        parts.push(content)
+        used += content.length
+        if (used >= cap) break
+      }
+      if (parts.length > 0) value.set(folder.id, parts.join('\n').slice(0, cap))
+    }
+    this._recallBodiesCache = { key, value, toolOnly: 空壳 }
+    this._recallToolOnlyIds = 空壳
+    return value
+  }
+
+  /** Render the recall block (see docs/SPEC.md §6.7). */
+  buildRecallBlock(additions) {
+    return buildRecallBlock(additions, this.cfg)
+  }
+
+  /** Aggregate `stats.jsonl` into the test-phase report numbers (+ `text`). */
+  report() {
+    const events = readStats(this.memoryDir, this.cfg)
+    const summary = summarizeStats(events)
+    return { ...summary, text: formatReport(summary), events: events.length, memoryDir: this.memoryDir }
+  }
+
+  /** Folder entries from the cached index. */
+  list() {
+    return this._refresh().index.folders
+  }
+
+  /** Read one folder (meta + messages). */
+  readFolder(id) {
+    return readFolderFromStore(this.memoryDir, id)
+  }
+}

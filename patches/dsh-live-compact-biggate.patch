@@ -1,0 +1,40 @@
+--- a/dsh-live-compact/index.js
++++ b/dsh-live-compact/index.js
+@@ -382,7 +382,11 @@
+       await agent.runMaintenance(async (agentSignal) => {
+         const op = AbortSignal.any([agentSignal, signal]);
+         const measurement = this.ctx.tokenMeter.measure(agent.session);
+-        if (measurement.totalTokens < MIN_PRESSURE || measurement.totalTokens >= BIG_GATE) return;
++        if (measurement.totalTokens < MIN_PRESSURE) return;
++        // 超大门不能再直接放弃：原来 >= BIG_GATE 就 return，指望 host gate 兜，
++        // 结果上下文卡在 79 万每轮照样全量发送（2026-11-23 实测 109 轮 3970 万 token）。
++        // 超门时强制 drain，把上下文一路砍回 KEEP_ROUND_TOKENS。
++        const 超门 = measurement.totalTokens >= BIG_GATE;
+         this.ensurePruneGuard();
+         this.captureSession(agent.session);
+         const resolved = this.engineFor(agent);
+@@ -398,7 +402,7 @@
+         const base = state.turnBase ?? last;
+         const growth = Math.max(0, last - base);
+         state.maxTurnGrowth = Math.max(state.maxTurnGrowth || 0, growth);
+-        let drain = cloud && last + state.maxTurnGrowth > KEEP_ROUND_TOKENS;
++        let drain = 超门 || (cloud && last + state.maxTurnGrowth > KEEP_ROUND_TOKENS);
+         for (let pass = 0; pass < 8; pass += 1) {
+           const measured = this.ctx.tokenMeter.measure(agent.session);
+           if (drain && measured.totalTokens <= KEEP_ROUND_TOKENS) break;
+@@ -412,6 +416,7 @@
+           });
+           if (chunk === null) {
+             if (drain && measured.totalTokens > KEEP_ROUND_TOKENS) {
++              console.error(`[spine] drain stopped at ${measured.totalTokens}`);
+               this.ctx.logger?.warn?.(`spine drain stopped at ${measured.totalTokens}; no legal span`);
+             } else {
+               this.ctx.logger?.debug?.("spine cut skipped");
+@@ -432,6 +437,7 @@
+             const saved = before - after;
+             const stats = saved > 0 ? recordCutStats(shadowDirectory(), { saved, rewrite: Math.max(0, after - (chunk.prefix || 0)) }) : null;
+             const total = stats ? stats.savedTokens : "unknown";
++            console.error(`[spine] cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved} total=${total}`);
+             this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved} total=${total}`);
+           } catch (error) {
+             const message = error instanceof Error ? error.message : String(error);

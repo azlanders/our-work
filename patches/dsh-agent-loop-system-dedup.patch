@@ -1,0 +1,27 @@
+--- a/dsh-agent-loop/lib/index.js
++++ b/dsh-agent-loop/lib/index.js
+@@ -273,11 +273,21 @@
+ 			if (head.text !== rendered) updates.push(this.replace(head.seq, rendered));
+ 			return updates;
+ 		}
+-		if (latest.text === rendered) return [];
+-		return [{
++		const active = nodes.filter((node) => node.text !== "");
++		if (latest.text === rendered) {
++			if (active.length <= 1) return [];
++			return active.filter((node) => node.seq !== latest.seq).map((node) => this.replace(node.seq, ""));
++		}
++		// TOKEN_DEDUP 2026-11-23：继续同一系列时，旧版系统提示词不再和新人设一起留在表面。
++		// 原来每次 append 都会把整份人设 + SOUL + 工具规矩再发一遍；多轮后同一份 system
++		// 叠加四五份，输入 token 直接翻倍。这里清空旧的有效节点，只在尾部保留最新一份；
++		// 下一次内容变化只改尾部，前面已经发过的历史仍可命中前缀缓存。
++		const updates = active.map((node) => this.replace(node.seq, ""));
++		updates.push({
+ 			message: createSystemMessage(rendered),
+ 			intent: { surfaceOp: "append" }
+-		}];
++		});
++		return updates;
+ 	}
+ 	replace(seq, text) {
+ 		return {

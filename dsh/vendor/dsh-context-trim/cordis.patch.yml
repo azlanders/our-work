@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-context-trim
+      name: dsh-context-trim
+      config:
+        maxToolChars: 2500
+        enableDiff: true
+        enableTrim: true

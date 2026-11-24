@@ -1,0 +1,63 @@
+--- a/dsh-onebot-channel/receipt-transaction.mjs
++++ b/dsh-onebot-channel/receipt-transaction.mjs
+@@ -2,6 +2,8 @@
+ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+ import { dirname } from 'node:path'
+ 
++const UNKNOWN_TTL_MS = 30 * 60e3
++
+ export class ProactiveReceiptStore {
+   constructor({ file, beforePersist = () => {} }) {
+     if (typeof file !== 'string' || file === '') throw new TypeError('a receipt file is required')
+@@ -19,10 +21,24 @@
+     const parsed = JSON.parse(readFileSync(this.file, 'utf8'))
+     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new TypeError('invalid receipt file')
+     let changed = false
++    const now = Date.now()
+     for (const entry of Object.values(parsed)) {
+       if (entry?.status === 'sending') {
+         changed = true
+         entry.status = 'unknown'
++        entry.unknownAt = Number(entry.finishedAt) || Number(entry.stagedAt) || now
++      }
++      // UNKNOWN_TTL 2026-11-23: a send whose platform outcome is unknown must not
++      // block the same target forever. OneBot offline leaves a permanent unknown
++      // entry, so every later proactive tick says "cooldown" with until=0.
++      if (entry?.status === 'unknown') {
++        const at = Number(entry.unknownAt) || Number(entry.stagedAt) || 0
++        if (at > 0 && now >= at + UNKNOWN_TTL_MS) {
++          changed = true
++          entry.status = 'not-sent'
++          entry.finishedAt = now
++          entry.cooldownUntil = now
++        }
+       }
+     }
+     if (changed) this.persist(parsed)
+@@ -120,6 +136,26 @@
+     return { ...structuredClone(this.entries[key]), duplicate: false }
+   }
+ 
++  /**
++   * Read-only: whether this target is currently blocked by receipt state.
++   * Stage() would reject with blocked/duplicate for the same reasons; the proactive
++   * tick uses this to skip composing a nudge that is guaranteed to be rejected.
++   */
++  blockOf(target, now = Date.now()) {
++    this.loadForUse()
++    if (!validTarget(target)) return null
++    const targetKey = JSON.stringify(normalizedTarget(target))
++    const active = Object.values(this.entries).find((entry) => JSON.stringify(entry.target) === targetKey
++      && (['pending', 'sending', 'unknown'].includes(entry.status) || (entry.status === 'accepted' && entry.complete === true
++        && !['quota', 'topics', 'later'].every((step) => entry.reconciliation?.[step] === true))))
++    if (active) return { status: active.status, until: 0 }
++    const cooldown = Object.values(this.entries).find((entry) => JSON.stringify(entry.target) === targetKey
++      && ['not-sent', 'rejected'].includes(entry.status)
++      && Number(entry.cooldownUntil) > Number(now))
++    if (cooldown) return { status: cooldown.status, until: Number(cooldown.cooldownUntil) }
++    return null
++  }
++
+   recordCurrent(token, update) {
+     this.loadForUse()
+     const key = String(token ?? '')
