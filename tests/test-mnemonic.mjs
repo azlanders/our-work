@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
-import { renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
+import { renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
@@ -73,6 +73,26 @@ test('diversify prevents redundant near-duplicate hits from crowding out distinc
   const out = diversify(hits, { limit: 2, lambda: 0.75 })
   assert.equal(out.length, 2)
   assert.deepEqual(out.map((h) => h.rec.id), ['a1', 'b1'])
+})
+
+test('renderCard 只收像事实的条目：提问、招呼、纯英文不进卡，显式存下的进卡', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const records = [
+    { id: 'f1', text: '主人不吃香菜，点外卖要去掉。', importance: 0.8, createdAt: now - 3600e3, source: { kind: 'tool' } },
+    { id: 'q1', text: '你现在是neon 对吧', importance: 0.5, createdAt: now - 600e3, source: 'import:hippocampus:he' },
+    { id: 'e1', text: 'Want me to check my account settings', importance: 0.5, createdAt: now - 500e3 },
+    { id: 'g1', text: '早呀老大！今天也来啦', importance: 0.5, createdAt: now - 400e3 },
+    { id: 'r1', text: '昨天聊到她想去海边住一阵。', importance: 0.5, createdAt: now - 300e3 },
+  ]
+  const card = renderCard(records, { maxChars: 900, now })
+  assert.ok(card.includes('香菜'), '显式存下的事实要进卡')
+  assert.ok(!card.includes('neon'), '提问不进卡')
+  assert.ok(!card.includes('Want me'), '纯英文不进卡')
+  assert.ok(!card.includes('早呀'), '招呼不进卡')
+  assert.ok(card.length <= 900)
+
+  const tiny = renderCard(records, { maxChars: 40, now })
+  assert.ok(tiny.length <= 40, '卡必须守住预算')
 })
 
 test('renderRecallBlock preserves full date, head/tail discipline, and avoids awkward micro-truncation', () => {

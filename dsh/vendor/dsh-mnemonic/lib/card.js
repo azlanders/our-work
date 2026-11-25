@@ -35,13 +35,59 @@ export function renderClock(now = Date.now(), tzOffsetMs = DEFAULT_TZ_OFFSET_MS)
   return `【现在】${clockText(now, tzOffsetMs)}`
 }
 
+// 常驻卡只放「像事实」的条目：显式存下的、或重要度高的。
+// 历史里混进来的提问、招呼、纯英文系统话，放上去既占字又误导。
+function sourceKind(rec) {
+  const s = rec.source
+  if (!s) return ''
+  if (typeof s === 'string') return s
+  return s.kind || ''
+}
+
+function cardWorthy(rec) {
+  const t = String(rec.text || '').trim()
+  if (t.length < 6) return false
+  if (!/[\u4e00-\u9fff]/.test(t)) return false          // 没有中文的多半是系统话/英文寒暄
+  if (/[?？]\s*$/.test(t) || /(吗|呢|对吧|是不是)\s*$/.test(t)) return false // 提问不是事实
+  if (/^(早安|早呀|早啊|晚安|在吗|在不在|哈喽|你好|hi\b|hello\b)/i.test(t)) return false
+  return true
+}
+
 export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
   if (!records.length) return ''
   const today = records.filter((r) => now - (r.createdAt || 0) < DAY).length
-  const newest = [...records].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 3)
-  const titles = newest.map((r) => clip(r.text, 22)).join('｜')
-  const head = `【记忆】存 ${records.length} 条 · 24h 内 +${today} · 最近：${titles}`
-  return clip(head, maxChars)
+  const facts = records
+    .filter((r) => cardWorthy(r) && (sourceKind(r).startsWith('tool') || (r.importance || 0) >= 0.65))
+    .sort((a, b) => (b.importance || 0) - (a.importance || 0) || (b.createdAt || 0) - (a.createdAt || 0))
+  const recent = records
+    .filter(cardWorthy)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+
+  const parts = [`【记忆】存 ${records.length} 条 · 24h 内 +${today}`]
+  let used = parts[0].length
+  const budget = Math.max(0, maxChars - used)
+
+  if (facts.length) {
+    let block = '\n记得的事：'
+    for (const r of facts.slice(0, 6)) {
+      const line = `\n· (${mmdd(r.eventAt || r.createdAt)}) ${clip(r.text, 48)}`
+      if (block.length + line.length > budget * 0.75) break
+      block += line
+    }
+    if (block.includes('\n·')) {
+      parts.push(block)
+      used += block.length
+    }
+  }
+
+  if (recent.length) {
+    const titles = recent.slice(0, 2).map((r) => clip(r.text, 18)).join('｜')
+    const tail = `\n最近聊：${titles}`
+    if (used + tail.length <= maxChars) {
+      parts.push(tail)
+    }
+  }
+  return clip(parts.join(''), maxChars)
 }
 
 /**
