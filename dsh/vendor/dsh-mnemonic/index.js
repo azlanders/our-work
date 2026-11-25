@@ -45,6 +45,12 @@ export function isHumanUserMessage(msg) {
   return true
 }
 
+/** 回忆注入消息的判据只留一份：相邻消息检查和 120s 去重共用。 */
+export function isMnemonicRecallMessage(msg) {
+  const kind = msg?.source?.kind ?? msg?.message?.source?.kind
+  return kind === 'plugin:dsh-mnemonic'
+}
+
 export function effectiveMinScore(recordCount, targetMinScore) {
   const low = Math.min(targetMinScore, 1.2)
   if (recordCount <= 30) return low
@@ -400,7 +406,7 @@ export function apply(ctx, config = {}) {
       if (messages.slice(lastUserIndex + 1).some((m) => roleOf(m) === 'assistant')) return decision
       const query = messageText(messages[lastUserIndex])
       const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex, scope) : null
-      if (messages[lastUserIndex + 1]?.source?.kind === 'plugin:dsh-mnemonic') return decision
+      if (isMnemonicRecallMessage(messages[lastUserIndex + 1])) return decision
       const qTrim = query.trim()
       if (qTrim.length < 3 || isLowValueOrInjection(qTrim, { minLen: 3 })) return decision
       const ts = Date.now()
@@ -415,7 +421,10 @@ export function apply(ctx, config = {}) {
         : diversify(pool, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
       if (!hits.length) return decision
       const sig = hits.map((h) => h.rec.id).join(',')
-      if (sig === lastInject.sig && ts - lastInject.at < 120000) return decision
+      // 2026-11-25：原来只看 120s + sig，宿主不持久化临时注入消息或上下文裁剪后，连续追问会被静默吞掉回忆；
+      // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
+      const hasPrevInjectInWindow = messages.some(isMnemonicRecallMessage)
+      if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
       const block = renderRecallBlock(hits, { maxChars: cfg.injectChars, itemChars: cfg.itemChars, now: ts })
       if (!block) return decision
       const message = await memoryMessage(block)

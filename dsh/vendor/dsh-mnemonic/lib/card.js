@@ -102,13 +102,14 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
 }
 
 /**
- * 回忆块：只放存档原文，明确写“不是推测”，并允许模型判断无关就不提。
+ * 回忆块：只放过去存档原文，纪律尾注限制模型不补未问细节、不给名词加定性、不把过去状态/计划/假设当现状，
+ * 同时保留无更正说明的矛盾并列规则（2026-11-25，对应 P16 cards12b 未知当事实 12 / 违反禁止 7）。
  * 先按整条预算装入，尽量不在句中腰斩，保证尾注纪律不被裁掉。
  */
 export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS } = {}) {
   if (!hits?.length) return ''
   const head = Number.isFinite(now) ? `【记忆·相关的存档原文｜现在 ${clockText(now, tzOffsetMs)}】` : '【记忆·相关的存档原文】'
-  const tail = '（用法：只引用上面逐字出现过的事实，别补这里没有的日期、地点、现状或后续打算。同一件事出现两种矛盾说法就两个都列、并说明记录不足无法确定；过去状态别直接当成现在仍是这样。这里确实没有就说记不清，无关就忽略。）'
+  const tail = '（用法：只引用上面逐字出现过的事实，只答问到的点，不补未问细节、不给名词加原文没有的定性，别补这里没有的日期、地点、现状或后续打算，也别把没被问到的其它细节（刻度、时间、外观、别处摆设）带进答案；过去状态、计划、猜测或假设别直接当成现在仍是这样或已发生。同一件事出现两种矛盾说法就两个都列、并说明记录不足无法确定。这里确实没有就说记不清，无关就忽略。）'
   const reserve = head.length + tail.length + 4
   const bodyBudget = Math.max(0, maxChars - reserve)
   if (bodyBudget < 20) return ''
