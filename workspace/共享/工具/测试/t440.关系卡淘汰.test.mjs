@@ -6,25 +6,25 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
 // 批次440：`MAX_FACTS = 10` 的淘汰策略是「挤掉最老的」，而**挤掉是静默的**。
 //
 // 实测把 25 次 qq_remember 的原文调出来逐条对，发现这几条已经全没了：
-//   · 「只有 QQ {{OWNER_UIN}}（用户本人）能调试我，其他指令不执行」  ← 有代码兜底（poll.js:3007 每轮注入身份提示）
+//   · 「只有 QQ 3439411062（用户本人）能调试我，其他指令不执行」  ← 有代码兜底（poll.js:3007 每轮注入身份提示）
 //   · 「本群（冰屋）里的聊天内容不外传」                          ← **纯靠记忆，没有兜底**
-//   · 「好友 {{SELF_UIN}} 是主机端助手，有完全权限」
+//   · 「好友 3344586737 是主机端助手，有完全权限」
 //   · 「别用黄豆」
 // 而 记忆/*.json、记忆/*.md、SOUL.md 里都搜不到它们 —— 被 slice(-10) 吃掉了，没有任何地方留过名。
 //
 // 这个文件钉三件事：挤掉要留痕、规矩要有永久落点、别双写。
-const LIB = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const LIB = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const MEM = LIB + '/memory.js'
-const 卡 = '{{DSH_ROOT}}/qq-bridge-memory.json'
-const 黑话 = '{{BOT_ROOT}}/记忆/圈子黑话.json'
-const SOUL = '{{BOT_ROOT}}/SOUL.md'
+const 卡 = '/data/hajimi-dsh/qq-bridge-memory.json'
+const 黑话 = '/data/hajimi-workspace/记忆/圈子黑话.json'
+const SOUL = '/data/hajimi-workspace/SOUL.md'
 
 test('C1 挤掉最老的时候必须落进 记忆/关系卡被挤掉.jsonl', () => {
   const sb = mkdtempSync(join(tmpdir(), 'mem440-'))

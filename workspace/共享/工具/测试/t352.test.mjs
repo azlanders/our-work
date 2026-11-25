@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
@@ -11,7 +11,7 @@ process.env.QUIET_NOTE = '1'
 // 读不到会回落成**别家 bot 的名字**。本文件多处断言「点名要接」，
 // 却从没设置这个 env → 判据拿别人的名字去匹配，必然 false。
 // 红的不是代码，是测试漏了一行 env。
-process.env.QQ_SELF_NAMES = process.env.QQ_SELF_NAMES || '{{BOT_DISPLAY}}'
+process.env.QQ_SELF_NAMES = process.env.QQ_SELF_NAMES || '哈基米'
 
 // 批次352：筛批判据跟投递侧对齐（静音期 + 外群没点名）。
 // POLL_FILE 可指向改前备份，用来证明「改前是红的」。
@@ -24,7 +24,7 @@ process.env.QQ_PHONE_FILE = 临时 + '/手机.json'
 process.env.FEEL_FILE = 临时 + '/感受.jsonl'
 writeFileSync(临时 + '/自主.json', JSON.stringify({ state: '发呆' }))
 
-const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const 被测 = process.env.POLL_FILE || (LIB + '/poll.js')
 const __poll = await import(被测)
 const { feelHint } = await import(process.env.FEEL_MODULE || (LIB + '/感受.mjs'))
@@ -41,7 +41,7 @@ const { targetKeyOf } = await import(LIB + '/outbound.js')
 // 并且把「是不是主群」作为前置条件断言出来 —— 配错时一眼能看出是哪一层的问题。
 function 取主群() {
   try {
-    const p = (process.env.DSH_HOME || '{{DSH_ROOT}}') + '/qq-bridge.config.json'
+    const p = (process.env.DSH_HOME || '/data/hajimi-dsh') + '/qq-bridge.config.json'
     const j = JSON.parse(readFileSync(p, 'utf8'))
     const g = Array.isArray(j.groupUins) ? j.groupUins : []
     if (g.length) return String(g[0])
@@ -56,14 +56,14 @@ const 文本 = (s) => ({ message_id: String(Math.random()).slice(2), sender: { u
 const 艾特 = (qq) => ({ type: 'at', data: { qq } })
 
 test('追问兜底：缺少会话上下文时不发送忙去了类固定句', () => {
-  const followup = readFileSync(process.env.FOLLOWUP_FILE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/followup.js', 'utf8')
+  const followup = readFileSync(process.env.FOLLOWUP_FILE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/followup.js', 'utf8')
   assert.doesNotMatch(followup, /await sendToQQ\(entry\.target, pickLine\(\), \{ followup: true \}\)/)
 })
 
 test('余额刷新联动：强刷同步 key 卡、节流并尊重只读', async () => {
   const { readFileSync } = await import('node:fs')
   const vm = await import('node:vm')
-  const html = readFileSync(process.env.BALANCE_HTML_FILE || '{{BOT_ROOT}}/共享/工具/简洁页.html', 'utf8')
+  const html = readFileSync(process.env.BALANCE_HTML_FILE || '/data/hajimi-workspace/共享/工具/简洁页.html', 'utf8')
   const get = (start, end) => {
     const a = html.indexOf(start)
     const b = html.indexOf(end, a)
@@ -163,9 +163,8 @@ test('主人关系提示受众：只给主人私聊注入主人档案，通用�
   assert.match(common, /parts\.push\('你自己这会儿在|parts\.push\('你正在/, '通用活动状态应保留')
   assert.match(common, /if \(__audience\.ownerPrivate\) parts\.push\('对主人 /, '主人好感分单独受众隔离')
   assert.match(personal, /parts\.push\('关系：/)
-  assert.match(personal, /parts\.push\('回话意愿 /)
-  assert.match(personal, /parts\.push\('回话意愿 /)
-  assert.match(personal, /parts\.push\('开口门槛 /)
+  assert.match(personal, /parts\.push\('说话的样：/)
+  assert.match(personal, /parts\.push\('此刻的感受：/)
   // 批次197：调用点搬进 stateVoice.js 的 systemPrompt.context()，且刻意把 text/history 置空
   //（那段要进缓存，不能带逐条消息的内容）。所以这里改查真正的那一处。
   const 声 = readFileSync(process.env.STATEVOICE_FILE || (LIB + '/stateVoice.js'), 'utf8')
@@ -203,7 +202,7 @@ test('外群 @ 她：接', () => {
 })
 
 test('外群点她名字：接', () => {
-  assert.equal(groupNeedsReply(文本('{{BOT_DISPLAY}}在吗'), 配置(), 外群), true)
+  assert.equal(groupNeedsReply(文本('哈基米在吗'), 配置(), 外群), true)
 })
 
 test('外群引用她或紧急消息：进入候选；不引用她的回复不升级', () => {
@@ -241,7 +240,7 @@ test('群聊持续窗口：同一发送者在@模式下可续接，旁人不能�
 })
 
 test('群聊显式启动：点名、正确引用她、紧急内容可启动；引用他人不算', () => {
-  const named = 文本('{{BOT_DISPLAY}}你在吗')
+  const named = 文本('哈基米你在吗')
   assert.equal(群聊显式叫起(named, 配置(), []), true)
   const quoted = { ...文本('接着问'), message: [{ type: 'reply', data: { id: '901' } }, { type: 'text', data: { text: '接着问' } }] }
   assert.equal(群聊显式叫起(quoted, 配置(), [{ message_id: 901, sender: { user_id: ME } }]), true)
@@ -344,7 +343,7 @@ test('看手机：明确叫起可过闸，普通消息按单群间隔节流', ()
   const second = 看手机(config, { groupId: 'phone-a', senderUin: 'u2', text: '又一句' }, 1001000)
   assert.equal(second.ok, false)
   assert.match(second.why, /还差/)
-  const called = 看手机(config, { groupId: 'phone-a', senderUin: 'u2', text: '{{BOT_DISPLAY}}在吗', named: true }, 1002000)
+  const called = 看手机(config, { groupId: 'phone-a', senderUin: 'u2', text: '哈基米在吗', named: true }, 1002000)
   assert.equal(called.ok, true)
   assert.match(called.why, /被喊名字/)
 })

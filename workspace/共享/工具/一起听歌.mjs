@@ -31,6 +31,8 @@ const ACTIVE_WINDOW_MS = 10 * 60 * 1000 // playTime 在 10 分钟内视为「正
 fs.mkdirSync(CACHE_DIR, { recursive: true })
 fs.mkdirSync(DL_DIR, { recursive: true })
 
+const 缺档 = (e) => Boolean(e && e.code === 'ENOENT')
+
 function loadEnvFile() {
   const env = { ...process.env }
   try {
@@ -39,7 +41,7 @@ function loadEnvFile() {
       const m = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim())
       if (m && !env[m[1]]) env[m[1]] = m[2].trim()
     }
-  } catch (e) { console.error('[一起听歌]', e && e.message) }
+  } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   return env
 }
 
@@ -49,7 +51,7 @@ export function isMusicSyncEnabled() {
   try {
     const j = JSON.parse(fs.readFileSync(OMNI_CONF_FILE, 'utf8')) || {}
     if (j?.一起听?.开启 === false || j?.musicSync === false) return false
-  } catch (e) { console.error('[一起听歌]', e && e.message) }
+  } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   return true
 }
 
@@ -60,7 +62,7 @@ function 读账号档() {
   } catch { /* 还没建过 */ }
   // 迁移：老的单文件 cookie 当成第一个号，名字就叫「默认」
   let 旧 = ''
-  try { 旧 = fs.readFileSync(COOKIE_FILE, 'utf8').trim() } catch (e) { console.error('[一起听歌]', e && e.message) }
+  try { 旧 = fs.readFileSync(COOKIE_FILE, 'utf8').trim() } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   if (旧) return { 当前: '默认', 账号: [{ id: '默认', 名: '主人（同号）', cookie: 旧, 更新于: '' }] }
   return { 当前: '', 账号: [] }
 }
@@ -68,7 +70,7 @@ function 读账号档() {
 function 写账号档(d) {
   写档(ACCOUNTS_FILE, d)
   // cookie 就是账号本体的凭据，别让别人读得到
-  try { fs.chmodSync(ACCOUNTS_FILE, 0o600) } catch (e) { console.error('[一起听歌]', e && e.message) }
+  try { fs.chmodSync(ACCOUNTS_FILE, 0o600) } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   return d
 }
 
@@ -132,10 +134,10 @@ function cleanLyrics(lrcText, tlyricText = '') {
 
 async function fetchSongMeta(songId) {
   // TRACE 2026-11-14（批次452 临时）：开关关着还在下载，先查是谁在调。
-  try { fs.appendFileSync('/tmp/{{BOT_NAME}}-ncm-who.log', new Date().toISOString() + ' pid=' + process.pid + ' ppid=' + process.ppid + ' argv=' + JSON.stringify(process.argv.slice(2)) + ' sid=' + songId + '\n') } catch (e) { console.error('[一起听歌]', e && e.message) }
+  try { fs.appendFileSync('/tmp/{{BOT_NAME}}-ncm-who.log', new Date().toISOString() + ' pid=' + process.pid + ' ppid=' + process.ppid + ' argv=' + JSON.stringify(process.argv.slice(2)) + ' sid=' + songId + '\n') } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   const metaCache = path.join(CACHE_DIR, `${songId}.json`)
   let cached = {}
-  try { cached = JSON.parse(fs.readFileSync(metaCache, 'utf8')) } catch (e) { console.error('[一起听歌]', e && e.message) }
+  try { cached = JSON.parse(fs.readFileSync(metaCache, 'utf8')) } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
 
   if (!cached.lyrics) {
     try {
@@ -148,7 +150,7 @@ async function fetchSongMeta(songId) {
       const hot = await ncmPost('/comment/hot', { id: songId, type: 0, limit: 2 })
       const list = Array.isArray(hot?.hotComments) ? hot.hotComments : []
       if (list[0]?.content) cached.hotComment = String(list[0].content).replace(/\s+/g, ' ').trim().slice(0, 70)
-    } catch (e) { console.error('[一起听歌]', e && e.message) }
+    } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   }
 
   // 如果还没用耳朵听过这首歌，拉取副歌 40 秒片段喂给 Omni 模型听旋律/乐器/氛围！
@@ -179,9 +181,9 @@ async function fetchSongMeta(songId) {
           }
         }
       }
-    } catch (e) { console.error('[一起听歌]', e && e.message) } finally {
-      try { if (fs.existsSync(rawFile)) fs.unlinkSync(rawFile) } catch (e) { console.error('[一起听歌]', e && e.message) }
-      try { if (fs.existsSync(clipFile)) fs.unlinkSync(clipFile) } catch (e) { console.error('[一起听歌]', e && e.message) }
+    } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) } finally {
+      try { if (fs.existsSync(rawFile)) fs.unlinkSync(rawFile) } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
+      try { if (fs.existsSync(clipFile)) fs.unlinkSync(clipFile) } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
     }
   }
 
@@ -250,7 +252,7 @@ try {
     try {
       const old = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
       if (old && old.active) 写档(STATE_FILE, { ...old, active: false, disabled: true, checkedAt: Date.now() })
-    } catch (e) { console.error('[一起听歌]', e && e.message) }
+    } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
     if (!args.includes('--quiet')) console.log('[一起听已关闭]')
     return
   }
@@ -295,7 +297,7 @@ try {
   const active = songId > 0 && playTime > 0 && ageMs >= -60000 && ageMs <= 窗口上限
 
   let prev = {}
-  try { prev = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) } catch (e) { console.error('[一起听歌]', e && e.message) }
+  try { prev = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) } catch (e) { if (!缺档(e)) console.error('[一起听歌]', e && e.message) }
   const replayed = prev.songId === songId && prev.playTime && playTime > Number(prev.playTime) + 15000
   const replayCount = prev.songId === songId ? (Number(prev.replayCount || 1) + (replayed ? 1 : 0)) : 1
 

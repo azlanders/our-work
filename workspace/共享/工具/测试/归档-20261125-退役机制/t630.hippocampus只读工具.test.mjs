@@ -5,8 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const CFG = process.env.QQ_BRIDGE_CONFIG || '{{DSH_ROOT}}/qq-bridge.config.json'
-const HIPPO = process.env.HIPPO_INDEX || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-hippocampus/index.js'
+const CFG = process.env.QQ_BRIDGE_CONFIG || '/data/hajimi-dsh/qq-bridge.config.json'
+const HIPPO = process.env.HIPPO_INDEX || '/data/hajimi-dsh/profiles/web/node_modules/dsh-hippocampus/index.js'
 
 function 白名单() {
   const d = JSON.parse(readFileSync(CFG, 'utf8'))
@@ -34,7 +34,7 @@ test('H2 原有 qq_recall / qq_msg_history 仍在，白名单没有被缩水', (
 // 配置文件丢失或换机器时，她会突然失去「翻自己记忆」的能力 —— 而线上明明是开的。
 // 默认值和线上不一致，这种偏差只在出事那天才暴露。
 test('H3 DEFAULTS 里的工具白名单也有 recall/trace，且仍不含 remember', async () => {
-  const LIB = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const LIB = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const { pathToFileURL } = await import('node:url')
   const mod = await import(pathToFileURL(LIB + '/config.js').href + '?t630=1')
   const def = mod.DEFAULTS ?? mod.default?.DEFAULTS

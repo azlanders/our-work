@@ -18,7 +18,7 @@ process.env.QUIET_NOTE = '1'
 const 沙盒 = mkdtempSync(join(tmpdir(), 'imgmem-'))
 process.env.QQ_IMG_MEM = 沙盒
 
-const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const { 图的指纹, 见过这张图, 记看图, 读图鉴 } = await import(LIB + '/images.js')
 
 const MD5 = '98A1DBF534945797EBF5BB27B67E58C7'
@@ -42,11 +42,11 @@ test('M3 没见过就返回 null（不能返回空对象，那会被当成「见
 })
 
 test('M4 第一次记：次数=1；第二次记：次数=2 且首次不变', () => {
-  const a = 记看图(MD5, { uin: '{{OWNER_UIN}}' })
+  const a = 记看图(MD5, { uin: '3439411062' })
   assert.equal(a.次数, 1)
   const 首次 = a.首次
   assert.ok(首次 && 首次.length >= 10, '首次时间是空的')
-  const b = 记看图(MD5, { uin: '{{OWNER_UIN}}' })
+  const b = 记看图(MD5, { uin: '3439411062' })
   assert.equal(b.次数, 2)
   assert.equal(b.首次, 首次, '首次被覆盖了 —— 那就不叫「最早一次」')
 })
@@ -94,7 +94,7 @@ test('M9 提示里必须带名字和次数，否则她还是不知道是哪张',
 })
 
 test('M10 真档回填过：顶盆那张有名字', () => {
-  const p = '{{BOT_ROOT}}/记忆/看图记录.json'
+  const p = '/data/hajimi-workspace/记忆/看图记录.json'
   if (!existsSync(p)) return   // 沙盒/别的机器上没回填就跳过
   const j = JSON.parse(readFileSync(p, 'utf8'))
   const 有名字 = Object.values(j).filter((v) => String(v?.名字 ?? '') !== '')

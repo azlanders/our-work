@@ -71,7 +71,7 @@ test('T6 档位倾向表已删，只报档位与依据（拟人化红线 P1-7）
   const 源 = readFileSync(path.join(工具目录, '关系档.mjs'), 'utf8')
   assert.ok(!/export const 档位倾向/.test(源), '档位倾向表还在')
   const voice = readFileSync(
-    path.join(process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib', 'voiceSlots.js'),
+    path.join(process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib', 'voiceSlots.js'),
     'utf8',
   )
   assert.ok(!/档位倾向/.test(voice), 'voiceSlots 还在用档位倾向')
@@ -94,7 +94,7 @@ test('T7 三处调用方都改成问 关系档（不再是各自一套阈值）'
 // voiceSlots 在 关系.json 没有这个人时直接 return ''，把「没有 bond 才退回好感/熟悉」
 // 这条兜底挡死了 —— 只有好感度记录的人永远拿不到 [关系] 槽。
 test('T8 voiceSlots：没有 关系.json 条目时仍走好感/熟悉兜底', async () => {
-  const LIB = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const LIB = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const vs = await import(pathToFileURL(path.join(LIB, 'voiceSlots.js')).href + '?t643=1')
@@ -103,15 +103,15 @@ test('T8 voiceSlots：没有 关系.json 条目时仍走好感/熟悉兜底', as
     mkdirSync(sb, { recursive: true })
     // 只有好感度、没有 关系.json
     writeFileSync(path.join(sb, '好感度.json'), JSON.stringify({
-      people: { '{{OWNER_UIN}}': { score: 80, 熟悉度: 70, turns: 30 } },
+      people: { '3439411062': { score: 80, 熟悉度: 70, turns: 30 } },
     }))
-    const s = vs.slotRelationBond({ peer: '{{OWNER_UIN}}', isPrivate: true, memDir: sb, now: Date.now() })
+    const s = vs.slotRelationBond({ peer: '3439411062', isPrivate: true, memDir: sb, now: Date.now() })
     assert.match(s, /^\[关系\] 熟/, '没有 关系.json 条目就沉默 —— 好感/熟悉兜底被绕过了：' + JSON.stringify(s))
   } finally { rmSync(sb, { recursive: true, force: true }) }
 })
 
 test('T9 voiceSlots：真没数据时仍然沉默，不给陌生人贴档', async () => {
-  const LIB = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const LIB = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const { mkdtempSync, rmSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const vs = await import(pathToFileURL(path.join(LIB, 'voiceSlots.js')).href + '?t643=2')
@@ -126,9 +126,9 @@ test('T9 voiceSlots：真没数据时仍然沉默，不给陌生人贴档', asyn
 // poll.js 里还有两处按 score/fam 自己判档 —— 和 voiceSlots 的 [关系] 槽可以给出两个说法。
 // 现在两处都改问 关系档.mjs。这条锁死「不许再自己写阈值」。
 test('T10 poll.js 的两处关系档也走 关系档.mjs，不再自写阈值', () => {
-  const LIB = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const LIB = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const s = readFileSync(path.join(LIB, 'poll.js'), 'utf8')
-  assert.match(s, /import \{ 关系档 \} from '\/data\/bot-workspace\/共享\/工具\/关系档\.mjs'/, 'poll.js 没引入统一判据')
+  assert.match(s, /await import\(`\$\{QQ_WS\}\/共享\/工具\/关系档\.mjs`\)/, 'poll.js 没引入统一判据')
   const 调用 = (s.match(/关系档\(\{/g) || []).length
   assert.ok(调用 >= 2, 'poll.js 里至少两处该改问 关系档（实际 ' + 调用 + ' 处）')
   assert.ok(!/score >= 70 && fam >= 60/.test(s), '第一处还留着自己那套阈值')

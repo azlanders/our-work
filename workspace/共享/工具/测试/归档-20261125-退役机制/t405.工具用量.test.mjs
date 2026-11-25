@@ -22,11 +22,11 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
-const TOOLS = '{{BOT_ROOT}}/共享/工具'
+const TOOLS = '/data/hajimi-workspace/共享/工具'
 const 脚本 = join(TOOLS, '工具用量.mjs')
 
 const 京 = (ms) => new Date(ms + 8 * 3600e3).toISOString().slice(0, 19).replace('T', ' ')
@@ -221,14 +221,14 @@ test('E1 体检-闭环 的 C 节已经改成读 工具用量.json（不许再只
 })
 
 test('E2 toolrecord.js 里写明了「这个账本不完整」（防止下一个人再拿它判零调用）', () => {
-  const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const 源 = readFileSync(join(LIB, 'toolrecord.js'), 'utf8')
   assert.ok(源.includes('SCOPE'), '缺 SCOPE 说明')
   assert.ok(源.includes('工具用量.json'), '要指向正确的判据')
 })
 
 test('E3 SOUL.md 里 qq_recall / qq_work 有指引（这两个工具上线至今零调用，因为从没写进过人设）', () => {
-  const 人设 = readFileSync('{{BOT_ROOT}}/SOUL.md', 'utf8')
+  const 人设 = readFileSync('/data/hajimi-workspace/SOUL.md', 'utf8')
   assert.ok(人设.includes('qq_recall'), 'qq_recall 没写进人设')
   assert.ok(人设.includes('qq_work'), 'qq_work 没写进人设')
   // 顺手锁住那个被实测推翻的旧结论

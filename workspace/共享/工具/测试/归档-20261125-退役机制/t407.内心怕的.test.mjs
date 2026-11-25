@@ -21,7 +21,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const DIR = process.env.QQ_WORKSPACE || '{{BOT_ROOT}}'
+const DIR = process.env.QQ_WORKSPACE || '/data/hajimi-workspace'
 const TOOLS = process.env.QQ_TOOLS_DIR || join(DIR, '共享/工具')
 const 读 = (p) => readFileSync(p, 'utf8')
 

@@ -20,10 +20,10 @@ import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'no
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const LIB = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
-const TOOLS = '{{BOT_ROOT}}/共享/工具'
-const 黑话 = '{{BOT_ROOT}}/记忆/圈子黑话.json'
-const 梗文件 = '{{BOT_ROOT}}/梗知识.md'
+const LIB = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
+const TOOLS = '/data/hajimi-workspace/共享/工具'
+const 黑话 = '/data/hajimi-workspace/记忆/圈子黑话.json'
+const 梗文件 = '/data/hajimi-workspace/梗知识.md'
 
 const 读 = (p) => readFileSync(p, 'utf8')
 
@@ -105,14 +105,14 @@ test('B4 单条就超上限时，才截它自己（并带 …）', () => {
 })
 
 test('B5 真实卡去重后的代表条，现在一条不少', () => {
-  const 真 = '{{DSH_ROOT}}/qq-bridge-memory.json'
+  const 真 = '/data/hajimi-dsh/qq-bridge-memory.json'
   if (!existsSync(真)) return   // 换机器就没有，跳过
   mem.useMemoryFile(真)
   try {
-    const 卡 = mem.loadMemory('private:{{OWNER_UIN}}')
+    const 卡 = mem.loadMemory('private:3439411062')
     const 事实 = (卡?.facts || []).map((x) => x.text)
     if (!事实.length) return
-    const out = mem.describeMemory('private:{{OWNER_UIN}}', { ownerKey: 'private:{{OWNER_UIN}}' })
+    const out = mem.describeMemory('private:3439411062', { ownerKey: 'private:3439411062' })
     // FACT_MERGE（批次637）：同义旧条会被最新说法替代，不再要求旧条也出现；
     // 但仍要求每个「没有被后文同义覆盖」的代表条完整进上下文。
     const 代表 = 事实.filter((t, i) => !事实.some((u, j) => j > i && mem.事实相近(t, u)))
@@ -150,7 +150,7 @@ test('C3 梗表没覆盖的 6 条，槽真的能命中并带上「怎么接」',
     ['你是不是急了', '急了'],
   ]
   for (const [话, 词] of 例) {
-    const out = vs.slotMemeCue({ lastText: 话, memDir: '{{BOT_ROOT}}/记忆' })
+    const out = vs.slotMemeCue({ lastText: 话, memDir: '/data/hajimi-workspace/记忆' })
     assert.ok(out.includes(词), `「${话}」没命中「${词}」`)
     assert.ok(out.includes('怎么接'), `「${词}」命中了但没给「怎么接」`)
   }
@@ -159,7 +159,7 @@ test('C3 梗表没覆盖的 6 条，槽真的能命中并带上「怎么接」',
 test('C4 日常话不许被误触发（主人/在干嘛 不是梗）', async () => {
   const vs = await import(join(LIB, 'voiceSlots.js'))
   for (const 话 of ['你在干嘛', '主人今天在不在', '我要去睡觉了', '今天好累']) {
-    const out = vs.slotMemeCue({ lastText: 话, memDir: '{{BOT_ROOT}}/记忆' })
+    const out = vs.slotMemeCue({ lastText: 话, memDir: '/data/hajimi-workspace/记忆' })
     assert.equal(out, '', `「${话}」被当成梗触发了：` + out.slice(0, 40))
   }
 })
@@ -202,7 +202,7 @@ test('D5 群聊上限不许跟着私聊一起涨（隐私边界，t353 的 D1 �
 })
 
 test('D4 SOUL.md 指向黑话本，不再指向梗知识.md', () => {
-  const 灵魂 = 读('{{BOT_ROOT}}/SOUL.md')
+  const 灵魂 = 读('/data/hajimi-workspace/SOUL.md')
   assert.ok(灵魂.includes('圈子黑话.json'), 'SOUL 里没提黑话本')
   assert.ok(!灵魂.includes('梗知识.md'), 'SOUL 里还写着梗知识.md')
 })

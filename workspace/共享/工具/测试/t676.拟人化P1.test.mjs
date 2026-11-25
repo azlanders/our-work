@@ -17,7 +17,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const 本目录 = path.dirname(fileURLToPath(import.meta.url))
-const 线上lib = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const 线上lib = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const lib = process.env.QQ_LIB_DIR || (existsSync(path.join(线上lib, 'poll.js')) ? 线上lib : path.resolve(本目录, '..', '..', 'plugin-lib'))
 const 齐 = ['poll.js', 'photo.js', 'voiceSlots.js'].every((f) => existsSync(path.join(lib, f)))
 const 跳过 = '找不到 QQ_LIB_DIR 下的 poll.js / photo.js / voiceSlots.js'
@@ -32,6 +32,7 @@ const 去注释 = (s) => String(s)
 const poll = 齐 ? 去注释(读('poll.js')) : ''
 const photo = 齐 ? 去注释(读('photo.js')) : ''
 const voice = 齐 ? 去注释(读('voiceSlots.js')) : ''
+const 入口 = 齐 ? 去注释(读('记忆入口.mjs')) : ''
 
 const 不见 = (源, 句, 文件) => assert.ok(!源.includes(句), 文件 + ' 仍出现旧句：' + 句)
 const 仍在 = (源, 句, 文件) => assert.ok(源.includes(句), 文件 + ' 丢了事实句：' + 句)
@@ -103,7 +104,7 @@ test('P1-11/12/13 谎言·睡意·纪念日只递事实条目', { skip: 齐 ? fa
   仍在(poll, '瞒着：对外「', 'poll.js')
   仍在(poll, '破绽记录：', 'poll.js')
   仍在(poll, "'睡意记录：'", 'poll.js')
-  仍在(poll, "const 句 = '[纪念日] ' + 月日", 'poll.js')
+  仍在(入口, '`[纪念日] ${月日}', '记忆入口.mjs')
 })
 
 test('P1-14 问句不再命令「别只陈述」', { skip: 齐 ? false : 跳过 }, () => {

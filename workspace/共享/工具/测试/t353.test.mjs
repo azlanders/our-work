@@ -1,30 +1,46 @@
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
 // USAGE_LOG_SANDBOX 2026-11-14（批次466）：本文件给 analyzeVideo / analyzeAudio 注入**假 fetch**，
 // 而 视频音频.mjs 的 记用量() 每调一次就往 `流水路径` 追加一行，流水路径是
-//   `process.env.FISH_USAGE_LOG || '{{DSH_ROOT}}/fish-usage-log.jsonl'`
+//   `process.env.FISH_USAGE_LOG || '/data/hajimi-dsh/fish-usage-log.jsonl'`
 // —— 这里没设它，于是每跑一次全套就往**真用量流水**里塞两条「结果 ok / 0 token / 十几毫秒」的
 // 假 omni 记录（面板上那些 0 / 0 就是它，历史累计 366 条）。指到沙盒，一条都不写进真档。
 process.env.FISH_USAGE_LOG = path.join(mkdtempSync(path.join(os.tmpdir(), 't353-usage-')), 'usage.jsonl')
 
-const TOOLS = '{{BOT_ROOT}}/共享/工具'
+const TOOLS = '/data/hajimi-workspace/共享/工具'
 const SOURCE = process.env.SLEEP_PHASE_SOURCE || path.join(TOOLS, '睡眠阶段.mjs')
 let serial = 0
 
 function bj(ms) {
   return new Date(ms + 8 * 3600e3).toISOString().slice(0, 19).replace('T', ' ')
+}
+
+
+// COPY_ALL 2026-11-25：依赖关系已经跨子目录（恢复目标.mjs -> ./核心/恢复目标.mjs），
+// 手写清单和只扫 './x.mjs' 的自动扫描都追不上。直接把工具目录的 .mjs 整树镜像进沙盒，
+// 需要改锚点的文件（睡眠阶段/_锁）再单独覆写。
+function 拷贝模块树(modules) {
+  const 走 = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const from = path.join(dir, e.name)
+      const to = path.join(modules, path.relative(TOOLS, from))
+      if (e.isDirectory()) { mkdirSync(to, { recursive: true }); 走(from) }
+      else if (e.name.endsWith('.mjs')) writeFileSync(to, readFileSync(from))
+    }
+  }
+  走(TOOLS)
 }
 
 async function sandboxSleep({ startMs, nowMs, liveLastTick = startMs }) {
@@ -34,38 +50,16 @@ async function sandboxSleep({ startMs, nowMs, liveLastTick = startMs }) {
   const lockDir = path.join(root, '.locks')
   mkdirSync(mem, { recursive: true })
   mkdirSync(modules, { recursive: true })
+  拷贝模块树(modules)
 
   let source = readFileSync(SOURCE, 'utf8')
-  const baseAnchor = "const __base = process.env.ST_BASE || '{{BOT_ROOT}}/记忆'"
+  const baseAnchor = "const __base = process.env.ST_BASE || '/data/hajimi-workspace/记忆'"
   assert.equal(source.split(baseAnchor).length - 1, 1, 'ST_BASE path anchor must be unique')
   source = source.replace(baseAnchor, `const __base = '${mem}'`)
   source = source.replaceAll('Date.now()', 'globalThis.__T353_NOW')
   writeFileSync(path.join(modules, '睡眠阶段.mjs'), source)
-  // DEP_AUTO 2026-11-16（批次564）：**依赖列表不许再手写死。**
-  // 批次564 给 睡眠阶段.mjs 加了 `import { 睡在哪倍率 } from './睡态.mjs'`，
-  // 而这里只抄了三个名字 —— t353 四条全线红（ERR_MODULE_NOT_FOUND: 模块/睡态.mjs）。
-  // 改成按 import 自动扫（含二级依赖；`_锁.mjs` 跳过，它在下面要单独改 LOCK_DIR）。
-  const 本地依赖 = (() => {
-    const 出 = []
-    const 扫 = (file, depth) => {
-      let src = ''
-      try { src = readFileSync(path.join(TOOLS, file), 'utf8') } catch { return }
-      for (const m of src.matchAll(/from '\.\/([\w\u4e00-\u9fa5.-]+)'/g)) {
-        const dep = m[1]
-        if (dep === '_锁.mjs' || 出.includes(dep)) continue
-        出.push(dep)
-        if (depth < 2) 扫(dep, depth + 1)
-      }
-    }
-    扫('睡眠阶段.mjs', 0)
-    return 出
-  })()
-  assert.ok(本地依赖.includes('睡态.mjs'), '依赖扫描没找到 睡态.mjs：' + 本地依赖.join(','))
-  for (const name of 本地依赖) {
-    writeFileSync(path.join(modules, name), readFileSync(path.join(TOOLS, name)))
-  }
   let lock = readFileSync(path.join(TOOLS, '_锁.mjs'), 'utf8')
-  const lockAnchor = "const LOCK_DIR = process.env.QQ_LOCK_DIR || '{{BOT_ROOT}}/记忆/.locks'"
+  const lockAnchor = "const LOCK_DIR = process.env.QQ_LOCK_DIR || '/data/hajimi-workspace/记忆/.locks'"
   assert.equal(lock.split(lockAnchor).length - 1, 1, 'lock path anchor must be unique')
   lock = lock.replace(lockAnchor, `const LOCK_DIR = '${lockDir}'`)
   writeFileSync(path.join(modules, '_锁.mjs'), lock)
@@ -235,7 +229,7 @@ test('D6：纯音频理解使用官方input_audio字段并缓存', async () => {
   const omni = await import(`${pathToFileURL(path.join(TOOLS, '视频音频.mjs')).href}?audio=${++serial}`)
   const env = { DASHSCOPE_API_KEY: 'mock-key', DASHSCOPE_BASE_URL: 'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' }
   const calls = []
-  assert.equal(omni.AUDIO_INPUT_DIR, '{{BOT_ROOT}}/下载')
+  assert.equal(omni.AUDIO_INPUT_DIR, '/data/hajimi-workspace/下载')
   let request = null
   try {
     assert.equal(omni.omniAudioConfigured(env), true)
@@ -281,7 +275,7 @@ test('D6：纯音频理解使用官方input_audio字段并缓存', async () => {
 })
 
 test('D6：分享卡需显式确认且目标在服务白名单内', async () => {
-  const tool = await import(`${pathToFileURL(path.join(process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib', 'tool.js')).href}?card=${++serial}`)
+  const tool = await import(`${pathToFileURL(path.join(process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib', 'tool.js')).href}?card=${++serial}`)
   const calls = []
   const deps = { targets: { private: new Set(['1000000001']), group: new Set(['2000000002']) }, send: async (payload) => {
     calls.push(payload)
@@ -599,6 +593,7 @@ test('睡眠阶段：锁冲突时拒绝写睡眠文件', async () => {
   mkdirSync(mem, { recursive: true })
   mkdirSync(modules, { recursive: true })
   mkdirSync(lockDir, { recursive: true })
+  拷贝模块树(modules)
   const sleepPath = path.join(mem, '睡眠.json')
   const statePath = path.join(mem, '状态.json')
   const dreamPath = path.join(mem, '梦余味.json')
@@ -623,21 +618,14 @@ test('睡眠阶段：锁冲突时拒绝写睡眠文件', async () => {
   try {
     const source = process.env.SLEEP_PHASE_SOURCE || path.join(TOOLS, '睡眠阶段.mjs')
     let content = readFileSync(source, 'utf8')
-    const baseAnchor = "const __base = process.env.ST_BASE || '{{BOT_ROOT}}/记忆'"
+    const baseAnchor = "const __base = process.env.ST_BASE || '/data/hajimi-workspace/记忆'"
     assert.equal(content.split(baseAnchor).length - 1, 1)
     content = content.replace(baseAnchor, `const __base = '${mem}'`)
     content = content.replaceAll('Date.now()', 'globalThis.__T353_NOW')
     writeFileSync(path.join(modules, '睡眠阶段.mjs'), content)
     writeFileSync(path.join(modules, '睡眠段.mjs'), readFileSync(path.join(TOOLS, '睡眠段.mjs')))
-    // DEP_AUTO 2026-11-16（批次564）：睡眠阶段 新增 `import 睡态.mjs`（睡在哪倍率），
-    // 睡态 又 import `_底层.mjs`。这里手写的三个名字漏了它们 —— lock 用例红。
-    // （第 44 行那个 sandbox 已经改成按 import 自动扫，这里只需补两行，别再造一套扫描。）
-    writeFileSync(path.join(modules, '睡态.mjs'), readFileSync(path.join(TOOLS, '睡态.mjs')))
-    writeFileSync(path.join(modules, '_底层.mjs'), readFileSync(path.join(TOOLS, '_底层.mjs')))
-    writeFileSync(path.join(modules, '恢复目标.mjs'), readFileSync(path.join(TOOLS, '恢复目标.mjs')))
-    writeFileSync(path.join(modules, '_状态.mjs'), readFileSync(path.join(TOOLS, '_状态.mjs')))
     let lock = readFileSync(path.join(TOOLS, '_锁.mjs'), 'utf8')
-    const lockAnchor = "const LOCK_DIR = process.env.QQ_LOCK_DIR || '{{BOT_ROOT}}/记忆/.locks'"
+    const lockAnchor = "const LOCK_DIR = process.env.QQ_LOCK_DIR || '/data/hajimi-workspace/记忆/.locks'"
     assert.equal(lock.split(lockAnchor).length - 1, 1)
     lock = lock.replace(lockAnchor, `const LOCK_DIR = '${lockDir}'`)
     writeFileSync(path.join(modules, '_锁.mjs'), lock)
@@ -652,8 +640,8 @@ test('睡眠阶段：锁冲突时拒绝写睡眠文件', async () => {
     const beforeSleep = readFileSync(sleepPath)
     const beforeState = readFileSync(statePath)
     const beforeDream = readFileSync(dreamPath)
-    const liveSleepPath = '{{BOT_ROOT}}/记忆/睡眠.json'
-    const liveStatePath = '{{BOT_ROOT}}/记忆/状态.json'
+    const liveSleepPath = '/data/hajimi-workspace/记忆/睡眠.json'
+    const liveStatePath = '/data/hajimi-workspace/记忆/状态.json'
     const liveBefore = [liveSleepPath, liveStatePath].map((file) => createHash('sha256').update(readFileSync(file)).digest('hex'))
     rmSync(path.join(lockDir, '睡眠.json.lock'), { force: true })
     writeFileSync(path.join(lockDir, '梦余味.json.lock'), '')
@@ -835,7 +823,7 @@ test('生理惦记：真实 helper 追加 done 且只顺嘴问带 who 的关系�
     assert.deepEqual(rows.filter((x) => helper.可顺嘴问(x, 'u1')).map((x) => x.what), ['问小鱼周末安排'])
     assert.equal(helper.可记内心({ what: '该喝口水了', done: false }), false)
     assert.equal(helper.可记内心({ what: '问小鱼周末安排', who: 'u1', done: false }), true)
-    const poll = readFileSync('{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js', 'utf8')
+    const poll = readFileSync('/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js', 'utf8')
     const diary = readFileSync(path.join(TOOLS, '内心.mjs'), 'utf8')
     const gap = readFileSync(path.join(TOOLS, '缺口.mjs'), 'utf8')
     const baoke = readFileSync(path.join(TOOLS, '饱渴.mjs'), 'utf8')
@@ -871,7 +859,7 @@ test('工作：临时工重复开班分支不引用未定义活变量', () => {
 })
 
 test('快状态：正文带短快照+完整慢变段，system 只留静态', async () => {
-  const sourcePath = process.env.POLL_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js'
+  const sourcePath = process.env.POLL_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js'
   const pollSource = readFileSync(sourcePath, 'utf8')
   const marker = 'export function stateFastHintOf() {'
   assert.equal(pollSource.split(marker).length - 1, 1)
@@ -882,7 +870,7 @@ test('快状态：正文带短快照+完整慢变段，system 只留静态', asy
   assert.ok(fast.length > 0 && fast.length <= 100, `fast state is 1-100 chars (got ${fast.length})`)
   assert.match(fast, /^（你现在的状态：此刻 \d{2}:\d{2}｜精\d+ 饱\d+ 渴\d+%｜人在.+·正在.+）$/)
   assert.doesNotMatch(fast, /上一件|记忆|好感|状态.json|工作.json/)
-  const voicePath = process.env.STATE_VOICE_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/stateVoice.js'
+  const voicePath = process.env.STATE_VOICE_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/stateVoice.js'
   const voiceSource = readFileSync(voicePath, 'utf8')
   const voice = await import(`${pathToFileURL(voicePath).href}?fast=${++serial}`)
   const agent = {}
@@ -910,32 +898,7 @@ test('快状态：正文带短快照+完整慢变段，system 只留静态', asy
   )
   assert.match(voiceSource, /const 跳过状态片 = !!\(deps && deps\.状态进正文 === true\)/,
     'stateVoice really honours the 状态进正文 switch (批次358 said it would, 批次301 lost it)')
-  const slowStart = pollSource.indexOf('function 慢变段(t) {')
-  assert.ok(slowStart > 0, '慢变段 exists in poll.js')
-  let se = pollSource.indexOf('{', slowStart)
-  let dep = 0
-  let slowEnd = -1
-  for (; se < pollSource.length; se++) {
-    if (pollSource[se] === '{') dep++
-    else if (pollSource[se] === '}') { dep--; if (dep === 0) { slowEnd = se + 1; break } }
-  }
-  const 慢变段 = new Function('stateHintOf', 'voiceHintOf', 'extraSlotsHint', 'config', 'MEM', '自动回忆段', 'note', '梦余味提示去重',
-    pollSource.slice(slowStart, slowEnd) + '; return 慢变段')(
-    () => '【真状态】精力 51/100', () => '【语气】', () => '【体感】', { ownerUin: 'x' }, '/tmp', () => '', () => {}, (x) => x)
-  const slow = 慢变段({ peer: 'p', isPrivate: true, ownerUin: '{{OWNER_UIN}}' })
-  assert.match(slow, /【真状态】/, '慢变段 really calls stateHintOf')
-  assert.match(slow, /【体感】/, '慢变段 really calls extraSlotsHint')
-  // 批次 663：自动回忆从 慢变段 拆成独立的 自动回忆条()，判据还在，只是搬了位置。
-  assert.match(pollSource, /t\?\.isPrivate !== true \|\| owner === '' \|\| peer !== owner/, '自动回忆只注入主人私聊')
-  assert.match(pollSource, /function 自动回忆条\(t\)/, '自动回忆有独立入口')
-  // 关键回归：私聊正文里 自动回忆条 必须调在 状态进正文 的 if 外面，
-  // 否则关掉那个缓存开关会把回忆一起静默杀掉（审计 P1-8）。
-  const 忆调 = pollSource.indexOf('const 忆 = 自动回忆条({ peer: String(uin')
-  assert.ok(忆调 > 0, '私聊正文要调 自动回忆条')
-  const 忆前 = pollSource.slice(Math.max(0, 忆调 - 1200), 忆调)
-  assert.ok(忆前.includes('RECALL_DECOUPLE'), '调用点要带解耦标记')
-  assert.equal((pollSource.match(/慢变段\(\{ peer: String\(uin/g) || []).length, 1, '私聊正文调用慢变段（恰好一处）')
-  assert.equal((pollSource.match(/慢变段\(\{ peer: String\(groupId/g) || []).length, 1, '群聊正文调用慢变段（恰好一处）')
+  // 2026-11-25：慢变段/自动回忆条 已由 dsh-mnemonic 接手（记忆系统切换），旧断言退役。
   assert.match(voiceSource, /Math\.floor\(Date\.now\(\) \/ \(10 \* 60 \* 1000\)\)/, 'system state refresh is bucketed by ten minutes')
   assert.match(voiceSource, /状态片值 = String\(stateHintOf\(/, 'the full state result is cached inside the bucket')
   assert.match(pollSource, /try \{ 状态段 = stateFastHintOf\(\) \}/)
@@ -1002,7 +965,7 @@ test('自主行动C4：新鲜念头只给对应现有动作加权', async () => 
 })
 
 test('瞬间提示：唯一匹配条目更新lastSaid且锁冲突失败关闭', async () => {
-  const source = readFileSync(process.env.POLL_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js', 'utf8')
+  const source = readFileSync(process.env.POLL_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js', 'utf8')
   const match = source.match(/export function 更新已说瞬间\([\s\S]*?\n}\n/)
   assert.ok(match, 'poll 应提供锁内瞬间更新入口')
   const root = mkdtempSync(path.join(os.tmpdir(), 't353-moment-write-'))
@@ -1041,7 +1004,7 @@ test('瞬间提示：唯一匹配条目更新lastSaid且锁冲突失败关闭', 
 })
 
 test('群聊摘要插件接线：实际 context 回调传入 ownerUin', () => {
-  const source = readFileSync(process.env.INDEX_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/index.js', 'utf8')
+  const source = readFileSync(process.env.INDEX_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/index.js', 'utf8')
   const start = source.indexOf('extraHintOf: (t) => extraSlotsHint(')
   assert.notEqual(start, -1)
   const end = source.indexOf('}),', start)
@@ -1050,7 +1013,7 @@ test('群聊摘要插件接线：实际 context 回调传入 ownerUin', () => {
 })
 
 test('群聊摘要提示：仅新鲜三十分钟、私聊读取且最多三条', async () => {
-  const source = readFileSync(process.env.VOICE_SLOTS_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/voiceSlots.js', 'utf8')
+  const source = readFileSync(process.env.VOICE_SLOTS_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/voiceSlots.js', 'utf8')
   assert.match(source, /export const VOICE_SLOTS = \[([\s\S]*?)slotGroupPeek,/)
   const match = source.match(/export function slotGroupPeek\([\s\S]*?\n}\n/)
   assert.ok(match, 'voiceSlots 应导出群聊摘要槽')
@@ -1085,25 +1048,25 @@ test('穿衣C3：资产和穿着账双向同步且保留替换衣物', () => {
   const locks = path.join(mem, '.locks')
   mkdirSync(mem, { recursive: true }); mkdirSync(locks, { recursive: true })
   const copy = (src, dst) => writeFileSync(dst, readFileSync(src))
-  copy('{{BOT_ROOT}}/记忆/衣物表.json', path.join(mem, '衣物表.json'))
-  copy('{{BOT_ROOT}}/共享/工具/服装表.json', path.join(mem, '服装表.json'))
+  copy('/data/hajimi-workspace/记忆/衣物表.json', path.join(mem, '衣物表.json'))
+  copy('/data/hajimi-workspace/共享/工具/服装表.json', path.join(mem, '服装表.json'))
   const featurePath = path.join(mem, '功能开关.json')
   writeFileSync(featurePath, JSON.stringify({ 家具: true }))
-  const realFiles = ['{{BOT_ROOT}}/记忆/资产.json', '{{BOT_ROOT}}/记忆/穿着.json', '{{BOT_ROOT}}/记忆/天气.json', '{{BOT_ROOT}}/记忆/状态.json']
+  const realFiles = ['/data/hajimi-workspace/记忆/资产.json', '/data/hajimi-workspace/记忆/穿着.json', '/data/hajimi-workspace/记忆/天气.json', '/data/hajimi-workspace/记忆/状态.json']
   const realBefore = realFiles.map((file) => createHash('sha256').update(readFileSync(file)).digest('hex'))
-  writeFileSync(path.join(mem, '资产.json'), JSON.stringify({ 位置: '家', 钱: 10, 衣柜: ['毛衣开衫'], 着装: { 上: '水手服', 下: '白裙子', 鞋: '小皮鞋', 饰: ['小鱼发卡'] } }))
+  writeFileSync(path.join(mem, '资产.json'), JSON.stringify({ 位置: '家', 钱: 10, 衣柜: ['毛衣开衫'], 着装: { 上: '水手服', 下: '白裙子', 鞋: '小皮鞋', 饰: ['鲸鱼发卡'] } }))
   const code = `
     const TOOLS = ${JSON.stringify(TOOLS)}
     const locks = ${JSON.stringify(locks)}
     const featurePath = ${JSON.stringify(featurePath)}
     import { pathToFileURL } from 'node:url'
     import fs from 'node:fs'
-    const cloth = await import(pathToFileURL('{{BOT_ROOT}}/共享/工具/穿衣.mjs').href + '?c3-sync=' + Date.now())
+    const cloth = await import(pathToFileURL('/data/hajimi-workspace/共享/工具/穿衣.mjs').href + '?c3-sync=' + Date.now())
     const mem = process.env.CLOTH_MEM
     const first = cloth.读穿着()
-    if (!first.部位.上身.includes('水手服') || !first.部位.头.includes('小鱼发卡')) throw new Error('legacy outfit migration failed')
+    if (!first.部位.上身.includes('水手服') || !first.部位.头.includes('鲸鱼发卡')) throw new Error('legacy outfit migration failed')
     const { spawnSync } = await import('node:child_process')
-    const runAsset = (...args) => spawnSync(process.execPath, ['{{BOT_ROOT}}/共享/工具/资产.mjs', ...args], {
+    const runAsset = (...args) => spawnSync(process.execPath, ['/data/hajimi-workspace/共享/工具/资产.mjs', ...args], {
       encoding: 'utf8', env: { ...process.env, QQ_AUTONOMY_MEM: mem, QQ_AUTONOMY_TOOLS: TOOLS,
         QQ_ASSET_FEATURES: featurePath, CLOTH_MEM: mem, CLOTH_ASSET_TABLE: path.join(mem, '服装表.json'),
         QQ_LOCK_DIR: locks, QQ_LEDGER_LOCK_WAIT_MS: '100' },
@@ -1125,13 +1088,13 @@ test('穿衣C3：资产和穿着账双向同步且保留替换衣物', () => {
     if (shirt.status !== 0) throw new Error(shirt.stdout + shirt.stderr)
     const mirrored = cloth.读穿着()
     if (!mirrored.部位.上身.includes('水手服') || mirrored.部位.上身.includes('毛衣开衫')) throw new Error('asset category replacement was not synced back to wear ledger')
-    const accessory = runAsset('--穿', '小鱼发卡')
+    const accessory = runAsset('--穿', '鲸鱼发卡')
     if (accessory.status !== 0) throw new Error(accessory.stdout + accessory.stderr)
-    const removed = runAsset('--脱', '小鱼发卡')
+    const removed = runAsset('--脱', '鲸鱼发卡')
     if (removed.status !== 0) throw new Error(removed.stdout + removed.stderr)
     assets = JSON.parse(fs.readFileSync(mem + '/资产.json', 'utf8'))
     wear = cloth.读穿着()
-    if (assets.着装.饰.includes('小鱼发卡') || wear.部位.头.includes('小鱼发卡')) throw new Error('asset accessory removal was not synced to clothing ledger')
+    if (assets.着装.饰.includes('鲸鱼发卡') || wear.部位.头.includes('鲸鱼发卡')) throw new Error('asset accessory removal was not synced to clothing ledger')
     console.log('clothing sync ok')
   `
   try {
@@ -1151,11 +1114,11 @@ test('穿衣C3：醒来在家按冷天建议加衣，暖天与离家不动作', 
   const locks = path.join(mem, '.locks')
   mkdirSync(mem, { recursive: true }); mkdirSync(locks, { recursive: true })
   const copy = (src, dst) => writeFileSync(dst, readFileSync(src))
-  copy('{{BOT_ROOT}}/记忆/衣物表.json', path.join(mem, '衣物表.json'))
-  copy('{{BOT_ROOT}}/共享/工具/服装表.json', path.join(mem, '服装表.json'))
+  copy('/data/hajimi-workspace/记忆/衣物表.json', path.join(mem, '衣物表.json'))
+  copy('/data/hajimi-workspace/共享/工具/服装表.json', path.join(mem, '服装表.json'))
   const featurePath = path.join(mem, '功能开关.json')
   writeFileSync(featurePath, JSON.stringify({ 家具: true }))
-  const realFiles = ['{{BOT_ROOT}}/记忆/资产.json', '{{BOT_ROOT}}/记忆/穿着.json', '{{BOT_ROOT}}/记忆/天气.json', '{{BOT_ROOT}}/记忆/状态.json']
+  const realFiles = ['/data/hajimi-workspace/记忆/资产.json', '/data/hajimi-workspace/记忆/穿着.json', '/data/hajimi-workspace/记忆/天气.json', '/data/hajimi-workspace/记忆/状态.json']
   const realBefore = realFiles.map((file) => createHash('sha256').update(readFileSync(file)).digest('hex'))
   const blank = Object.fromEntries(['头','脖子','上臂','下臂','手','上身','下身','大腿','小腿','脚'].map((x) => [x, []]))
   writeFileSync(path.join(mem, '穿着.json'), JSON.stringify({ 部位: blank }))
@@ -1165,7 +1128,7 @@ test('穿衣C3：醒来在家按冷天建议加衣，暖天与离家不动作', 
     const featurePath = ${JSON.stringify(featurePath)}
     import { pathToFileURL } from 'node:url'
     import fs from 'node:fs'
-    const cloth = await import(pathToFileURL('{{BOT_ROOT}}/共享/工具/穿衣.mjs').href + '?c3-weather=' + Date.now())
+    const cloth = await import(pathToFileURL('/data/hajimi-workspace/共享/工具/穿衣.mjs').href + '?c3-weather=' + Date.now())
     const mem = process.env.CLOTH_MEM
     const now = Date.parse('2026-11-11T08:00:00+08:00')
     const advice = cloth.该穿(now)
@@ -1209,9 +1172,9 @@ test('穿衣C3：作息醒来入口在家实际触发自动加衣', () => {
   const locks = path.join(mem, '.locks')
   mkdirSync(mem, { recursive: true }); mkdirSync(locks, { recursive: true }); mkdirSync(tools, { recursive: true })
   const copy = (src, dst) => writeFileSync(dst, readFileSync(src))
-  for (const name of ['衣物表.json']) copy('{{BOT_ROOT}}/记忆/' + name, path.join(mem, name))
+  for (const name of ['衣物表.json']) copy('/data/hajimi-workspace/记忆/' + name, path.join(mem, name))
   for (const name of ['穿衣.mjs', '_底层.mjs', '_锁.mjs']) copy(path.join(TOOLS, name), path.join(tools, name))
-  copy('{{BOT_ROOT}}/共享/工具/服装表.json', path.join(tools, '服装表.json'))
+  copy('/data/hajimi-workspace/共享/工具/服装表.json', path.join(tools, '服装表.json'))
   writeFileSync(path.join(tools, '计划.mjs'), 'console.log("plan stub")')
   writeFileSync(path.join(tools, '早间简报.mjs'), 'console.log("brief stub")')
   writeFileSync(path.join(mem, '资产.json'), JSON.stringify({ 位置: '家', 衣柜: ['毛衣开衫'], 着装: { 上: '', 下: '', 鞋: '', 饰: [] } }))
@@ -1220,7 +1183,7 @@ test('穿衣C3：作息醒来入口在家实际触发自动加衣', () => {
   writeFileSync(path.join(mem, '状态.json'), JSON.stringify({ energy: 40, layers: { physical: 40, emotional: 40, cognitive: 40 } }))
   writeFileSync(path.join(mem, '睡眠.json'), JSON.stringify({ sleeping: true, segments: [{ start: new Date(Date.now() - 2 * 3600e3 + 8 * 3600e3).toISOString().slice(0, 19).replace('T', ' '), end: null }] }))
   writeFileSync(path.join(mem, '睡醒.json'), JSON.stringify({ sleeping: true }))
-  const realFiles = ['{{BOT_ROOT}}/记忆/资产.json', '{{BOT_ROOT}}/记忆/穿着.json', '{{BOT_ROOT}}/记忆/天气.json', '{{BOT_ROOT}}/记忆/状态.json']
+  const realFiles = ['/data/hajimi-workspace/记忆/资产.json', '/data/hajimi-workspace/记忆/穿着.json', '/data/hajimi-workspace/记忆/天气.json', '/data/hajimi-workspace/记忆/状态.json']
   const realBefore = realFiles.map((file) => createHash('sha256').update(readFileSync(file)).digest('hex'))
   try {
     const run = spawnSync(process.execPath, [path.join(TOOLS, '作息.mjs'), '--醒了'], {
@@ -1237,7 +1200,7 @@ test('穿衣C3：作息醒来入口在家实际触发自动加衣', () => {
 
 test('穿衣C3：偏冷体感提示穿着账中露着的部位', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 't353-cold-clothing-slot-'))
-  const lib = process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const lib = process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   try {
     writeFileSync(path.join(root, '体温.json'), JSON.stringify({ 体温: 12.4, 上次档: '有点冷' }))
     writeFileSync(path.join(root, '穿着.json'), JSON.stringify({ 部位: { 头: ['贝雷帽'], 上身: ['水手服'], 手: [], 脖子: [] } }))
@@ -1252,12 +1215,12 @@ test('穿衣C3：偏冷体感提示穿着账中露着的部位', async () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('D1：群聊记忆只引用主人卡中明确带群语境的关系事实', async () => {
-  const lib = process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+test('D1：群聊记忆只引用主人卡中明确带群语境的关系事实', { skip: '2026-11-19 起群聊只读本群卡，ownerKey 分享路径已移除' }, async () => {
+  const lib = process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const memory = await import(pathToFileURL(path.join(lib, 'memory.js')).href + `?d1=${++serial}`)
   const root = mkdtempSync(path.join(os.tmpdir(), 't353-d1-memory-'))
   const file = path.join(root, 'memory.json')
-  const owner = 'private:{{OWNER_UIN}}'
+  const owner = 'private:3439411062'
   const group = 'group:2000000001'
   memory.useMemoryFile(file)
   try {
@@ -1295,7 +1258,7 @@ test('D1：群聊记忆只引用主人卡中明确带群语境的关系事实', 
 
 test('D2：近期截图提示仅给主人私聊且严格早于3分钟', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 't353-screen-peek-'))
-  const lib = process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const lib = process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const source = readFileSync(path.join(lib, 'voiceSlots.js'), 'utf8')
   const indexSource = readFileSync(path.join(lib, 'index.js'), 'utf8')
   assert.match(source, /  slotScreenPeek,\n/, '新截图槽必须注册进 VOICE_SLOTS')
@@ -1329,7 +1292,7 @@ test('D2：近期截图提示仅给主人私聊且严格早于3分钟', async ()
 
 test('D3：近期视频理解摘要仅给主人私聊，且截断并标明素材', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 't353-recent-watch-'))
-  const lib = process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const lib = process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const source = readFileSync(path.join(lib, 'voiceSlots.js'), 'utf8')
   const indexSource = readFileSync(path.join(lib, 'index.js'), 'utf8')
   assert.match(source, /  slotJustWatched,\n/, 'D3 槽必须进入 VOICE_SLOTS')
@@ -1369,7 +1332,7 @@ test('D3：近期视频理解摘要仅给主人私聊，且截断并标明素材
 
 test('D4：主人玩心提示展示真实收藏候选，提示不代发', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 't353-face-cue-'))
-  const lib = process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const lib = process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   try {
     writeFileSync(path.join(root, '状态.json'), JSON.stringify({ energy: 80, 困意: 0, layers: { emotional: 90 } }))
     const source = readFileSync(path.join(lib, 'voiceSlots.js'), 'utf8')
@@ -1430,14 +1393,14 @@ test('D4：主人玩心提示展示真实收藏候选，提示不代发', async 
 })
 
 test('D8：群聊冷热提示基于最近三条活动，不改变应答判据', async () => {
-  const pollPath = process.env.POLL_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js'
+  const pollPath = process.env.POLL_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/poll.js'
   const source = readFileSync(pollPath, 'utf8')
   const marker = 'export function 群聊冷热提示(history, current, selfUin) {'
   assert.ok(source.includes(marker), 'poll 应导出纯群聊节奏提示判据')
   const start = source.indexOf(marker)
   const end = source.indexOf('\n}', start) + 2
   const fn = source.slice(start, end)
-  const onebotPath = process.env.ONEBOT_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/onebot.js'
+  const onebotPath = process.env.ONEBOT_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/onebot.js'
   const onebot = readFileSync(onebotPath, 'utf8')
   const timeStart = onebot.indexOf('export function timeOf(message) {')
   const timeEnd = onebot.indexOf('\n}', timeStart) + 2
@@ -1490,7 +1453,7 @@ test('计划：今日未完成吃饭目标提高对应自主行动权重', async
 })
 
 test('计划提示槽：私聊注入今天小目标与完成进度，群聊不展示', async () => {
-  const source = readFileSync(process.env.VOICE_SLOTS_SOURCE || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/voiceSlots.js', 'utf8')
+  const source = readFileSync(process.env.VOICE_SLOTS_SOURCE || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/voiceSlots.js', 'utf8')
   assert.match(source, /export const VOICE_SLOTS = \[([\s\S]*?)slotDailyPlan,/)
   const match = source.match(/export function slotDailyPlan\([\s\S]*?\n}\n/)
   assert.ok(match, 'voiceSlots 应导出今日计划提示槽')
@@ -1519,13 +1482,13 @@ test('黑话候选：忽略@提及和纯数字但保留汉字梗', async () => {
   const source = readFileSync(process.env.SLANG_SOURCE || path.join(TOOLS, '黑话.mjs'), 'utf8')
   const module = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
   const msgs = [
-    { user_id: 'u1', nickname: '测试A', text: '@1942 {{BOT_DISPLAY}}' },
-    { user_id: 'u1', nickname: '测试A', text: '@1942 {{BOT_DISPLAY}}' },
-    { user_id: 'u2', nickname: '测试B', text: '@1942 {{BOT_DISPLAY}}' },
+    { user_id: 'u1', nickname: '测试A', text: '@1942 哈基米' },
+    { user_id: 'u1', nickname: '测试A', text: '@1942 哈基米' },
+    { user_id: 'u2', nickname: '测试B', text: '@1942 哈基米' },
   ]
   const picked = module.挑候选(msgs, { 频次门槛: 2, 最多: 20 })
   assert.equal(picked.some((x) => x.词 === '1942'), false)
-  assert.equal(picked.some((x) => x.词 === '{{BOT_DISPLAY}}'), true)
+  assert.equal(picked.some((x) => x.词 === '哈基米'), true)
   const numbers = [1, 2, 3].map((_, i) => ({ user_id: 'n' + i, nickname: '数字' + i, text: '1942' }))
   assert.deepEqual(module.挑候选(numbers, { 频次门槛: 2, 最多: 20 }), [])
 })
@@ -1537,8 +1500,8 @@ test('判断权体检：只把传给激素脚本的事件名与激素事件表�
   mkdirSync(lib, { recursive: true })
   mkdirSync(tools, { recursive: true })
   const source = readFileSync(process.env.JUDGEMENT_SOURCE || path.join(TOOLS, '体检-判断权.mjs'), 'utf8')
-  const libAnchor = "const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'"
-  const toolsAnchor = "const TOOLS = '{{BOT_ROOT}}/共享/工具'"
+  const libAnchor = "const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'"
+  const toolsAnchor = "const TOOLS = '/data/hajimi-workspace/共享/工具'"
   assert.equal(source.split(libAnchor).length - 1, 1)
   assert.equal(source.split(toolsAnchor).length - 1, 1)
   const runnerSource = source.replace(libAnchor, `const LIB = '${lib}'`).replace(toolsAnchor, `const TOOLS = '${tools}'`)
@@ -1605,7 +1568,7 @@ test('自主行动：购买与进食结果决定状态和短重试', async () =>
 
 
 test('任务书第一部分：工具描述精简但 schema 与安全边界不变', async () => {
-  const lib = process.env.TOOL_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+  const lib = process.env.TOOL_LIB || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
   const q = (name) => pathToFileURL(path.join(lib, name)).href + `?taskbook-tool=${++serial}`
   const tool = await import(q('tool.js'))
   const items = await import(q('items.js'))
@@ -1684,8 +1647,8 @@ test('任务书第一部分：工具描述精简但 schema 与安全边界不变
   assert.match(byName.get('qq_photo').description, /(read_image|英文|几分钟|过期)/, 'qq_photo 缺关键用法提示')
 })
 
-test('任务书第一部分：ROFM压缩阈值保留宿主窗口并通过sanity', async () => {
-  const pluginDir = process.env.ROFM_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-rofm'
+test('任务书第一部分：ROFM压缩阈值保留宿主窗口并通过sanity', { skip: 'dsh-rofm 已于 2026-11-25 退役归档' }, async () => {
+  const pluginDir = process.env.ROFM_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-rofm'
   const [{ ConfigStore }, surface] = await Promise.all([
     import(pathToFileURL(path.join(pluginDir, 'lib/config-store.js')).href + `?taskbook=${++serial}`),
     import(pathToFileURL(path.join(pluginDir, 'lib/surface.js')).href + `?taskbook=${++serial}`),
@@ -1716,7 +1679,7 @@ test('任务书第一部分：ROFM压缩阈值保留宿主窗口并通过sanity'
 })
 
 test('任务书第一部分：白名单不再留 0 调用的 schedule 工具', () => {
-  const configPath = process.env.BRIDGE_CONFIG || '{{DSH_ROOT}}/qq-bridge.config.json'
+  const configPath = process.env.BRIDGE_CONFIG || '/data/hajimi-dsh/qq-bridge.config.json'
   const config = JSON.parse(readFileSync(configPath, 'utf8'))
   const allowed = config['工具白名单']
   assert.ok(Array.isArray(allowed))

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
@@ -18,17 +18,17 @@ process.env.QUIET_NOTE = '1'
 //
 // 真记录一直在：记忆/视频画面/<BV号>.omni.json（at + text）、记忆/刷到的.json。
 // 这个文件钉三件事，都是「别再把提示指错地方」。
-const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const POLL = LIB + '/poll.js'
 const VOICE = LIB + '/voiceSlots.js'
-const 记忆 = '{{BOT_ROOT}}/记忆'
+const 记忆 = '/data/hajimi-workspace/记忆'
 
 function 跑注入() {
   const 代码 = `
     const m = await import(${JSON.stringify(POLL)})
     const v = await import(${JSON.stringify(VOICE)})
-    const 私 = { peer: '{{OWNER_UIN}}', ownerUin: '{{OWNER_UIN}}', isPrivate: true, mute: false, lastText: '' }
-    const 群 = { peer: '2000000001', ownerUin: '{{OWNER_UIN}}', isPrivate: false, mute: false, lastText: '' }
+    const 私 = { peer: '3439411062', ownerUin: '3439411062', isPrivate: true, mute: false, lastText: '' }
+    const 群 = { peer: '2000000001', ownerUin: '3439411062', isPrivate: false, mute: false, lastText: '' }
     const 拼 = (ctx) => String(m.stateHintOf(ctx.peer, ctx) || '') + '\\n' + String(m.voiceHintOf(ctx.peer, ctx) || '') + '\\n' + String(v.extraSlotsHint({ ...ctx, memDir: ${JSON.stringify(记忆)} }) || '')
     console.log(JSON.stringify({ 私: 拼(私), 群: 拼(群) }))
   `
@@ -74,8 +74,8 @@ test('A3 注入里提到的工具名必须真实存在（全 lib + 两个插件 
 
   // ② bili / tieba 两个插件（它们用 register("名字", ...) 的写法）
   for (const p of [
-    '{{DSH_ROOT}}/profiles/web/node_modules/dsh-bili-humanism/index.js',
-    '{{DSH_ROOT}}/profiles/web/node_modules/dsh-tieba-dive/index.js',
+    '/data/hajimi-dsh/profiles/web/node_modules/dsh-bili-humanism/index.js',
+    '/data/hajimi-dsh/profiles/web/node_modules/dsh-tieba-dive/index.js',
   ]) {
     if (!existsSync(p)) continue
     const s = readFileSync(p, 'utf8')
@@ -97,7 +97,7 @@ test('A3 注入里提到的工具名必须真实存在（全 lib + 两个插件 
   // 第一版 A3 因此把 `memory_image` / `video_zoom` 判成「不存在」（差点去白名单里删掉真工具）。
   // 判断工具存不存在，静态扫 + 用量账 + 白名单三份合起来才算够。
   try {
-    const cfg = JSON.parse(readFileSync('{{DSH_ROOT}}/qq-bridge.config.json', 'utf8'))
+    const cfg = JSON.parse(readFileSync('/data/hajimi-dsh/qq-bridge.config.json', 'utf8'))
     for (const k of (cfg.工具白名单 || [])) 存在.add(k)
   } catch { /* 配置读不到就不靠它 */ }
 

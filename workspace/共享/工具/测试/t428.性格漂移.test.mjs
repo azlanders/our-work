@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
@@ -14,8 +14,8 @@ process.env.QUIET_NOTE = '1'
 // 14 天零调用 —— 因为 qq_self 的 op 只有 set/log/list，她自己既不知道性格能挪，也没有入口。
 // 批次423 接上：op:drift + --list 带当前分。
 // 这里锁六件事：分数看得见、漂能生效、窗口挡得住、核心要理由、核心步长是 1、撞边界不漏出去。
-const TOOLS = '{{BOT_ROOT}}/共享/工具'
-const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const TOOLS = '/data/hajimi-workspace/共享/工具'
+const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const 自改 = join(TOOLS, '自改.mjs')
 
 function 造() {
@@ -118,7 +118,7 @@ test('D6 到底了不会掉到 0 以下，也不许记一笔假账', () => {
 
 test('D7 qq_self 真的暴露了 drift，而且不再说「你的性格改不了」', () => {
   // 只测脚本不测入口 = 白测：批次 414 之前 --set 也是「能用」的，她照样一次没调过。
-  const s = readFileSync(join(LIB, 'tool.js'), 'utf8')
+  const s = readFileSync(join(LIB, 'tool-interact.js'), 'utf8')
   assert.match(s, /enum: \['set', 'log', 'list', 'drift'\]/, 'op enum 里没有 drift')
   assert.match(s, /op === 'drift'/, 'execute 里没有 drift 分支')
   assert.match(s, /argv\.push\('--drift', k, '--value'/, 'drift 参数没搬到脚本')
@@ -128,8 +128,8 @@ test('D7 qq_self 真的暴露了 drift，而且不再说「你的性格改不了
 })
 
 test('D8 跑这一整套没有碰真档案', () => {
-  const 真 = join('{{BOT_ROOT}}/记忆', '性格-16PF.json')
-  const 日志 = join('{{BOT_ROOT}}/记忆', '自改日志.json')
+  const 真 = join('/data/hajimi-workspace/记忆', '性格-16PF.json')
+  const 日志 = join('/data/hajimi-workspace/记忆', '自改日志.json')
   const a = readFileSync(真, 'utf8')
   const b = readFileSync(日志, 'utf8')
   const sb = 造()

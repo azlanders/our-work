@@ -87,7 +87,7 @@ export async function registerRecallTool(ctx) {
         // DESC_DIARY 2026-11-17（批次658，审计 P1-5）：621/624 已经把日记接进来了，
         // 描述还写着「手账、梦和记忆链」—— 她按描述选工具，会以为翻不到日记。
         // 顺带写明权限：日记的私有段只有主人私聊能看到（群聊/客人只拿公开段）。
-        description: '查记忆：默认查自己的手账、日记、梦和记忆链；聊天归档用 rofm，原话/事件片段用 hippocampus。可按关键词或日期。日记私有段仅主人私聊可见。',
+        description: '查记忆：默认查自己的手账、日记、梦和记忆链。可按关键词或日期。日记私有段仅主人私聊可见。',
         parameters: {
           type: 'object',
           additionalProperties: false,

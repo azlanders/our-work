@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
@@ -16,7 +16,7 @@ process.env.QUIET_NOTE = '1'
 // 同时发现两件事没人管：
 //   ① 装不下就整条跳过 —— 而「她记住了、却读不到」一声不响；
 //   ② `qq_remember` 什么都能记，于是「系统哪个提示有 bug」也被记进了「关于他」。
-const LIB = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const LIB = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const MEMORY = LIB + '/memory.js'
 
 // 第二参数是额外 env：DSH_DATA 指到沙盒 —— 否则 note() 会往**真** load.log 里写
@@ -97,7 +97,7 @@ test('B5 qq_remember 的描述必须写明「只记他的事」', () => {
   //
   // 第一版只查「关于他」「别记这儿」「bug」三个词 —— 把「只记他的事」整句改成「什么都可以记」
   // 反测竟然还是绿的（另外两个词还在）。断言用关键词时，同义表达有好几处就抓不住。
-  assert.match(段, /只记他的事/, '没写清「记的是他的事」')
-  assert.match(段, /都别记这儿/, '没有「什么不该记」的边界')
+  assert.match(段, /只记(?:他的|对方的)事/, '没写清「记的是他的事」')
+  assert.match(段, /都(?:别|不)记这儿/, '没有「什么不该记」的边界')
   assert.match(段, /bug/, '没点名「系统 bug / 代码改动」这类不该记进来')
 })

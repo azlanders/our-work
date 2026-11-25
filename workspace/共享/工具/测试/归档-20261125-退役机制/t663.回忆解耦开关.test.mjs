@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
-const lib = process.env.QQ_LIB_DIR || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const lib = process.env.QQ_LIB_DIR || '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 const pollPath = path.join(lib, 'poll.js')
 const 可用 = existsSync(pollPath)
 const 跳过 = '找不到 poll.js'

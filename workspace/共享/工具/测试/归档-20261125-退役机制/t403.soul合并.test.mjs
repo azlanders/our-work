@@ -20,14 +20,14 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync, statSync } from 'node:fs'
 
 // QUIET_NOTE：这个文件会 import 插件 lib，register / 各 registerXxxTool 会调 note()，
-// 往**真**插件日志 {{DSH_ROOT}}/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
+// 往**真**插件日志 /data/hajimi-dsh/qq-bridge-load.log 写。实测全套跑一遍能塞进去几千行
 // 「xxx registered」，把真信号（比如 [照片到货] 已投递）冲掉。测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
-const YML = '{{DSH_ROOT}}/profiles/web/cordis.patch.yml'
-const SOUL = '{{BOT_ROOT}}/SOUL.md'
-const PLUG = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib/index.js'
-const PANEL = '{{BOT_ROOT}}/共享/工具/面板.mjs'
+const YML = '/data/hajimi-dsh/profiles/web/cordis.patch.yml'
+const SOUL = '/data/hajimi-workspace/SOUL.md'
+const PLUG = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib/index.js'
+const PANEL = '/data/hajimi-workspace/共享/工具/面板.mjs'
 
 const 读 = (p) => readFileSync(p, 'utf8')
 
@@ -116,7 +116,7 @@ test('C1 两处不再有 >=15 字的相同整句', () => {
 // ── D 降级：SOUL.md 读不到时她还剩什么 ────────────────────────────
 test('D1 SOUL 读不到也不能只剩「见 SOUL」这句空话', () => {
   for (const [名, 串] of Object.entries({
-    身份: '{{BOT_DISPLAY}}', 叫法: '主人', 主人QQ: '{{OWNER_UIN}}', 不毒舌: '毒舌', 技术词: '端口',
+    身份: '哈基米', 叫法: '主人', 主人QQ: '3439411062', 不毒舌: '毒舌', 技术词: '端口',
   })) {
     assert.ok(前缀.includes(串), `降级时丢了「${名}」—— personaPrefix 是唯一的兜底`)
   }

@@ -17,8 +17,8 @@ import { spawn, execFileSync } from 'node:child_process'
 // t453：这个文件会 import 插件 lib，note() 会写生产日志；测试一律闭嘴。
 process.env.QUIET_NOTE = '1'
 
-const 工具 = '{{BOT_ROOT}}/共享/工具'
-const 插件 = '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
+const 工具 = '/data/hajimi-workspace/共享/工具'
+const 插件 = '/data/hajimi-dsh/profiles/web/node_modules/dsh-onebot-channel/lib'
 
 function 造盒() {
   const 根 = mkdtempSync(join(tmpdir(), 't575-'))
@@ -176,7 +176,7 @@ test('C10 旧总表：物品总表.mjs 必须和 表.mjs 输出一致，且不�
 })
 
 test('C11 白名单：当前可用的 3 个 qq 工具必须在线上下发', () => {
-  const 配置 = JSON.parse(readFileSync('{{DSH_ROOT}}/qq-bridge.config.json', 'utf8'))
+  const 配置 = JSON.parse(readFileSync('/data/hajimi-dsh/qq-bridge.config.json', 'utf8'))
   const 名单 = 配置['工具白名单'] || []
   // 2026-11-17：`qq_emoji_search` / `qq_lie` 仍在注册表，但为压工具 schema，
   // 已从实际下发名单里裁掉；这里是“白名单里有什么”，不是“注册了什么”。
