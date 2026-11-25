@@ -89,9 +89,9 @@ DSH profile（`package.json` / `cordis.patch.yml` / `vendor/`）不在 workspace
 
 应用目录写在 `patches/README.md`。
 
-## token 开销（2026-11-23 实测）
+## token 开销
 
-一次普通回合的请求体拆开记在 `$DSH_ROOT/fish-usage-log.jsonl`：`系统字 / 对话字 / 工具字 / 消息数 / 工具数`。第一次测量（哈基米，36 个工具的白名单；2026-11-23 已砍到 29 个）：
+一次普通回合的请求体拆开记在 `$DSH_ROOT/fish-usage-log.jsonl`：`系统字 / 对话字 / 工具字 / 消息数 / 工具数`。第一次测量（主实例，36 个工具的白名单；2026-11-23 已砍到 29 个）：
 
 | 块 | 字数 | 约合 token |
 | --- | --- | --- |
@@ -120,5 +120,5 @@ DSH profile（`package.json` / `cordis.patch.yml` / `vendor/`）不在 workspace
 `ALT_BOT_KEY` / `ALT_PANEL_PORT` 是「另一个 bot」的标识和面板端口，写在各自 `instances/*.env` 和 panel 的 systemd 单元里。
 
 - 面板收到 `X-Bot-Target: <ALT_BOT_KEY>` 时把 `/api/*`、`/selfie/*` 转发给 `ALT_PANEL_PORT`；等于自己的 key 就走本地，不转发。
-- 前端每次请求都声明当前在看谁（`X-Bot-Target: CURRENT_BOT`），不再只在选中 hajimi 时才加头 —— 原来哈基米自己的面板点「哈基米」会转给自己，认证后递归到超时。
+- 前端每次请求都声明当前在看谁（`X-Bot-Target: CURRENT_BOT`），不再只在选中目标 bot 时才加头 —— 原来默认目标就是自己，点自己会转给自己，认证后递归到超时。
 - 不配置时默认不转发，安全。

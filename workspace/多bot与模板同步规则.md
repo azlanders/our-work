@@ -75,3 +75,33 @@ SnowLuma 是「一个 service 注入本机所有 QQ 进程」，加 bot 不需�
 - [ ] 发一条自己的测试消息，日志出现「接收」和「已转发回复」或 `qq_send final`
 - [ ] 看门狗 timer 已启用，跑一次退出码为 0
 - [ ] 不在任何别的 bot 的目录里写文件
+
+## 七、DSH 插件与 profile 模板
+
+`/data/bot-template/dsh/` 是 DSH profile 的模板，跟 workspace 分开：
+
+- `dsh/vendor/`：通用插件源码（onebot-channel、live-compact、memewiki、bili-humanism、video-storyboard、fish-tone、fishtalk、mnemonic、image-cap）。安装新 bot 时整份复制到 `<DSH_ROOT>/profiles/web/vendor/`。
+- `dsh/package.json.tpl`：dependencies 用 `file:./vendor/...`，`dsh.profile.bundles` 列全部插件——漏一个 bundle 等于那个插件没加载。`dsh-live-compact` 必须同时出现在 dependencies 和 bundles。
+- `bridge/cordis.patch.yml.tpl` 带 `compaction-spine`（`minTokens 20000`、`keepRoundTokens 14000`）；`compaction-basic` 由 live-compact 的补丁禁用。
+
+`vendor/` 不从 `同步模板.sh` 走（它只管 workspace），用 rsync：
+
+```sh
+rsync -a --exclude '*.old-*' --exclude node_modules /data/<实例>-dsh/profiles/web/vendor/ /data/bot-template/dsh/vendor/
+```
+
+改完跑 `自检.sh`，[4/6] 核对 `dsh/package.json.tpl` 合法、bundles 含 `dsh-live-compact`。
+
+### 7.1 DSH profile 的同步脚本
+
+`同步模板.sh` / `推给所有实例.sh` 只管 workspace（根文件 + `共享/工具`）。DSH profile 的 `package.json`、`cordis.patch.yml`、`vendor/` 用另一对脚本：
+
+```sh
+# 实例 → 模板（路径/服务名/UIN/端口还原成 {{...}}，vendor 用 rsync）
+/data/bot-template/同步dsh.sh /data/bot-template/instances/<实例>.env
+
+# 模板 → 实例（渲染占位符；vendor 先备份再 rsync --delete）
+/data/bot-template/推dsh.sh /data/bot-template/instances/<实例>.env
+```
+
+两个脚本都会先打包到 `/root/bak2/`。`推dsh.sh` 的 `rsync --delete` 会删掉实例 `vendor/` 里模板没有的目录，所以只对用 vendor 装插件的实例用。
