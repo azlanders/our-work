@@ -8,7 +8,7 @@ import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
-import { expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
+import { docExpand, expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
 import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
 
@@ -479,7 +479,8 @@ test('attribute keywords bridge colloquial statements to how people ask for them
   const bare = [{ ...base, keywords: [] }]
   const q = '填个表 我全名咋写 多大来着'
   assert.equal(search(buildIndex(withKw), withKw, q, { limit: 3, minScore: 1.0, minHits: 1 })[0]?.rec.id, 'attr-1')
-  assert.equal(search(buildIndex(bare), bare, q, { limit: 3, minScore: 1.0, minHits: 1 }).length, 0)
+  // 2026-11-26 起索引侧补属性词：没有显式 keywords 的原文也能被「全名/多大」这种问法命中。
+  assert.equal(search(buildIndex(bare), bare, q, { limit: 3, minScore: 1.0, minHits: 1 })[0]?.rec.id, 'attr-1')
 })
 
 test('category expansion bridges attribute questions to specific instances', () => {
@@ -498,6 +499,20 @@ test('category expansion bridges attribute questions to specific instances', () 
   // 类目词只做增量：旧规则给的词不重复追加，既有排序权重不被改写
   const both = expandLocal('喝的咖啡和口味').split(' ')
   assert.deepEqual(both.filter((w) => w === '咖啡'), ['咖啡'])
+})
+
+test('doc-side attribute keywords make first-person facts findable by question wording', () => {
+  assert.ok(docExpand('我叫沈知夏，知了的知，夏天的夏，24').includes('全名'))
+  assert.ok(docExpand('我今年36岁，在杭州做结构工程').includes('年龄'))
+  assert.ok(docExpand('我大学读的是土木工程，后来做了结构设计').includes('职业'))
+  assert.equal(docExpand('抄手不要葱'), '')
+
+  const records = [
+    { id: 't15', text: '用户：我叫沈知夏，知了的知，夏天的夏，24', createdAt: Date.parse('2026-04-01T10:00:00+08:00'), scope: 's' },
+    { id: 't16', text: '用户：今天下班有点晚，路上买了两个橘子', createdAt: Date.parse('2026-04-02T21:00:00+08:00'), scope: 's' },
+  ]
+  const found = search(buildIndex(records), records, '填个表，我全名咋写、多大来着', { limit: 2, minScore: 1.0, minHits: 1 })
+  assert.equal(found[0]?.rec.id, 't15')
 })
 
 test('relative dates resolve against the record time, ambiguous weekdays stay untouched', () => {

@@ -1,5 +1,5 @@
 // 检索：倒排索引（支持 O(1) 增量写入）+ BM25 + 关键词/标签 + 时间窗加权 + 重要度/新鲜度。
-import { expandLocal, extractTimeWindow, queryGrams } from './text.js'
+import { docExpand, expandLocal, extractTimeWindow, queryGrams } from './text.js'
 
 const K1 = 1.2
 const B = 0.75
@@ -21,7 +21,7 @@ export function indexRecord(index, rec, idx) {
   const kwList = [...(rec.keywords || []), ...(rec.tags || [])]
     .map((k) => String(k || '').trim().toLowerCase())
     .filter(Boolean)
-  const body = rec.text + ' ' + kwList.join(' ')
+  const body = rec.text + ' ' + kwList.join(' ') + ' ' + docExpand(rec.text)
   const g = queryGrams(body)
   const kwSet = new Set(kwList)
   index.grams.set(rec.id, g)
