@@ -21,7 +21,7 @@ import { 找开着的段 } from './睡眠段.mjs'
 import { 精力 } from './恢复目标.mjs'
 
 // SANDBOX 2026-11-06（批次134）：原来写死，测一次 qq_sleep 就写她真实的睡醒标记。
-const base = process.env.QQ_SLEEP_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.QQ_SLEEP_MEM || ('{{BOT_ROOT}}/记忆')
 const stateP = join(base, '状态.json')
 const sleepP = join(base, '睡眠.json')
 const flagP = join(base, '睡醒.json')

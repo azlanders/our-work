@@ -33,7 +33,7 @@ const H = (k, d) => (_PJ[k] !== undefined ? _PJ[k] : d)
 import { join, dirname } from 'node:path'
 
 // SANDBOX_ENV 2026-11-05：支持 QQ_AUTONOMY_MEM 覆盖记忆目录，沙盒测试才写不到真实数据（其它脚本早就有，这份漏了）
-const base = process.env.QQ_AUTONOMY_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.QQ_AUTONOMY_MEM || ('{{BOT_ROOT}}/记忆')
 const moneyP = join(base, '资产.json')
 const stP = join(base, '状态.json')
 

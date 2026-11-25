@@ -16,7 +16,7 @@ const H = (k, d) => (_PJ[k] !== undefined ? _PJ[k] : d)
 import { join, dirname } from 'node:path'
 
 // QQ_YUAN_MEM 沙盒：测试时不碰她真实的 怨.json
-const base = process.env.QQ_YUAN_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.QQ_YUAN_MEM || ('{{BOT_ROOT}}/记忆')
 const path = join(base, '怨.json')
 // 百分制：0-100，旧的 0-10 数据第一次跑时自动 ×10
 const args = process.argv.slice(2)

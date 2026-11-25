@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
 // GROW_MEM 沙盒：测试时指到临时目录，不碰她真实的 偏好/人味/想要。
-const base = process.env.GROW_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.GROW_MEM || ('{{BOT_ROOT}}/记忆')
 // 2026-11-04 修：日志改用独立文件。原来与 生长复盘.mjs 共用 记忆/生长记录.json，
 // 但两边结构完全不同（这边是 {items:[...]}，复盘那边是 {week,trend,16pf_delta,habits...}），
 // 实测 --list 直接抛 TypeError，写入时则会在 push 处崩、把复盘的数据覆盖掉。

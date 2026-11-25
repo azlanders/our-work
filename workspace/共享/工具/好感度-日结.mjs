@@ -52,7 +52,7 @@ const add = (uin, name) => {
   counts.set(k, cur)
 }
 
-const logDirs = ['B:/肥鱼/群聊日志', join(MEM, '..', '群聊日志')]
+const logDirs = [join(MEM, '..', '群聊日志')]
 const logs = []
 for (const d of logDirs) {
   if (!existsSync(d)) continue

@@ -22,7 +22,7 @@ import { join, dirname } from 'node:path'
 
 // SELF_MEM 2026-11-14（批次414）：原来 base 硬编码 —— 它是共享工具里少数几个
 // 一个沙盒变量都没有的，单测只能读写真档。现在跟 别扭/买东西 一样认环境变量。
-const base = process.env.SELF_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.SELF_MEM || ('{{BOT_ROOT}}/记忆')
 const logPath = join(base, '自改日志.json')
 const args = process.argv.slice(2)
 const val = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d }

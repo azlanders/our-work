@@ -15,7 +15,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 // LIE_MEM 给测试指沙盒：一个谎挂 12 小时，测一次就多一条真账。
-const base = process.env.LIE_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.LIE_MEM || ('{{BOT_ROOT}}/记忆')
 const path = join(base, '谎言.json')
 const args = process.argv.slice(2)
 const val = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d }

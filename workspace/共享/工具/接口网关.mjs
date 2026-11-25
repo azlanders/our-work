@@ -42,7 +42,7 @@ function 记日志(obj) {
   try {
     mkdirSync(dirname(RELAY_LOG), { recursive: true })
     appendFileSync(RELAY_LOG, JSON.stringify({ at: 京刻(), ...obj }) + '\n')
-  } catch {}
+  } catch (e) { console.error('[接口网关]', e && e.message) }
 }
 
 // TOKENS 2026-11-23：把请求体拆成系统/对话/工具三块记进用量日志。
@@ -67,18 +67,18 @@ function 请求体量(parsed) {
     消息数: msgs.length,
     工具数: tools.length,
   }
-  // REQ_DUMP 2026-11-23：排查「对话字 42k 从哪来」用。存在 /tmp/hajimi-dump.on 时才写盘。
-  if (existsSync('/tmp/hajimi-dump.on')) {
+  // REQ_DUMP 2026-11-23：排查「对话字 42k 从哪来」用。存在 /tmp/{{BOT_NAME}}-dump.on 时才写盘。
+  if (existsSync('/tmp/{{BOT_NAME}}-dump.on')) {
     try {
       const rows = msgs.map((m, i) => {
         const c = m?.content
         const text = typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => (typeof b?.text === 'string' ? b.text : JSON.stringify(b || ''))).join('') : ''
         return { i, role: m?.role, len: text.length, head: text.slice(0, 60), text }
       })
-      appendFileSync('/tmp/hajimi-req.jsonl', JSON.stringify({ at: 京刻(), 量, rows }) + '\n')
+      appendFileSync('/tmp/{{BOT_NAME}}-req.jsonl', JSON.stringify({ at: 京刻(), 量, rows }) + '\n')
       // DUMP_SYS_TOOLS 2026-11-24：只记 msgs 看不出固定开销（system + tools schema）占多少。
-      try { writeFileSync('/tmp/hajimi-req-full.json', JSON.stringify({ at: 京刻(), 量, system: parsed?.system, tools: parsed?.tools, msgs })) } catch {}
-    } catch {}
+      try { writeFileSync('/tmp/{{BOT_NAME}}-req-full.json', JSON.stringify({ at: 京刻(), 量, system: parsed?.system, tools: parsed?.tools, msgs })) } catch (e) { console.error('[接口网关]', e && e.message) }
+    } catch (e) { console.error('[接口网关]', e && e.message) }
   }
   return 量
 }
@@ -87,7 +87,7 @@ function 记用量(row) {
   try {
     mkdirSync(dirname(USAGE_LOG), { recursive: true })
     appendFileSync(USAGE_LOG, JSON.stringify({ at: 京分(), ...row }) + '\n')
-  } catch {}
+  } catch (e) { console.error('[接口网关]', e && e.message) }
 }
 
 function 读共享钥匙表() {
@@ -274,7 +274,7 @@ function 读舰队() {
       const d = JSON.parse(readFileSync(FLEET_PATH, 'utf8'))
       if (d && Array.isArray(d.slots) && d.slots.length) return d
     }
-  } catch {}
+  } catch (e) { console.error('[接口网关]', e && e.message) }
   const init = 默认舰队()
   写舰队(init)
   return init
@@ -613,7 +613,7 @@ async function 桥接OpenAI响应(upRes, clientRes, isStream, modelName, onUsage
     const msg = ch.message || {}
     const content = []
     if (msg.reasoning_content) {
-      try { if (记思考()) 记一条(String(msg.reasoning_content), 0) } catch {}
+      try { if (记思考()) 记一条(String(msg.reasoning_content), 0) } catch (e) { console.error('[接口网关]', e && e.message) }
       content.push({ type: 'thinking', thinking: String(msg.reasoning_content), signature: '' })
     }
     if (msg.content) {
@@ -622,7 +622,7 @@ async function 桥接OpenAI响应(upRes, clientRes, isStream, modelName, onUsage
     const tcs = Array.isArray(msg.tool_calls) ? msg.tool_calls : []
     for (const tc of tcs) {
       let inp = {}
-      try { inp = JSON.parse(tc.function?.arguments || '{}') } catch {}
+      try { inp = JSON.parse(tc.function?.arguments || '{}') } catch (e) { console.error('[接口网关]', e && e.message) }
       content.push({
         type: 'tool_use',
         id: tc.id || ('toolu_' + randomUUID().slice(0, 12)),
@@ -796,8 +796,8 @@ async function 桥接OpenAI响应(upRes, clientRes, isStream, modelName, onUsage
   } catch (e) {
     // 上游流被超时或断开时，for-await 会抛 TimeoutError；以前没人接，整个网关进程直接退出。
     // 现在只收尾，给客户端一个 error 事件，让宿主按回合失败重试。
-    try { sendEvt('error', { type: 'error', error: { type: 'upstream_aborted', message: String(e?.message || e).slice(0, 160) } }) } catch {}
-    try { clientRes.end() } catch {}
+    try { sendEvt('error', { type: 'error', error: { type: 'upstream_aborted', message: String(e?.message || e).slice(0, 160) } }) } catch (e) { console.error('[接口网关]', e && e.message) }
+    try { clientRes.end() } catch (e) { console.error('[接口网关]', e && e.message) }
     return
   }
 
@@ -811,7 +811,7 @@ async function 桥接OpenAI响应(upRes, clientRes, isStream, modelName, onUsage
     sendEvt('content_block_stop', { type: 'content_block_stop', index: 0 })
   }
 
-  try { if (thinkBuf) 记一条(thinkBuf, thinkStart) } catch {}
+  try { if (thinkBuf) 记一条(thinkBuf, thinkStart) } catch (e) { console.error('[接口网关]', e && e.message) }
   const 出估算 = !outTok && outChars > 0
   if (出估算) outTok = Math.max(1, Math.round(outChars / 1.6))
   onUsage({ inTok, outTok, cacheRead, 估算: 出估算 })
@@ -1134,7 +1134,7 @@ const server = createServer(async (req, res) => {
         errs.push(`${sl.codename}(${r.err})`)
       }
     }
-    try { 写舰队(d) } catch {}
+    try { 写舰队(d) } catch (e) { console.error('[接口网关]', e && e.message) }
 
     if (!chosen || !attempt) {
       记日志({ 事: '全挂', 错: errs })
@@ -1181,7 +1181,7 @@ const server = createServer(async (req, res) => {
       res.end()
     } catch (e) {
       // 同上：透传流被超时打断时只收尾，不能让进程崩。
-      try { res.end() } catch {}
+      try { res.end() } catch (e) { console.error('[接口网关]', e && e.message) }
       return
     }
     try {
@@ -1210,7 +1210,7 @@ const server = createServer(async (req, res) => {
         思考: 0,
         用时毫秒: Date.now() - tStart + (attempt.ms || 0),
       })
-    } catch {}
+    } catch (e) { console.error('[接口网关]', e && e.message) }
     return
   }
 

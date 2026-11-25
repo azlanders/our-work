@@ -23,7 +23,7 @@ const val = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] 
 // 不隔离的话每测一次就往她真实的余波里塞一笔。
 const base = process.env.RECALL_MEM
   ? String(process.env.RECALL_MEM).replace(/\/+$/, '')
-  : (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+  : ('{{BOT_ROOT}}/记忆')
 const logPath = join(base, '撤回.json')
 const statePath = join(base, '状态.json')
 const cfgPath = process.platform === 'win32' ? `${process.env.USERPROFILE}/.dsh/qq-bridge.config.json` : '{{DSH_ROOT}}/qq-bridge.config.json'

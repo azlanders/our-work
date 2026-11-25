@@ -11,11 +11,11 @@ import os, re, subprocess, sys, time
 from PIL import Image
 import numpy as np
 
-OUT = os.environ.get('QQQR_OUT', '/tmp/qqqr.png')
+OUT = os.environ.get('QQQR_OUT', '/tmp/qqqr-{{BOT_NAME}}.png')
 REFRESH = '--refresh' in sys.argv
 ACCOUNT = os.environ.get('QQ扫码用户', '')
 CLIENT = os.environ.get('QQ扫码客户端', '{{QQ_HOME}}/app/qq')
-SHOT = '/tmp/_qqwin.png'
+SHOT = os.environ.get('QQWIN_OUT', '/tmp/_qqwin-{{BOT_NAME}}.png')
 
 def sh(*args):
     return subprocess.run(args, capture_output=True, text=True)

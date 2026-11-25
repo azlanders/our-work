@@ -14,12 +14,12 @@
 //     对方态度回软又会被新反馈顶掉。只有一条一分钟防重复是技术性的。
 //   · 戳完记一笔，之后统计「戳了以后有没有回应」——回得多的，以后更敢戳。
 import { 写档 } from './_底层.mjs'
-import fs, { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs' // REQUIRE_FIX 2026-11-03：补默认导入，原来 require 在 ESM 里会抛错被吞
+import fs, { readFileSync } from 'node:fs' // REQUIRE_FIX 2026-11-03：补默认导入，原来 require 在 ESM 里会抛错被吞
 import { join, dirname } from 'node:path'
 
 // 2026-11-01：拟人相关的数字走参数表，别写死在脚本里
 let HUM = {}
-try { const _fs=fs; const _p = process.platform === 'win32' ? 'B:/肥鱼/共享/工具/参数.json' : '{{BOT_ROOT}}/共享/工具/参数.json'; if(_fs.existsSync(_p)) HUM = JSON.parse(_fs.readFileSync(_p,'utf8'))['拟人']||{} } catch (e) { console.error('[吞错]', e && e.message) } // CATCH_LOG_FIX
+try { const _fs=fs; const _p = process.env.QQ_PARAMS_PATH || '{{BOT_ROOT}}/共享/工具/参数.json'; if(_fs.existsSync(_p)) HUM = JSON.parse(_fs.readFileSync(_p,'utf8'))['拟人']||{} } catch (e) { console.error('[吞错]', e && e.message) } // CATCH_LOG_FIX
 const H = (k, d) => (HUM && HUM[k] !== undefined ? HUM[k] : d)
 
 // QQ_POKE_MEM 沙盒：测试时不碰她真实的 戳人记录.json
@@ -48,7 +48,7 @@ const 是直接运行 = (() => {
 
 async function 主流程() {
 
-  const base = process.env.QQ_POKE_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+  const base = process.env.QQ_POKE_MEM || '{{BOT_ROOT}}/记忆'
   const logPath = join(base, '戳人记录.json')
   const cfgPath = process.platform === 'win32' ? `${process.env.USERPROFILE}/.dsh/qq-bridge.config.json` : '{{DSH_ROOT}}/qq-bridge.config.json'
   const args = process.argv.slice(2)
@@ -65,12 +65,12 @@ async function 主流程() {
     process.exit(2)
   }
   const val = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d }
-  // POKE_TARGET 2026-11-16（批次581）：带 --user 却不带 --group 时，原来仍默认发到群 1051483012。
+  // POKE_TARGET 2026-11-16（批次581）：带 --user 却不带 --group 时，原来仍默认发到默认群 {{GROUP_UIN}}。
   // 实测 21:15 她用 `--force --user {{OWNER_UIN}}` 戳主人，脚本回「戳了」，但戳的是群里的拍一拍，
   // 私聊那边什么都没收到 —— 于是她说「戳到了」，主人说「你没戳到我」。
   // 现在：显式给了 --user 又没给 --group = 私聊戳；没给 --user 才沿用默认群。
   const 显式用户 = args.includes('--user')
-  const GID = val('--group', 显式用户 ? '' : '1051483012')
+  const GID = val('--group', 显式用户 ? '' : (process.env.QQ_GROUP_UIN || '{{GROUP_UIN}}'))
 
   const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
   const cfgHttp = String(cfg.onebotHttp || 'http://127.0.0.1:3000').replace(/\/$/, '')

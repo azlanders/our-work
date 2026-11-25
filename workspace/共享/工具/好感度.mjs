@@ -31,9 +31,7 @@
 //   node 好感度.mjs --json
 import { 读档, 改档, 北京 } from './_底层.mjs'
 
-const FILE = process.env.FAV_FILE || (process.platform === 'win32'
-  ? 'B:/肥鱼/记忆/好感度.json'
-  : '{{BOT_ROOT}}/记忆/好感度.json')
+const FILE = process.env.FAV_FILE || ('{{BOT_ROOT}}/记忆/好感度.json')
 
 // 日常值：没人理的时候会回到这里。安全比亲近高，是因为「没出事」本身就是安全。
 const 日常 = { 亲近: 40, 安全: 55, 兴致: 45, 思念: 0 }

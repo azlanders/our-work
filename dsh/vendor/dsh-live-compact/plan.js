@@ -866,7 +866,8 @@ function retreatBefore(items, end, boundary) {
 function expandBack(items, end, stopAt, { crossUser, chunkMax }) {
   let start = end;
   let tokens = items[end].tokens || 0;
-  while (start > stopAt) {
+  const safeStop = Math.max(0, stopAt);
+  while (start > safeStop) {
     const prev = start - 1;
     if (items[prev].checkpoint) break;
     if (crossUser && items[prev].untrustedNotice) break;

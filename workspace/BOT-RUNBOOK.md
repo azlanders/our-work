@@ -31,8 +31,8 @@ tail -f {{DSH_ROOT}}/qq-bridge-load.log
 # 模型请求与 token 流水（每行带 系统字/对话字/工具字/入/出）
 tail -f {{DSH_ROOT}}/fish-usage-log.jsonl
 
-# 网关最近一次请求体（排查上下文为什么大；存在 /tmp/hajimi-dump.on 时才写）
-cat /tmp/hajimi-req-full.json
+# 网关最近一次请求体（排查上下文为什么大；存在 /tmp/{{BOT_NAME}}-dump.on 时才写）
+cat /tmp/{{BOT_NAME}}-req-full.json
 
 # 健康与契约门禁
 cd {{BOT_ROOT}}/共享/工具 && node 自检.mjs && node 契约检查.mjs && node 全套验收.mjs

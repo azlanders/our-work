@@ -4114,11 +4114,11 @@ const 面板服务 = createServer((req, res) => {
     }
     // 2026-11-24：QQ 已换 SnowLuma，napcat 的 qrcode.png 早就不更新了。
     // 现在实时抓 Xvfb 上的 QQ 登录窗（qq扫码.py 会自动切到扫码页）。
-    const qrFile = '/tmp/qqqr-hajimi.png'
+    const qrFile = '/tmp/qqqr-{{BOT_NAME}}.png'
     const 跑抓码 = (刷新) => new Promise((r) => {
       import('node:child_process').then(({ execFile }) => {
         execFile('python3', ['{{BOT_ROOT}}/共享/工具/qq扫码.py'].concat(刷新 ? ['--refresh'] : []),
-          { timeout: 45000, env: { ...process.env, QQ扫码客户端: '/data/qq-qq/app/qq', QQQR_OUT: qrFile } }, (err) => r(!err))
+          { timeout: 45000, env: { ...process.env, QQ扫码客户端: '{{QQ_HOME}}/app/qq', QQQR_OUT: qrFile, QQWIN_OUT: '/tmp/_qqwin-{{BOT_NAME}}.png' } }, (err) => r(!err))
       }).catch(() => r(false))
     })
     if (req.method === 'GET' && url === '/api/fleet/qrcode') {
@@ -4139,7 +4139,7 @@ const 面板服务 = createServer((req, res) => {
       return
     }
     if (req.method === 'GET' && url === '/api/fleet/qqwin') {
-      const winFile = '/tmp/_qqwin.png'
+      const winFile = '/tmp/_qqwin-{{BOT_NAME}}.png'
       const 发全窗 = () => {
         try {
           if (!existsSync(winFile)) return send(404, 'application/json; charset=utf-8', JSON.stringify({ ok: false, msg: '还没抓到 QQ 窗口' }))
@@ -4167,9 +4167,9 @@ const 面板服务 = createServer((req, res) => {
         const [upGate, bot3081, proxy3011, panel8788, tts9880] = await Promise.all([
           HAS_GATEWAY ? 探口(GW_PORT) : Promise.resolve(false), 探口(3081), 探口(3011), 探口(8788), 探口(9880)
         ])
-        let qqLogin = { loggedIn: false, uin: '1000000003', nickname: '', err: '' }
+        let qqLogin = { loggedIn: false, uin: '{{SELF_UIN}}', nickname: '', err: '' }
         try {
-          const obCfg = JSON.parse(readFileSync('/data/qq-qq/app/resources/app/app_launcher/napcat/config/onebot11_1000000003.json', 'utf8'))
+          const obCfg = JSON.parse(readFileSync('{{QQ_HOME}}/app/resources/app/app_launcher/napcat/config/onebot11_{{SELF_UIN}}.json', 'utf8'))
           const tok = obCfg?.network?.httpServers?.[0]?.token || ''
           const r = await fetch('http://127.0.0.1:3011/', {
             method: 'POST',
@@ -4233,7 +4233,7 @@ const 面板服务 = createServer((req, res) => {
             // 登着就别动（重启会把她踢下线）；没登才重拉 SnowLuma 出新码。
             let 已登 = false
             try {
-              const obCfg = JSON.parse(readFileSync('/data/qq-qq/app/resources/app/app_launcher/napcat/config/onebot11_1000000003.json', 'utf8'))
+              const obCfg = JSON.parse(readFileSync('{{QQ_HOME}}/app/resources/app/app_launcher/napcat/config/onebot11_{{SELF_UIN}}.json', 'utf8'))
               const tok = obCfg?.network?.httpServers?.[0]?.token || ''
               const r = await fetch('http://127.0.0.1:3011/', {
                 method: 'POST',
@@ -4250,7 +4250,7 @@ const 面板服务 = createServer((req, res) => {
             // 2026-11-24：不再重启 SnowLuma（会把已登录的号踢掉）。直接让 QQ 登录窗
             // 切两次页签重新取码，然后由 qq扫码.py 截屏裁出来。
             cp.execFile('python3', ['{{BOT_ROOT}}/共享/工具/qq扫码.py', '--refresh'],
-              { timeout: 45000, env: { ...process.env, QQ扫码客户端: '/data/qq-qq/app/qq', QQQR_OUT: qrFile } }, (err) => {
+              { timeout: 45000, env: { ...process.env, QQ扫码客户端: '{{QQ_HOME}}/app/qq', QQQR_OUT: qrFile, QQWIN_OUT: '/tmp/_qqwin-{{BOT_NAME}}.png' } }, (err) => {
               if (err) return send(500, 'application/json; charset=utf-8', JSON.stringify({ ok: false, msg: '刷新失败：' + (err.message || err) }))
               return send(200, 'application/json; charset=utf-8', JSON.stringify({ ok: true, msg: '新二维码好了，扫吧喵！' }))
             })

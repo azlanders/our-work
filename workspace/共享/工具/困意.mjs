@@ -46,7 +46,7 @@ try {
 import { join } from 'node:path'
 
 // SLEEPY_MEM 2026-11-06（批次104）：加沙盒变量。原来这里写死，测一次就动她真实的困意。
-const base = process.env.QQ_SLEEPY_MEM || (process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆')
+const base = process.env.QQ_SLEEPY_MEM || ('{{BOT_ROOT}}/记忆')
 const readJson = (p, fb) => { try { const v = JSON.parse(readFileSync(p, 'utf8')); return v === null || typeof v !== 'object' ? fb : v } catch { return fb } } // 2026-11-04 修：null/标量回落默认值
 
 const state = readJson(join(base, '状态.json'), {})

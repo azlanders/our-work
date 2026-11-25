@@ -38,14 +38,14 @@ if (是入口) {
 
 // 2026-11-01：拟人相关的数字走参数表，别写死在脚本里
 let HUM = {}
-try { const _fs=fs; const _p = process.platform === 'win32' ? 'B:/肥鱼/共享/工具/参数.json' : '{{BOT_ROOT}}/共享/工具/参数.json'; if(_fs.existsSync(_p)) HUM = JSON.parse(_fs.readFileSync(_p,'utf8'))['拟人']||{} } catch (e) { console.error('[吞错]', e && e.message) } // CATCH_LOG_FIX
+try { const _fs=fs; const _p = '{{BOT_ROOT}}/共享/工具/参数.json'; if(_fs.existsSync(_p)) HUM = JSON.parse(_fs.readFileSync(_p,'utf8'))['拟人']||{} } catch (e) { console.error('[吞错]', e && e.message) } // CATCH_LOG_FIX
 const H = (k, d) => (HUM && HUM[k] !== undefined ? HUM[k] : d)
 
 // SULK_MEM 2026-11-14（批次406）：单测要能指到沙盒目录，不然每测一次就改写她真实的别扭账
 // （这个文件以前没有沙盒变量，所以它的判据一直没被单测覆盖过）。
 const path = process.env.SULK_MEM
   ? String(process.env.SULK_MEM).replace(/\/+$/, '') + '/别扭.json'
-  : (process.platform === 'win32' ? 'B:/肥鱼/记忆/别扭.json' : '{{BOT_ROOT}}/记忆/别扭.json')
+  : ('{{BOT_ROOT}}/记忆/别扭.json')
 
 const args = process.argv.slice(2)
 const val = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d }
@@ -58,7 +58,7 @@ function durationFor(level, who) {
   let base = (pct <= H('别扭_低段上限', 30) ? pct : pct <= H('别扭_中段上限', 60) ? 30 + (pct - 30) * 3 : 120 + (pct - 60) * 6) * 60e3
   try {
     const fs2 = fs
-    const affP = process.platform === 'win32' ? 'B:/肥鱼/记忆/好感度.json' : '{{BOT_ROOT}}/记忆/好感度.json'
+    const affP = '{{BOT_ROOT}}/记忆/好感度.json'
     if (fs2.existsSync(affP)) {
       const db2 = JSON.parse(fs2.readFileSync(affP, 'utf8'))
       const sc = Number(db2?.people?.[who]?.score ?? 40)

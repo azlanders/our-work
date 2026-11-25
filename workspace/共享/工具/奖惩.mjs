@@ -23,7 +23,7 @@ import { 精力 } from './恢复目标.mjs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 
-const base = process.platform === 'win32' ? 'B:/肥鱼/记忆' : '{{BOT_ROOT}}/记忆'
+const base = '{{BOT_ROOT}}/记忆'
 const stateP = base + '/状态.json'
 const affP = base + '/好感度.json'
 const logP = base + '/奖惩.json'
@@ -98,7 +98,7 @@ const 大类 = {
 }
 
 try {
-  const pjPath = (process.platform === 'win32' ? 'B:/肥鱼/工具/参数.json' : '{{BOT_ROOT}}/共享/工具/参数.json')
+  const pjPath = ('{{BOT_ROOT}}/共享/工具/参数.json')
   if (existsSync(pjPath)) {
     const pj = JSON.parse(readFileSync(pjPath, 'utf8'))
     if (pj['奖惩']) { for (const [k, v] of Object.entries(pj['奖惩'])) K[k] = { ...(K[k] || {}), ...v } }

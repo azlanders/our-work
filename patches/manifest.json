@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "updated": "2026-11-24",
+  "hostPatches": [
+    {
+      "file": "dsh-agent-loop-system-dedup.patch",
+      "target": "dsh-agent-loop/lib/index.js",
+      "marker": "TOKEN_DEDUP",
+      "status": "active"
+    },
+    {
+      "file": "dsh-agent-loop-runtime-dedup.patch",
+      "target": "dsh-agent-loop/lib/index.js",
+      "marker": "RUNTIME_DEDUP",
+      "status": "active"
+    },
+    {
+      "file": "patch_llm_retry.py",
+      "target": "dsh-llm/lib/index.js",
+      "marker": "DEFAULT_MAX_RETRIES = 1;",
+      "status": "active",
+      "supportsDry": true,
+      "atomicWrite": true
+    }
+  ],
+  "vendorPatches": [
+    {
+      "file": "dsh-rofm-compact-desc.py",
+      "target": "dsh-rofm/lib/memory-tool.js",
+      "marker": "COMPACT_DESC 2026-11-24",
+      "status": "active",
+      "supportsDry": true,
+      "atomicWrite": true
+    },
+    {
+      "file": "dsh-onebot-channel-quiet-hours.py",
+      "target": "dsh-onebot-channel/lib/proactive.js",
+      "marker": "QUIET_HOURS 2026-11-24",
+      "status": "active",
+      "supportsDry": true,
+      "atomicWrite": true
+    }
+  ],
+  "deprecatedOrDead": [
+    {
+      "file": "patch_tool_whitelist.py",
+      "reason": "未完成的死脚本（仅定义字符串，无任何文件读写逻辑），建议归档或删除。"
+    },
+    {
+      "file": "portable_onebot.py",
+      "reason": "正则改写静态 import 为模板字符串会破坏 ESM 语法，应改为环境变量显式配置。"
+    },
+    {
+      "file": "fix_portable.py",
+      "reason": "正则改写 import { a as b } 为 const { a as b } = await import(...) 会产生非法 JS 解构语法。"
+    }
+  ]
+}
