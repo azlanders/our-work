@@ -9,6 +9,8 @@ test('poll-classify: 是半句 / 防抖等待 / isPushback behave per spec', () 
   assert.equal(pollCls.是半句('正常短句'), false)
   assert.equal(pollCls.防抖等待(true, '立刻停下', 5000), 1000)
   assert.equal(pollCls.防抖等待(false, '等一下，', 1000), 2000)
+  assert.equal(pollCls.URGENT_RE.test('立刻停下'), true)
+  assert.equal(pollCls.URGENT_RE.test('今天吃什么'), false)
 })
 
 test('poll-classify: 只有媒体 / 纯图无正文 / 是否艾特别人 behave deterministically', () => {

@@ -30,7 +30,10 @@ function 拷依赖 (入口, 到, 沙盒记忆, 跳过 = new Set()) {
     if (已拷.has(名) || 跳过.has(名)) return
     已拷.add(名)
     const 源 = fs.readFileSync(path.join(TOOLS, 名), 'utf8')
-    for (const m of 源.matchAll(/from\s+'\.\/([^']+\.mjs)'|import\s+'\.\/([^']+\.mjs)'/g)) 走(m[1] || m[2])
+    for (const m of 源.matchAll(/(?:from|import)\s+'(\.\.?\/[^']+\.mjs)'/g)) {
+      const next = path.posix.normalize(path.posix.join(path.posix.dirname(名), m[1]))
+      走(next)
+    }
     // DEP_PATCH 2026-11-14（批次456）：这里原来只给**入口**换路径，依赖是原样 copyFileSync 拷进去的。
     // 疾病.mjs 的 `MEM = process.env.QQ_AUTONOMY_MEM || '{{BOT_ROOT}}/记忆'` 原封不动，
     // 于是状态推进 每 tick 调 疾病.累/推进 都在写**线上** 记忆/疾病.json ——
@@ -39,7 +42,9 @@ function 拷依赖 (入口, 到, 沙盒记忆, 跳过 = new Set()) {
     const 改写 = 源
       .replaceAll("'{{BOT_ROOT}}/记忆", "'" + 沙盒记忆)
       .replaceAll("'{{BOT_ROOT}}/共享/工具", "'" + path.join(到, '工具'))
-    fs.writeFileSync(path.join(到, 名), 改写)
+    const dst = path.join(到, 名)
+    fs.mkdirSync(path.dirname(dst), { recursive: true })
+    fs.writeFileSync(dst, 改写)
   }
   走(入口)
   return [...已拷]

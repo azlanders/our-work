@@ -3884,8 +3884,8 @@ export function normalizeEvent(event) {
  */
 
 // 纯分类与防抖判据已拆至 ./poll-classify.js
-import { 是半句, 防抖等待, isPushback, 只有媒体, 纯图无正文, 是否艾特别人 } from './poll-classify.js'
-export { 是半句, 防抖等待, isPushback, 只有媒体, 纯图无正文, 是否艾特别人 } from './poll-classify.js'
+import { 是半句, 防抖等待, isPushback, 只有媒体, 纯图无正文, 是否艾特别人, URGENT_RE } from './poll-classify.js'
+export { 是半句, 防抖等待, isPushback, 只有媒体, 纯图无正文, 是否艾特别人, URGENT_RE } from './poll-classify.js'
 
 const 开口时刻 = new Map()
 const 冷却毫秒 = 20000
