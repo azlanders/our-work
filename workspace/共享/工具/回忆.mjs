@@ -15,7 +15,8 @@
  * 只读，不写任何文件。
  */
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 // DIARY_ROLE 2026-11-17（批次654）：私有段（`## 只给你` / `~~划掉~~`）的裁剪
 // 只认 日记.mjs 一处实现，回忆侧不再自己剥。
 import { 读一篇, 给角色 } from './日记.mjs'
@@ -50,6 +51,19 @@ export function 解析日(s) {
 const 截 = (s) => {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim()
   return t.length > 每条上限 ? t.slice(0, 每条上限) + '…' : t
+}
+
+/** 围绕命中词居中截取，防止长段落在第 100 字截断时把命中词本身切掉。 */
+export function 截围绕(s, q) {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim()
+  if (t.length <= 每条上限) return t
+  const needle = String(q ?? '').trim().toLowerCase()
+  if (!needle) return t.slice(0, 每条上限) + '…'
+  const idx = t.toLowerCase().indexOf(needle)
+  if (idx < 0 || idx + needle.length <= 每条上限 - 4) return t.slice(0, 每条上限) + '…'
+  const start = Math.max(0, idx - Math.floor((每条上限 - needle.length) / 2))
+  const end = Math.min(t.length, start + 每条上限)
+  return (start > 0 ? '…' : '') + t.slice(start, end) + (end < t.length ? '…' : '')
 }
 
 function 找归档(prefix, day) {
@@ -170,13 +184,14 @@ function 所有天() {
   const scan = (dir) => {
     try {
       for (const f of readdirSync(dir)) {
-        const m = f.match(/^手账-(\d{4}-\d{2}-\d{2})\.md$/)
+        const m = f.match(/^(?:手账|梦)-(\d{4}-\d{2}-\d{2})\.md$/)
         if (m) set.add(m[1])
       }
-    } catch (_err) { console.error('[回忆]', _err?.message || _err) }
+    } catch (_err) { if (_err?.code !== 'ENOENT') console.error('[回忆]', _err?.message || _err) }
   }
   scan(base)
   scan(join(base, '手账'))
+  scan(join(base, '梦'))
   try {
     const archRoot = join(base, '归档', '历史按月')
     if (existsSync(archRoot)) {
@@ -209,82 +224,96 @@ function 查日(day) {
   return out
 }
 
-function 查词(词) {
+function 查词(词, 限定日 = '') {
   const q = String(词 ?? '').trim()
   if (!q) return []
+  const qLow = q.toLowerCase()
+  const match = (text) => String(text ?? '').toLowerCase().includes(qLow)
   const out = []
-  for (const day of 所有天()) {
+  const days = 限定日 ? [限定日] : 所有天()
+  for (const day of days) {
     for (const line of 读手账(day)) {
-      if (line.includes(q)) out.push({ 来源: '手账', 日: day, 文: 截(line) })
+      if (match(line)) out.push({ 来源: '手账', 日: day, 文: 截围绕(line, q) })
       if (out.length >= 60) break
     }
     const dream = 读梦(day)
-    if (dream && dream.includes(q)) out.push({ 来源: '梦', 日: day, 文: 截(dream) })
+    if (dream && match(dream)) out.push({ 来源: '梦', 日: day, 文: 截围绕(dream, q) })
     for (const seg of 读日记段(day)) {
-      if (seg.includes(q)) out.push({ 来源: '日记', 日: day, 文: 截(seg) })
+      if (match(seg)) out.push({ 来源: '日记', 日: day, 文: 截围绕(seg, q) })
     }
     if (out.length >= 60) break
   }
   for (const it of 读链()) {
-    if (it.text.includes(q)) out.push({ 来源: '链', 日: it.at.slice(0, 10), 文: 截(it.text) })
+    if (限定日 && it.at.slice(0, 10) !== 限定日) continue
+    if (match(it.text)) out.push({ 来源: '链', 日: it.at.slice(0, 10), 文: 截围绕(it.text, q) })
   }
   return out
 }
 
-const 日参 = val('--日', '')
-const 词参 = val('--词', '')
-const 最近 = Number(val('--最近', '')) || 0
+const 是入口 = (() => {
+  try { return !!process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url) }
+  catch { return false }
+})()
 
-let 结果 = []
-let 说明 = ''
+if (是入口) {
+  const 日参 = val('--日', '')
+  const 词参 = val('--词', '')
+  const 最近 = Number(val('--最近', '')) || 0
 
-if (日参) {
-  const day = 解析日(日参)
-  if (!day) { 说明 = '日期看不懂：' + 日参 + '（要 2026-11-05 / 今天 / 昨天 / 前天 / N天前）' }
-  else {
-    结果 = 查日(day)
-    if (!结果.length) 说明 = day + ' 没有手账也没有梦'
+  let 结果 = []
+  let 说明 = ''
+
+  if (日参) {
+    const day = 解析日(日参)
+    if (!day) { 说明 = '日期看不懂：' + 日参 + '（要 2026-11-05 / 今天 / 昨天 / 前天 / N天前）' }
+    else if (词参) {
+      结果 = 查词(词参, day)
+      if (!结果.length) 说明 = day + ' 没找到提到「' + 词参 + '」的记录'
+    } else {
+      结果 = 查日(day)
+      if (!结果.length) 说明 = day + ' 没有手账也没有梦'
+    }
+  } else if (词参) {
+    结果 = 查词(词参)
+    if (!结果.length) 说明 = '没找到提到「' + 词参 + '」的记录'
+  } else {
+    const n = Math.max(1, Math.min(7, 最近 || 3))
+    for (const day of 所有天().slice(0, n)) 结果 = 结果.concat(查日(day))
+    if (!结果.length) 说明 = '最近 ' + n + ' 天没有记录'
   }
-} else if (词参) {
-  结果 = 查词(词参)
-  if (!结果.length) 说明 = '没找到提到「' + 词参 + '」的记录'
-} else {
-  const n = Math.max(1, Math.min(7, 最近 || 3))
-  for (const day of 所有天().slice(0, n)) 结果 = 结果.concat(查日(day))
-  if (!结果.length) 说明 = '最近 ' + n + ' 天没有记录'
-}
 
-// TRUNC 2026-11-17（批次639）：原来超过 12 条直接切掉，说明一个字不提。
-// 她翻到 12 条就会当成「只有 12 条」照实说出去 —— 2026-11-16 那次「就这几条」
-// 就是这么来的。现在把总数记下来，说明里写清楚只列了前 12 条。
-const 总数 = 结果.length
-结果 = 结果.slice(0, 条目上限)
-if (总数 > 结果.length) {
-  const 截断 = '匹配 ' + 总数 + ' 条，这里只列前 ' + 条目上限 + ' 条（换个更窄的词或指定某一天能看别的）'
-  说明 = 说明 ? 说明 + '；' + 截断 : 截断
-}
+  // TRUNC 2026-11-17（批次639）：原来超过 12 条直接切掉，说明一个字不提。
+  // 她翻到 12 条就会当成「只有 12 条」照实说出去 —— 2026-11-16 那次「就这几条」
+  // 就是这么来的。现在把总数记下来，说明里写清楚只列了前 12 条。
+  const 总数 = 结果.length
+  结果 = 结果.slice(0, 条目上限)
+  if (总数 > 结果.length) {
+    const 截断 = '匹配 ' + 总数 + ' 条，这里只列前 ' + 条目上限 + ' 条（换个更窄的词或指定某一天能看别的）'
+    说明 = 说明 ? 说明 + '；' + 截断 : 截断
+  }
 
-if (JSON_OUT) {
-  console.log(JSON.stringify({ ok: 结果.length > 0, 条数: 结果.length, 总数, 说明, 条目: 结果 }, null, 2))
-  process.exit(0)
-}
+  if (JSON_OUT) {
+    console.log(JSON.stringify({ ok: 结果.length > 0, 条数: 结果.length, 总数, 说明, 条目: 结果 }, null, 2))
+    process.exit(0)
+  }
 
-if (!结果.length) {
-  console.log(说明 || '没找到。')
-  process.exit(0)
-}
+  if (!结果.length) {
+    console.log(说明 || '没找到。')
+    process.exit(0)
+  }
 
-// 按「来源 · 日」分组打印。同一天的手账可能被拆成「事件」和「流水」两段，
-// 这里合并回一个标题下，不然会出现两个「手账 · 2026-11-06」。
-const 组 = []
-const 位置 = new Map()
-for (const it of 结果) {
-  const tag = it.来源 + ' · ' + it.日
-  if (!位置.has(tag)) { 位置.set(tag, 组.length); 组.push({ tag, 条: [] }) }
-  组[位置.get(tag)].条.push(it)
+  // 按「来源 · 日」分组打印。同一天的手账可能被拆成「事件」和「流水」两段，
+  // 这里合并回一个标题下，不然会出现两个「手账 · 2026-11-06」。
+  const 组 = []
+  const 位置 = new Map()
+  for (const it of 结果) {
+    const tag = it.来源 + ' · ' + it.日
+    if (!位置.has(tag)) { 位置.set(tag, 组.length); 组.push({ tag, 条: [] }) }
+    组[位置.get(tag)].条.push(it)
+  }
+  for (const g of 组) {
+    console.log('\n' + g.tag)
+    for (const it of g.条) console.log('  ' + it.文)
+  }
+  console.log('\n共 ' + 结果.length + ' 条' + (总数 > 结果.length ? '（匹配 ' + 总数 + ' 条，只列了前 ' + 条目上限 + ' 条）' : ''))
 }
-for (const g of 组) {
-  console.log('\n' + g.tag)
-  for (const it of g.条) console.log('  ' + it.文)
-}
-console.log('\n共 ' + 结果.length + ' 条' + (总数 > 结果.length ? '（匹配 ' + 总数 + ' 条，只列了前 ' + 条目上限 + ' 条）' : ''))

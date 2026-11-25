@@ -141,8 +141,8 @@ export async function registerRecallTool(ctx) {
           const day = String(args?.day ?? '').trim()
           const word = String(args?.word ?? '').trim()
           if (day) 参.push('--日', day)
-          else if (word) 参.push('--词', word)
-          else 参.push('--最近', String(Number(args?.days ?? 3) || 3))
+          if (word) 参.push('--词', word)
+          if (!day && !word) 参.push('--最近', String(Number(args?.days ?? 3) || 3))
           参.push('--json')
 
           let stdout = ''

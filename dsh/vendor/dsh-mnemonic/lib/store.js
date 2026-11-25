@@ -18,6 +18,7 @@ export class Store {
     this.byText = new Map()
     this.dirty = false
     this.touched = false
+    this.generation = 0
   }
 
   load() {
@@ -52,6 +53,7 @@ export class Store {
     }
     this.records = records
     this.dirty = false
+    this.generation += 1
     return this
   }
 
@@ -100,6 +102,7 @@ export class Store {
       this.touched = true
       if (metaChanged) {
         this.dirty = true
+        this.generation += 1
         this.appendLine(existing)
       }
       return existing
@@ -164,6 +167,7 @@ export class Store {
     const evicted = before - this.records.length
     if (evicted > 0) {
       this.dirty = true
+      this.generation += 1
       this.touched = false
       this.persist()
     }
@@ -214,6 +218,7 @@ export class Store {
     }
     if (mergedCount > 0) {
       this.dirty = true
+      this.generation += 1
       this.touched = false
       this.persist()
     }
@@ -228,6 +233,7 @@ export class Store {
     this.records = this.records.filter((r) => r.id !== id)
     this.touched = true
     this.dirty = true
+    this.generation += 1
     return true
   }
 

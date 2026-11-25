@@ -113,7 +113,8 @@ export function search(
   for (const [term] of q) {
     if (term.length < 2) continue
     const df = index.df.get(term) || 0
-    if (df > 0 && df * 2 <= index.n) {
+    // 小库（<8 条）不做 50% 通用词截断，避免 1 条记录时 df*2 <= n 恒为假导致无法召回
+    if (df > 0 && (index.n < 8 || df * 2 <= index.n)) {
       const p = index.postings.get(term)
       if (p) for (const i of p) candidates.add(i)
     }

@@ -78,6 +78,7 @@ export function apply(ctx, config = {}) {
   const aliasGroups = loadAliasGroups(cfg.storePath, config.aliases)
   let index = buildIndex(store.records)
   let indexedCount = store.records.length
+  let indexedGen = store.generation
   let indexDirty = false
   let lastInject = { at: 0, sig: '' }
   let queryCount = 0
@@ -87,9 +88,10 @@ export function apply(ctx, config = {}) {
 
   /** 增量同步索引：仅追加新记录时 O(1) 增量更新，删除/压实/改写元数据时才全量重建。 */
   const ensureIndex = () => {
-    if (indexDirty || store.dirty || indexedCount > store.records.length) {
+    if (indexDirty || store.dirty || indexedGen !== store.generation || indexedCount > store.records.length) {
       index = buildIndex(store.records)
       indexedCount = store.records.length
+      indexedGen = store.generation
       indexDirty = false
       store.dirty = false
       return index

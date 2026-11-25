@@ -6,6 +6,7 @@ import {
   readFileSync,
   existsSync,
   chmodSync,
+  unlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -16,9 +17,14 @@ export const digest = (value) =>
     .digest("hex");
 export const now = () => new Date().toISOString();
 export function atomic(path, data) {
-  const temp = path + "." + randomUUID() + ".tmp";
-  writeFileSync(temp, data, { mode: 0o600 });
-  renameSync(temp, path);
+  const temp = `${path}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
+  try {
+    writeFileSync(temp, data, { mode: 0o600 });
+    renameSync(temp, path);
+  } catch (e) {
+    try { if (existsSync(temp)) unlinkSync(temp); } catch { /* 清理失败不影响原异常 */ }
+    throw e;
+  }
 }
 export class Store {
   constructor(root) {
@@ -47,6 +53,9 @@ export class Store {
         CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,reading_id TEXT NOT NULL REFERENCES readings(id),created TEXT NOT NULL,body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memory(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,created TEXT NOT NULL,body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS revisions(id TEXT NOT NULL,revision INTEGER NOT NULL,changed TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(id,revision));
+        CREATE INDEX IF NOT EXISTS idx_readings_bvid_page_created ON readings(bvid, page, created DESC);
+        CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status_started ON tasks(status, started DESC);
         PRAGMA user_version=1;`);
       if (!existsSync(this.marker)) atomic(this.marker, "schema=1\n");
       if (process.platform !== "win32") chmodSync(path, 0o600);

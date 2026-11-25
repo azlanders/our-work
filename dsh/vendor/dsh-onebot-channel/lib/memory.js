@@ -18,7 +18,7 @@
  */
 import { randomUUID } from 'node:crypto'
 const QQ_WS = process.env.QQ_WORKSPACE || '{{BOT_ROOT}}'
-import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR, note } from './env.js'
 
@@ -30,9 +30,14 @@ let memoryFile = MEMORY_FILE
 
 /** 原子写：先写 .tmp 再 rename，读的一方永远看不到半截 JSON。 */
 function 写原子(file, text) {
-  const tmp = file + '.tmp'
-  writeFileSync(tmp, text, 'utf8')
-  renameSync(tmp, file)
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    writeFileSync(tmp, text, 'utf8')
+    renameSync(tmp, file)
+  } catch (err) {
+    try { if (existsSync(tmp)) unlinkSync(tmp) } catch (_e) { console.error('[onebot:memory]', _e?.message || _e) }
+    throw err
+  }
 }
 
 /** 测试用：把读写路径换到临时文件，并清掉内存缓存。传空 = 恢复默认。 */
@@ -165,34 +170,40 @@ function 事实词集(text) {
 export function 事实相近(a, b) {
   const 甲 = 归一事实(a)
   const 乙 = 归一事实(b)
+  return 词集相近(甲, 事实词集(甲), 乙, 事实词集(乙))
+}
+
+function 词集相近(甲, A, 乙, B) {
   if (甲 === '' || 乙 === '') return false
   if (甲 === 乙) return true
-  const A = 事实词集(甲)
-  const B = 事实词集(乙)
   if (A.size === 0 || B.size === 0) return false
+  const [小, 大] = A.size <= B.size ? [A, B] : [B, A]
   let 交 = 0
-  for (const 词 of A) if (B.has(词)) 交 += 1
+  for (const 词 of 小) if (大.has(词)) 交 += 1
   if (交 < 3) return false
-  const 短 = Math.min(A.size, B.size)
+  const 短 = 小.size
   const 含 = 交 / 短
   const 杰 = 交 / (A.size + B.size - 交)
   return 短 <= 5 ? 含 >= 0.6 : 含 >= 0.5 && 杰 >= 0.2
 }
 
 function 合并同义事实(列表) {
+  // 预计算每条的归一文本与词集（O(n) 次分词），避免 findIndex 内 O(n²) 重复分词。
   const 留 = []
   for (const 条 of Array.isArray(列表) ? 列表 : []) {
     if (条 === null || typeof 条 !== 'object') continue
     const 文 = String(条.text ?? '').trim()
     if (文 === '') continue
-    const 旧位 = 留.findIndex((x) => 事实相近(x.text, 文))
+    const 归 = 归一事实(文)
+    const 集 = 事实词集(归)
+    const 旧位 = 留.findIndex((x) => 词集相近(x.归, x.集, 归, 集))
     if (旧位 >= 0) {
       // 最新措辞胜出；旧的交给调用方按需落日志（describeMemory 是纯读，不写）。
       留.splice(旧位, 1)
     }
-    留.push({ ...条, text: 文 })
+    留.push({ 条: { ...条, text: 文 }, 归, 集 })
   }
-  return 留
+  return 留.map((x) => x.条)
 }
 
 function 记同义合并(key, 旧条, 新文) {

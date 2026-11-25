@@ -166,7 +166,6 @@ test('apply integration deduplicates tool-loop pre-steps, wires diversify limit,
   }
 })
 
-
 import { effectiveMinScore } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { clockText, ymd } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 
@@ -546,6 +545,48 @@ test('v2.1 integration: apply wires config.aliases into mem_recall automatically
       const out = await registered.mem_recall.execute({ query: '陈工钥匙放哪了' })
       assert.equal(out.hits, 1)
       assert.match(out.text, /玄关第二个抽屉/)
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('recall small-store boundary: 1-record store without keywords is still retrievable', () => {
+  const records = [
+    { id: 'only1', text: '今天在半坡酒馆喝了桂花乌龙茶', keywords: [], tags: [], importance: 0.5, createdAt: Date.now(), uses: 1 },
+  ]
+  const idx = buildIndex(records)
+  const hits = search(idx, records, '桂花乌龙', { limit: 3, minScore: 0.5 })
+  assert.equal(hits.length, 1, '1-record store must not drop all terms via df*2 <= n')
+  assert.equal(hits[0].rec.id, 'only1')
+})
+
+test('index generation sync: ensureIndex rebuilds cleanly after Store.compact() resets dirty', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-gen-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    const registered = {}
+    const ctx = {
+      inject(deps, fn) {
+        if (deps.includes('tools')) {
+          fn({ effect(cb) { cb() }, tools: { register(def) { registered[def.name] = def; return () => {} } } })
+        }
+      },
+      on() {}, get() { return null }, logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, maxRecords: 3, queryRewrite: false })
+    try {
+      await registered.mem_save.execute({ text: '核心结论是徐汇区衡山路咖啡馆很好喝', keywords: ['衡山路'], importance: 0.95 })
+      await registered.mem_save.execute({ text: '普通日常记录甲关于散步', importance: 0.2 })
+      await registered.mem_save.execute({ text: '普通日常记录乙关于看云', importance: 0.2 })
+      // Fourth insert triggers Store.compact() inside add(), which calls persist() and resets store.dirty=false
+      await registered.mem_save.execute({ text: '新增关键事实浦东机场二号航站楼集合', keywords: ['浦东机场'], importance: 0.9 })
+      const out = await registered.mem_recall.execute({ query: '浦东机场' })
+      assert.equal(out.hits, 1, 'post-compact index must stay aligned with store.records')
+      assert.match(out.text, /浦东机场二号航站楼/)
     } finally {
       dispose()
     }
