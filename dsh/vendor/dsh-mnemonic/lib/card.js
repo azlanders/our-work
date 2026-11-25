@@ -2,6 +2,7 @@
 // 两者都有硬上限——记忆再大也不能把提示词撑爆。
 // 时间统一按北京时间（UTC+8）渲染，避免 Linux UTC 宿主机把深夜记忆偏移到前一天。
 import { clip } from './text.js'
+import { dateHints } from './dates.js'
 
 const DAY = 86400000
 const DEFAULT_TZ_OFFSET_MS = 8 * 3600000
@@ -109,7 +110,7 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
 export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS } = {}) {
   if (!hits?.length) return ''
   const head = Number.isFinite(now) ? `【记忆·相关的存档原文｜现在 ${clockText(now, tzOffsetMs)}】` : '【记忆·相关的存档原文】'
-  const tail = '（用法：只引用上面逐字出现过的事实，只答问到的点，不补未问细节、不给名词加原文没有的定性，别补这里没有的日期、地点、现状或后续打算，也别把没被问到的其它细节（刻度、时间、外观、别处摆设）带进答案；过去状态、计划、猜测或假设别直接当成现在仍是这样或已发生。同一件事出现两种矛盾说法就两个都列、并说明记录不足无法确定。这里确实没有就说记不清，无关就忽略。）'
+  const tail = '（用法：只引用上面逐字出现过的事实，只答问到的点，不补未问细节、不给名词加原文没有的定性，别补这里没有的日期、地点、现状或后续打算，也别把没被问到的其它细节（刻度、时间、外观、别处摆设）带进答案；过去状态、计划、猜测或假设别直接当成现在仍是这样或已发生。同一件事出现两种矛盾说法就两个都列、并说明记录不足无法确定。这里确实没有就说记不清，无关就忽略。括号里的「昨天=2026-05-02」是那句原文相对日期的绝对换算，问哪天就用它，别说没写具体日期。）'
   const reserve = head.length + tail.length + 4
   const bodyBudget = Math.max(0, maxChars - reserve)
   if (bodyBudget < 20) return ''
@@ -119,7 +120,8 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   for (const [i, hit] of hits.entries()) {
     const when = ymd(hit.rec.eventAt || hit.rec.createdAt, tzOffsetMs)
     const prefix = `${i + 1}. (${when}) `
-    const line = prefix + clip(hit.rec.text, itemChars)
+    const hint = dateHints(hit.rec.text, hit.rec.eventAt || hit.rec.createdAt, tzOffsetMs)
+    const line = prefix + clip(hit.rec.text, itemChars) + (hint ? ` ${hint}` : '')
     const sep = lines.length ? 1 : 0
     if (used + sep + line.length <= bodyBudget) {
       lines.push(line)
@@ -129,7 +131,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
     const avail = bodyBudget - used - sep - prefix.length
     // 第一条一定要装下；后续条目只有剩余预算够放有效正文（>=40字）时才裁短塞入，否则宁可留完整条。
     if (!lines.length || avail >= 40) {
-      lines.push(prefix + clip(hit.rec.text, Math.max(12, avail)))
+      lines.push(prefix + clip(hit.rec.text, Math.max(12, avail - hint.length)))
     }
     break
   }

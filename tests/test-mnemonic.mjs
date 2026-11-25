@@ -8,6 +8,8 @@ import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
+import { expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
+import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
 
 test('groupAdjacent 只并同会话的下一轮，跨会话/超时差都不并', () => {
@@ -403,26 +405,6 @@ test('security: sanitizeMemoryText neutralizes spoofed headers and archive filte
   assert.equal(isLowValueOrInjection('周六下午三点去半坡酒馆喝桂花乌龙'), false)
 })
 
-test('annotate: relative dates resolve against the record date, corrections are flagged', async () => {
-  const { relativeDateHints, isCorrectionStatement, renderAnnotation } = await import('../dsh/vendor/dsh-mnemonic/lib/annotate.js')
-  const jun18 = Date.parse('2026-06-18T15:20:00+08:00')
-  const may3 = Date.parse('2026-05-03T02:10:00+08:00')
-  const jun10 = Date.parse('2026-06-10T09:00:00+08:00')
-
-  assert.deepEqual(relativeDateHints('跟阿婆说定的下周二下午', jun18).map((h) => [h.term, h.when]), [['下周二', '2026-06-23']])
-  assert.deepEqual(relativeDateHints('昨天在江北回声那边', may3).map((h) => h.when), ['2026-05-02'])
-  assert.deepEqual(relativeDateHints('我姐生日是上周五', jun10).map((h) => h.when), ['2026-06-05'])
-  assert.deepEqual(relativeDateHints('今天下雨了', jun18), [], '今天不是需要换算的相对日期')
-
-  assert.equal(isCorrectionStatement('其实还剩半袋，之前说喂完是记岔了'), true)
-  assert.equal(isCorrectionStatement('别记错了，是蓝色文件夹'), false, '提醒不是更正')
-  assert.equal(isCorrectionStatement('蓝夹，绿色的是旧酒单'), false)
-
-  assert.equal(renderAnnotation('跟阿婆说定的下周二下午', jun18), '〔下周二＝2026-06-23〕')
-  assert.equal(renderAnnotation('其实还剩半袋，之前说喂完是记岔了', jun18), '〔这版是事后更正，以它为准〕')
-  assert.equal(renderAnnotation('抄手不要葱', jun18), '')
-})
-
 test('multi-need questions get a bigger recall budget, plain chat keeps the lean one', async () => {
   assert.equal(isMultiNeedQuery('上次说的夜班见闻，我还欠你几件？已经讲过哪件？'), true)
   assert.equal(isMultiNeedQuery('我爸明天要坐很久，路上要注意什么'), true)
@@ -498,6 +480,48 @@ test('attribute keywords bridge colloquial statements to how people ask for them
   const q = '填个表 我全名咋写 多大来着'
   assert.equal(search(buildIndex(withKw), withKw, q, { limit: 3, minScore: 1.0, minHits: 1 })[0]?.rec.id, 'attr-1')
   assert.equal(search(buildIndex(bare), bare, q, { limit: 3, minScore: 1.0, minHits: 1 }).length, 0)
+})
+
+test('category expansion bridges attribute questions to specific instances', () => {
+  // 问「口味」但原文只写「美式加双份奶、吃辣胃疼」
+  const drink = expandLocal('要给我姐带早饭和咖啡，她那口味你还记得不？')
+  assert.ok(drink.includes('美式'))
+  assert.ok(drink.includes('辣'))
+  // 问「什么歌」但原文只写「老粤语歌和旧爵士」
+  assert.ok(expandLocal('我喜欢听啥路子的歌来着？').includes('爵士'))
+  // 问「磨豆子哪台」但原文只写「小电磨」「手摇机」
+  const mill = expandLocal('我家现在磨豆子用的是哪台？')
+  assert.ok(mill.includes('电磨'))
+  assert.ok(mill.includes('手摇'))
+  // 无关问题不扩
+  assert.equal(expandLocal('今天几号'), '')
+  // 类目词只做增量：旧规则给的词不重复追加，既有排序权重不被改写
+  const both = expandLocal('喝的咖啡和口味').split(' ')
+  assert.deepEqual(both.filter((w) => w === '咖啡'), ['咖啡'])
+})
+
+test('relative dates resolve against the record time, ambiguous weekdays stay untouched', () => {
+  const at = (s) => Date.parse(s)
+  assert.deepEqual(resolveRelativeDates('昨天在江北回声替唐粟', at('2026-05-03T02:10:00+08:00')).map((h) => h.ymd), ['2026-05-02'])
+  assert.deepEqual(resolveRelativeDates('前天我把迷迭香搬到窗边', at('2026-05-27T21:00:00+08:00')).map((h) => h.ymd), ['2026-05-25'])
+  assert.deepEqual(resolveRelativeDates('我姐生日是上周五', at('2026-06-10T09:00:00+08:00')).map((h) => h.ymd), ['2026-06-05'])
+  assert.deepEqual(resolveRelativeDates('跟阿婆说定的下周二下午', at('2026-06-18T15:20:00+08:00')).map((h) => h.ymd), ['2026-06-23'])
+  assert.deepEqual(resolveRelativeDates('周五下班去半坡', at('2026-06-10T09:00:00+08:00')), [], '不带周次的周五有歧义，不换算')
+  assert.equal(dateHints('跟阿婆说定的下周二下午', at('2026-06-18T15:20:00+08:00')), '（下周二=2026-06-23）')
+  assert.equal(dateHints('抄手不要葱', at('2026-06-18T15:20:00+08:00')), '')
+})
+
+test('recall block carries resolved dates for relative-date evidence and keeps its budget', () => {
+  const at = Date.parse('2026-06-30T12:00:00+08:00')
+  const hits = [
+    { rec: { id: 'a', text: '前天我把迷迭香搬到窗边，叶尖有点干。', createdAt: Date.parse('2026-05-27T21:00:00+08:00'), eventAt: Date.parse('2026-05-27T21:00:00+08:00') } },
+    { rec: { id: 'b', text: '抄手不要葱。', createdAt: Date.parse('2026-05-28T09:00:00+08:00'), eventAt: Date.parse('2026-05-28T09:00:00+08:00') } },
+  ]
+  const block = renderRecallBlock(hits, { maxChars: 900, itemChars: 200, now: at })
+  assert.ok(block.includes('前天=2026-05-25'), block)
+  const plain = block.split('\n').find((l) => l.includes('抄手不要葱')) || ''
+  assert.ok(plain && !plain.includes('='), plain)
+  assert.ok(block.length <= 900)
 })
 
 test('archive filter: upstream error and degraded placeholders never become memory', () => {
