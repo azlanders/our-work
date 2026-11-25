@@ -97,7 +97,7 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
 export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS } = {}) {
   if (!hits?.length) return ''
   const head = Number.isFinite(now) ? `【记忆·相关的存档原文｜现在 ${clockText(now, tzOffsetMs)}】` : '【记忆·相关的存档原文】'
-  const tail = '（用法：只引用上面逐字出现过的事实，别补这里没有的日期、地点、形容词、现状或后续打算。同一件事有新旧版本或改口时以日期最新的说法为准，旧版细节别混进新版；没有作废说明的矛盾说法就两个都列、并说明记录不足无法确定。过去状态别直接当成现在仍是这样。这里确实没有就说记不清，无关就忽略。）'
+  const tail = '（用法：只引用上面逐字出现过的事实，别补这里没有的日期、地点、现状或后续打算。同一件事出现两种矛盾说法就两个都列、并说明记录不足无法确定；过去状态别直接当成现在仍是这样。这里确实没有就说记不清，无关就忽略。）'
   const reserve = head.length + tail.length + 4
   const bodyBudget = Math.max(0, maxChars - reserve)
   if (bodyBudget < 20) return ''
