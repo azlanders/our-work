@@ -21,7 +21,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
 import { DEFAULTS, engineConfig, readSettings } from "./settings.js";
-import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, isToolFailure, jobCutDecision, keptToolRounds, lastCutReject, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, scrubCardText, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, isToolFailure, jobCutDecision, keptToolRounds, keepRoundsWithinBudget, lastCutReject, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, scrubCardText, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, contentHash, PRUNE_MARKER, rawExcerptText, rawName, readRawToolResult, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   ensureShadowDir,
@@ -602,7 +602,17 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
     });
   }
   const floorVisible = visible.reduce((found, item, index) => item.checkpoint ? index : found, -1);
-  const rounds = keptToolRounds(visible, settings.keepRounds, floorVisible);
+  const rounds = keepRoundsWithinBudget(
+    keptToolRounds(visible, settings.keepRounds, floorVisible),
+    settings.keepRoundTokens,
+    (round) => {
+      let total = 0;
+      for (let index = round.start; index <= round.end; index += 1) {
+        total += priced[visible[index].index]?.tokens || 0;
+      }
+      return total;
+    },
+  );
   const newestLong = [...finishedToolRounds(visible)].reverse().find((round) => roundHasLongRead(visible, round));
   const span = rounds.length ? { start: rounds[0].start, end: rounds.at(-1).end } : null;
   const cutEnd = span ? reservedCutEnd(visible[span.start].index, first) : null;

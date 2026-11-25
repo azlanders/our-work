@@ -6,7 +6,7 @@ if (!target) {
   console.error('用法: node t-cut-drain.mjs <plan.js 路径>')
   process.exit(2)
 }
-const { selectCutIndexes } = await import(pathToFileURL(target).href)
+const { selectCutIndexes, keepRoundsWithinBudget } = await import(pathToFileURL(target).href)
 
 // 1. 纯聊天尾巴（walkOffTail 回归）
 const chat = [{ type: 'system', tokens: 4000 }]
@@ -53,5 +53,12 @@ assert.equal(selectCutIndexes([], {
   engine: 'cloud', chunkMin: 1000, chunkMax: 32000, pointerMax: 32000,
   maxEnd: -1, totalTokens: 0, drain: true, urgentTokens: 48000,
 }), null)
+
+// 5. 保留工具轮也要受 token 预算约束，不能因为 keepRounds=3 把大尾巴锁死
+const rounds = [{ id: 'old', tokens: 3000 }, { id: 'mid', tokens: 5000 }, { id: 'new', tokens: 8000 }]
+const kept = keepRoundsWithinBudget(rounds, 9000, (round) => round.tokens)
+assert.deepEqual(kept.map((round) => round.id), ['new'], '只保留装得进 9000 预算的最新轮')
+assert.equal(keepRoundsWithinBudget(rounds, 20000, (round) => round.tokens).length, 3, '预算够时保留全部')
+assert.equal(keepRoundsWithinBudget(rounds, 1, (round) => round.tokens).length, 1, '至少保留最新一轮')
 
 console.log('cut 逻辑 ok（含工具轮配对、越界防护与边界检查）')

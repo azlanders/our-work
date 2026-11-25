@@ -548,6 +548,22 @@ export function keptToolRounds(events, limit = 3, afterIndex = -1) {
   return rounds.slice(-count);
 }
 
+// 最近几轮工具结果保留原文，但不能让「保留轮数」变成无上限的 token 洞。
+// 从最新一轮往前装，装到预算为止；至少保留最新一轮，避免把当前上下文切空。
+export function keepRoundsWithinBudget(rounds, budget, costOf) {
+  const cap = Number.isFinite(budget) && budget > 0 ? budget : Infinity;
+  const kept = [];
+  let total = 0;
+  for (let index = (rounds || []).length - 1; index >= 0; index -= 1) {
+    const round = rounds[index];
+    const cost = Math.max(0, Number(costOf?.(round)) || 0);
+    if (kept.length > 0 && total + cost > cap) break;
+    kept.unshift(round);
+    total += cost;
+  }
+  return kept;
+}
+
 export function hostOf(baseURL) {
   const raw = String(baseURL || "").trim();
   if (!raw) return "";
