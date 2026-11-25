@@ -134,7 +134,9 @@ export function search(
   if (timeWin) {
     let added = 0
     for (let i = records.length - 1; i >= 0 && added < 64; i -= 1) {
-      const ts = records[i].eventAt || records[i].createdAt || 0
+      const r = records[i]
+      if (scope && r.scope && r.scope !== scope) continue
+      const ts = r.eventAt || r.createdAt || 0
       if (ts >= timeWin.start && ts <= timeWin.end) {
         candidates.add(i)
         added += 1

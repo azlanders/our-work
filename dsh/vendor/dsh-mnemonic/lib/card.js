@@ -23,6 +23,12 @@ export function ymd(ts, tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
   return d.getUTCFullYear() + '-' + mmdd(ts, tzOffsetMs)
 }
 
+export function ymdWeekday(ts = Date.now(), tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
+  if (!Number.isFinite(ts)) return ''
+  const d = shiftedDate(ts, tzOffsetMs)
+  return `${ymd(ts, tzOffsetMs)} 周${'日一二三四五六'[d.getUTCDay()]}`
+}
+
 /** 「现在」的文字形式：给模型锚点做相对日期换算（「上周三」「三天前」）。 */
 export function clockText(now = Date.now(), tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
   const d = shiftedDate(now, tzOffsetMs)
@@ -33,6 +39,11 @@ export function clockText(now = Date.now(), tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
 
 export function renderClock(now = Date.now(), tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
   return `【现在】${clockText(now, tzOffsetMs)}`
+}
+
+/** 系统提示词只挂日期与星期（24h 不变），保住 Prompt Prefix KV Cache；分钟级时间由用户侧回忆块按需提供。 */
+export function renderClockDate(now = Date.now(), tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
+  return `【今天】${ymdWeekday(now, tzOffsetMs)}`
 }
 
 // 常驻卡只放「像事实」的条目：显式存下的、或重要度高的。

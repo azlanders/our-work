@@ -40,9 +40,9 @@ const INJECTION_RE = /(?:忽略(?:以上|上面|之前|所有|全部|先前)+(?:
 const NOISE_ONLY_RE = /^(?:[\s\p{P}\p{S}]+|https?:\/\/\S+|(?:哈哈|呵呵|嗯+|哦+|好[的呀啦]?|行|ok|好的|收到|谢谢|晚安|早安|在吗|\?+|？+))$/iu
 
 /** 识别明显提示词注入或无信息量水话，避免自动归档污染长期记忆库。 */
-export function isLowValueOrInjection(text) {
+export function isLowValueOrInjection(text, { minLen = 6 } = {}) {
   const s = String(text || '').trim()
-  if (s.length < 6) return true
+  if (s.length < minLen) return true
   if (INJECTION_RE.test(s)) return true
   if (NOISE_ONLY_RE.test(s)) return true
   return false

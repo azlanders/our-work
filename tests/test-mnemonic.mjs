@@ -667,3 +667,211 @@ test('index generation sync: ensureIndex rebuilds cleanly after Store.compact() 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+import { renderClockDate } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
+
+test('P0 scope isolation end-to-end: apply wires scope into recall, pre-step, and omits scoped facts from system card', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-scope-e2e-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    const registered = {}
+    let cardProvider = null
+    let preStep = null
+    const ctx = {
+      inject(deps, fn) {
+        if (deps.includes('tools')) {
+          fn({ effect(cb) { cb() }, tools: { register(def) { registered[def.name] = def; return () => {} } } })
+        }
+        if (deps.includes('systemPrompt')) {
+          fn({
+            effect(cb) { cb() },
+            systemPrompt: {
+              section(def) {
+                if (def.name === 'dsh-mnemonic:card') cardProvider = def.text
+                return () => {}
+              },
+            },
+          })
+        }
+      },
+      on(ev, fn) { if (ev === 'agent/pre-step') preStep = fn },
+      get() { return null },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, queryRewrite: false, autoArchive: false })
+    try {
+      await registered.mem_save.execute(
+        { text: '私聊绝密：门禁备份密码是 7391', keywords: ['门禁', '密码'], importance: 0.95 },
+        { agent: { session: { id: 'private:user1' } } },
+      )
+      await registered.mem_save.execute(
+        { text: '全员通用公告：周五下午三点例会', keywords: ['例会'], importance: 0.9 },
+      )
+
+      // 群聊 mem_recall 不能召回私聊记忆
+      const grpRecall = await registered.mem_recall.execute(
+        { query: '门禁密码是多少' },
+        { agent: { session: { id: 'group:100' } } },
+      )
+      assert.equal(grpRecall.hits, 0, 'group mem_recall must not leak private scoped memory')
+
+      // 私聊 mem_recall 可以召回本私聊记忆
+      const prvRecall = await registered.mem_recall.execute(
+        { query: '门禁密码是多少' },
+        { agent: { session: { id: 'private:user1' } } },
+      )
+      assert.equal(prvRecall.hits, 1)
+      assert.match(prvRecall.text, /7391/)
+
+      // 群聊 pre-step 不能注入私聊记忆
+      const dGroup = await preStep(
+        { agent: { session: { id: 'group:100' } } },
+        async () => ({ kind: 'enter', messages: [{ id: 'g-u1', role: 'user', content: '门禁密码是多少来着' }] }),
+      )
+      assert.equal(dGroup.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 0)
+
+      // 常驻卡绝不能包含带 scope 的私聊事实，只能放全局无 scope 记录
+      const cardText = cardProvider()
+      assert.doesNotMatch(cardText, /7391/, 'global system card must never leak scoped private records')
+      assert.match(cardText, /例会/, 'unscoped global fact stays visible on system card')
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0 Store scoped byText: identical text in different scopes stays independent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-scoped-store-'))
+  try {
+    const file = join(dir, 'memories.jsonl')
+    const s = new Store(file).load()
+    const rA = s.add({ text: '周五去南滨路吃老火锅', keywords: ['火锅'], scope: 'group:A' })
+    const rB = s.add({ text: '周五去南滨路吃老火锅', keywords: ['火锅'], scope: 'private:B' })
+    assert.notEqual(rA.id, rB.id, 'different scopes must not merge into one record')
+    assert.equal(s.records.length, 2)
+    assert.equal(s.findByText('周五去南滨路吃老火锅', 'group:A')?.id, rA.id)
+    assert.equal(s.findByText('周五去南滨路吃老火锅', 'private:B')?.id, rB.id)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0 per-scope lastInject & pre-step tool-loop guard & short Chinese query', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-prestep-p0-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    const s = new Store(storePath).load()
+    s.add({ text: '小满是我大学室友，现在在成都做后端工程师', keywords: ['小满'], importance: 0.9 })
+    s.persist()
+
+    let rewriteCalls = 0
+    let preStep = null
+    const ctx = {
+      inject() {},
+      on(ev, fn) { if (ev === 'agent/pre-step') preStep = fn },
+      get(k) {
+        if (k === 'llm') return {
+          async *stream() {
+            rewriteCalls += 1
+            yield { type: 'text-delta', text: '小满 室友' }
+          },
+        }
+        if (k === 'defaultModel') return { currentSelection: () => ({ provider: 'mock', model: 'flash' }) }
+        return null
+      },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, queryRewrite: true, autoArchive: false })
+    try {
+      // 1. 4 字短中文问句「小满是谁」必须触发召回（不被 length < 6 吞掉）
+      const dA = await preStep(
+        { agent: { session: { id: 'private:A' } } },
+        async () => ({ kind: 'enter', messages: [{ id: 'u-short-a', role: 'user', content: '小满是谁' }] }),
+      )
+      assert.equal(dA.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 1, '4-char query must trigger recall')
+
+      // 2. B 会话紧接着问同一条全局记忆，不能被 A 会话的 lastInject 误抑制
+      const dB = await preStep(
+        { agent: { session: { id: 'private:B' } } },
+        async () => ({ kind: 'enter', messages: [{ id: 'u-short-b', role: 'user', content: '小满是谁' }] }),
+      )
+      assert.equal(dB.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 1, 'scope B must not be suppressed by scope A lastInject')
+
+      // 3. 首步未注入回忆块但助手已发起 tool_call 时，工具续步不得重触发 rewriteQueryTerms 或插队
+      const beforeToolCalls = rewriteCalls
+      const toolLoopMsgs = [
+        { id: 'u-tool-1', role: 'user', content: '帮我查小满是谁然后跑脚本' },
+        { id: 'a-tool-1', role: 'assistant', content: [{ type: 'tool_use', id: 'tc1', name: 'bash', input: {} }] },
+        { id: 't-tool-1', role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'done' }] },
+      ]
+      const dTool = await preStep(
+        { agent: { session: { id: 'private:C' } } },
+        async () => ({ kind: 'enter', messages: toolLoopMsgs }),
+      )
+      assert.equal(rewriteCalls, beforeToolCalls, 'tool continuation step must not re-run rewriteQueryTerms')
+      assert.equal(dTool.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 0)
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0 clock stability, abort signal on timeout, and mem_save empty-text supersedes guard', async () => {
+  // 1. renderClockDate 在同日 09:00 与 23:59 输出完全一致，保住 24h KV cache
+  const am = Date.parse('2026-11-25T09:00:00+08:00')
+  const pm = Date.parse('2026-11-25T23:59:00+08:00')
+  assert.equal(renderClockDate(am), renderClockDate(pm))
+  assert.match(renderClockDate(am), /^【今天】2026-11-25 周三$/)
+
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-p0-guards-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    const registered = {}
+    let preStep = null
+    let sawSignal = null
+    const ctx = {
+      inject(deps, fn) {
+        if (deps.includes('tools')) {
+          fn({ effect(cb) { cb() }, tools: { register(def) { registered[def.name] = def; return () => {} } } })
+        }
+      },
+      on(ev, fn) { if (ev === 'agent/pre-step') preStep = fn },
+      get(k) {
+        if (k === 'llm') return {
+          stream(opts) {
+            sawSignal = opts.signal
+            return (async function* () {
+              await new Promise((r) => setTimeout(r, 1000))
+              yield { type: 'text-delta', text: '延迟' }
+            })()
+          },
+        }
+        if (k === 'defaultModel') return { currentSelection: () => ({ provider: 'mock', model: 'flash' }) }
+        return null
+      },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, queryRewrite: true, rewriteTimeoutMs: 40, autoArchive: false })
+    try {
+      const saved = await registered.mem_save.execute({ text: '重要配置端口 3081', keywords: ['端口'] })
+      assert.equal(saved.ok, true)
+
+      // 2. supersedes 搭配空白正文时，绝不能误删旧记录
+      const badReplace = await registered.mem_save.execute({ text: '   ', supersedes: saved.id })
+      assert.equal(badReplace.ok, false)
+      assert.equal(badReplace.total, 1, 'old record must survive empty replacement text')
+
+      // 3. rewriteQueryTerms 超时必须 abort signal
+      await preStep({}, async () => ({ kind: 'enter', messages: [{ id: 'u-ab', role: 'user', content: '查一下端口配置是多少' }] }))
+      assert.ok(sawSignal && sawSignal.aborted === true, 'timeout must abort upstream llm.stream signal')
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

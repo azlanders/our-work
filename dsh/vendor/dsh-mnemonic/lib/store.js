@@ -9,6 +9,10 @@ function uniqList(arr, max) {
   return [...new Set((arr || []).map((x) => String(x).trim()).filter(Boolean))].slice(0, max)
 }
 
+function textKey(text, scope = '') {
+  return `${scope || ''}\0${text}`
+}
+
 export class Store {
   constructor(file, { maxRecords = 5000 } = {}) {
     this.file = file
@@ -46,7 +50,7 @@ export class Store {
           records.push(rec)
         }
         this.byId.set(rec.id, rec)
-        this.byText.set(rec.text, rec)
+        this.byText.set(textKey(rec.text, rec.scope), rec)
       } catch {
         // 坏行跳过：一行坏不能带走整库。
       }
@@ -58,8 +62,8 @@ export class Store {
   }
 
   /**
-   * 同一段正文只存一次（按正文精确匹配 + 防哈希碰撞）；
-   * 返回 { rec, isNew, metaChanged } 便于调用方区分增量建索引还是重建索引。
+   * 同一段正文只存一次（按 scope + 正文精确匹配 + 防哈希碰撞）；
+   * 返回匹配记录（已合并元数据）或新插入记录。
    */
   add({ text, keywords = [], tags = [], importance = 0.5, eventAt = null, source = null, scope = '' }) {
     const clean = sanitizeMemoryText(text)
@@ -67,8 +71,8 @@ export class Store {
     const nextImp = Math.min(1, Math.max(0.05, Number(importance) || 0.5))
     const parsedEventAt = parseEventTimestamp(eventAt)
 
-    // 先按正文精确查找（兼容旧版 hash32 ID 与新版 hashId ID），彻底杜绝哈希碰撞误合并
-    const existing = this.byText.get(clean)
+    // 先按 scope + 正文精确查找，彻底杜绝跨会话吞记录与哈希碰撞误合并
+    const existing = this.byText.get(textKey(clean, scope))
     if (existing) {
       let metaChanged = false
       existing.uses = (existing.uses || 1) + 1
@@ -108,8 +112,8 @@ export class Store {
       return existing
     }
 
-    // 生成无碰撞 ID（若极罕见碰撞则追加后缀）
-    let id = hashId(clean)
+    // 生成无碰撞 ID（带 scope 区分避免跨会话 ID 冲突；若极罕见碰撞则追加后缀）
+    let id = hashId(scope ? `${scope}\0${clean}` : clean)
     if (this.byId.has(id)) {
       let n = 1
       while (this.byId.has(`${id}_${n}`)) n += 1
@@ -132,7 +136,7 @@ export class Store {
     }
     this.records.push(rec)
     this.byId.set(id, rec)
-    this.byText.set(clean, rec)
+    this.byText.set(textKey(clean, rec.scope), rec)
     this.appendLine(rec)
 
     if (this.maxRecords > 0 && this.records.length > this.maxRecords) {
@@ -163,7 +167,7 @@ export class Store {
     this.byText.clear()
     for (const r of this.records) {
       this.byId.set(r.id, r)
-      this.byText.set(r.text, r)
+      this.byText.set(textKey(r.text, r.scope), r)
     }
     const evicted = before - this.records.length
     if (evicted > 0) {
@@ -177,7 +181,7 @@ export class Store {
 
 
   /**
-   * 周期性归并陈旧低价值 auto 记忆：把超过 maxAgeDays 天、同日内 >= minGroup 条的低分 auto 归档
+   * 周期性归并陈旧低价值 auto 记忆：把超过 maxAgeDays 天、同 scope 同日内 >= minGroup 条的低分 auto 归档
    * 合并成一条按日摘要，绝不触碰 tool 记忆或高重要度（>=0.6）记忆。
    */
   consolidateOldAuto({ maxAgeDays = 30, minGroup = 3, maxDigestChars = 360, now = Date.now() } = {}) {
@@ -189,11 +193,12 @@ export class Store {
       const ts = r.eventAt || r.createdAt || now
       if (ts > cutoff) continue
       const dayKey = new Date(ts + 8 * 3600000).toISOString().slice(0, 10)
-      if (!buckets.has(dayKey)) buckets.set(dayKey, [])
-      buckets.get(dayKey).push(r)
+      const bucketKey = `${r.scope || ''}|${dayKey}`
+      if (!buckets.has(bucketKey)) buckets.set(bucketKey, { dayKey, scope: r.scope || '', items: [] })
+      buckets.get(bucketKey).items.push(r)
     }
     let mergedCount = 0
-    for (const [dayKey, items] of buckets.entries()) {
+    for (const { dayKey, scope, items } of buckets.values()) {
       if (items.length < minGroup) continue
       const snippets = items.map((r) => r.text.replace(/\s+/g, ' ').slice(0, 70))
       let digest = `[${dayKey} 对话摘要] ` + snippets.join('；')
@@ -203,7 +208,8 @@ export class Store {
       const oldestTs = Math.min(...items.map((r) => r.eventAt || r.createdAt || now))
       for (const r of items) {
         this.byId.delete(r.id)
-        if (this.byText.get(r.text)?.id === r.id) this.byText.delete(r.text)
+        const tk = textKey(r.text, r.scope)
+        if (this.byText.get(tk)?.id === r.id) this.byText.delete(tk)
       }
       const rmSet = new Set(items.map((r) => r.id))
       this.records = this.records.filter((r) => !rmSet.has(r.id))
@@ -214,6 +220,7 @@ export class Store {
         importance: 0.4,
         eventAt: oldestTs,
         source: { kind: 'auto-digest', merged: items.length },
+        scope,
       })
       mergedCount += items.length
     }
@@ -226,11 +233,16 @@ export class Store {
     return mergedCount
   }
 
+  findByText(text, scope = '') {
+    return this.byText.get(textKey(text, scope)) || null
+  }
+
   remove(id) {
     const rec = this.byId.get(id)
     if (!rec) return false
     this.byId.delete(id)
-    if (this.byText.get(rec.text)?.id === id) this.byText.delete(rec.text)
+    const tk = textKey(rec.text, rec.scope)
+    if (this.byText.get(tk)?.id === id) this.byText.delete(tk)
     this.records = this.records.filter((r) => r.id !== id)
     this.touched = true
     this.dirty = true

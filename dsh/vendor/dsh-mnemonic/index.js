@@ -12,8 +12,8 @@ import { Store, defaultStorePath } from './lib/store.js'
 import { buildIndex, indexRecord, search } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
 import { loadAliasGroups, expandAliases } from './lib/aliases.js'
-import { renderCard, renderRecallBlock, renderClock, ymd } from './lib/card.js'
-import { messageText, roleOf, clip, hash32, isLowValueOrInjection, sanitizeMemoryText } from './lib/text.js'
+import { renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
+import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, sanitizeMemoryText } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -80,7 +80,7 @@ export function apply(ctx, config = {}) {
   let indexedCount = store.records.length
   let indexedGen = store.generation
   let indexDirty = false
-  let lastInject = { at: 0, sig: '' }
+  const lastInjectByScope = new Map()
   let queryCount = 0
   let totalQueryMs = 0
   const archivedMsgIds = new Set()
@@ -103,7 +103,7 @@ export function apply(ctx, config = {}) {
     return index
   }
 
-  const recall = (query, limit = cfg.limit, pool = limit, { expandedTerms = '', excludeIds = null, nowTs = Date.now() } = {}) => {
+  const recall = (query, limit = cfg.limit, pool = limit, { expandedTerms = '', excludeIds = null, scope = '', nowTs = Date.now() } = {}) => {
     const t0 = performance.now()
     const minScore = effectiveMinScore(store.records.length, cfg.minScore)
     const idx = ensureIndex()
@@ -115,6 +115,7 @@ export function apply(ctx, config = {}) {
       expandedTerms,
       aliasTerms,
       excludeIds,
+      scope,
       now: nowTs,
     })
     queryCount += 1
@@ -139,6 +140,7 @@ export function apply(ctx, config = {}) {
 
   const streamText = async (llm, sel, system, user, maxTokens, timeoutMs) => {
     let timer = null
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
     const run = async () => {
       let out = ''
       const stream = llm.stream({
@@ -148,6 +150,7 @@ export function apply(ctx, config = {}) {
         messages: [{ role: 'user', content: user }],
         temperature: 0,
         maxTokens,
+        ...(ac ? { signal: ac.signal } : {}),
       })
       for await (const chunk of stream) {
         if (chunk?.type === 'text-delta') out += chunk.text
@@ -159,7 +162,10 @@ export function apply(ctx, config = {}) {
       return await Promise.race([
         run(),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs)
+          timer = setTimeout(() => {
+            ac?.abort()
+            reject(new Error(`timeout after ${timeoutMs}ms`))
+          }, timeoutMs)
           timer.unref?.()
         }),
       ])
@@ -170,19 +176,22 @@ export function apply(ctx, config = {}) {
 
   async function rewriteQueryTerms(query) {
     if (!cfg.queryRewrite) return ''
-    const cacheKey = query.trim()
-    const cached = rewriteCache.get(cacheKey)
+    const clipped = clip(query, 300)
+    if (!clipped) return ''
+    const cached = rewriteCache.get(clipped)
     const ts = Date.now()
     if (cached && ts - cached.at < REWRITE_TTL_MS) return cached.words
     const svc = llmAndModel()
     if (!svc) return ''
     try {
-      const words = (await streamText(svc.llm, svc.sel, REWRITE_SYS, query, 120, cfg.rewriteTimeoutMs)).replace(/\n+/g, ' ').trim()
-      if (rewriteCache.size >= 64) {
-        const firstKey = rewriteCache.keys().next().value
-        if (firstKey !== undefined) rewriteCache.delete(firstKey)
+      const words = (await streamText(svc.llm, svc.sel, REWRITE_SYS, clipped, 120, cfg.rewriteTimeoutMs)).replace(/\n+/g, ' ').trim()
+      if (words) {
+        if (rewriteCache.size >= 64) {
+          const firstKey = rewriteCache.keys().next().value
+          if (firstKey !== undefined) rewriteCache.delete(firstKey)
+        }
+        rewriteCache.set(clipped, { words, at: ts })
       }
-      rewriteCache.set(cacheKey, { words, at: ts })
       return words
     } catch (error) {
       try { ctx.logger?.warn?.(`dsh-mnemonic: 查询改写失败，用原句: ${error?.message || error}`) } catch (_err) { console.error('[mnemonic]', _err?.message || _err) }
@@ -243,14 +252,16 @@ export function apply(ctx, config = {}) {
     const userMsg = messages[userIndex]
     const user = messageText(userMsg) || ''
     if (isLowValueOrInjection(user)) return null
-    const prevAssistant = messageText(messages[asstIndex]) || ''
+    const asstMsg = messages[asstIndex]
+    const prevAssistant = messageText(asstMsg) || ''
     const cleanUser = sanitizeMemoryText(clip(user, cfg.archiveChars))
     const cleanAsst = prevAssistant ? sanitizeMemoryText(clip(prevAssistant, cfg.archiveChars)) : ''
     const text = cleanAsst ? `用户：${cleanUser}\n我：${cleanAsst}` : `用户：${cleanUser}`
 
-    const msgKey = userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(user)}`
+    const asstId = asstMsg?.id || hash32(prevAssistant)
+    const msgKey = `${scope || '__global__'}|${userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(user)}`}|${asstId}`
     if (archivedMsgIds.has(msgKey)) {
-      return store.byText.get(text)?.id || null
+      return store.findByText(text, scope)?.id || null
     }
     if (archivedMsgIds.size >= 128) {
       const oldest = archivedMsgIds.values().next().value
@@ -258,7 +269,8 @@ export function apply(ctx, config = {}) {
     }
     archivedMsgIds.add(msgKey)
 
-    const rec = store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: Date.now(), source: { kind: 'auto' }, scope })
+    const msgTs = parseEventTimestamp(asstMsg?.createdAt ?? asstMsg?.timestamp ?? userMsg?.createdAt ?? userMsg?.timestamp) || Date.now()
+    const rec = store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: msgTs, source: { kind: 'auto' }, scope })
     return rec?.id || null
   }
 
@@ -292,6 +304,9 @@ export function apply(ctx, config = {}) {
           },
         },
         async execute(args, exec) {
+          if (!sanitizeMemoryText(args?.text)) {
+            return { ok: false, id: '', total: store.records.length, text: '没写进去：正文是空的。' }
+          }
           let replaced = false
           if (args?.supersedes && typeof args.supersedes === 'string') {
             replaced = store.remove(args.supersedes.trim())
@@ -307,8 +322,10 @@ export function apply(ctx, config = {}) {
             scope: sessionScope(exec?.agent),
           })
           if (!rec) return { ok: false, id: '', total: store.records.length, text: '没写进去：正文是空的。' }
-          if (replaced) store.flush()
-          indexDirty = true
+          if (replaced) {
+            store.flush()
+            indexDirty = true
+          }
           const extra = replaced ? `（已替换旧条 ${args.supersedes}）` : ''
           return { ok: true, id: rec.id, total: store.records.length, text: `已存 ${rec.id}${extra}（库内 ${store.records.length} 条）。` }
         },
@@ -360,13 +377,13 @@ export function apply(ctx, config = {}) {
       name: 'dsh-mnemonic:clock',
       order: 59,
       interpolate: false,
-      text: () => renderClock(),
+      text: () => renderClockDate(),
     }), 'dsh-mnemonic: clock')
     sctx.effect(() => sctx.systemPrompt.section({
       name: 'dsh-mnemonic:card',
       order: 60,
       interpolate: false,
-      text: () => renderCard(store.records, { maxChars: cfg.cardChars }),
+      text: () => renderCard(store.records.filter((r) => !r.scope), { maxChars: cfg.cardChars }),
     }), 'dsh-mnemonic: card')
   })
 
@@ -379,11 +396,16 @@ export function apply(ctx, config = {}) {
       const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserMessage(m) ? i : found), -1)
       if (lastUserIndex < 0) return decision
+      // 同一轮工具调用续步（最后一条真人消息后已有助手消息）不再重跑改写与回忆插队，保住历史与 KV cache
+      if (messages.slice(lastUserIndex + 1).some((m) => roleOf(m) === 'assistant')) return decision
       const query = messageText(messages[lastUserIndex])
       const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex, scope) : null
       if (messages[lastUserIndex + 1]?.source?.kind === 'plugin:dsh-mnemonic') return decision
-      if (query.trim().length < 6) return decision
+      const qTrim = query.trim()
+      if (qTrim.length < 3 || isLowValueOrInjection(qTrim, { minLen: 3 })) return decision
       const ts = Date.now()
+      const scopeKey = scope || '__global__'
+      const lastInject = lastInjectByScope.get(scopeKey) || { at: 0, sig: '' }
       if (cfg.injectCooldownMs && ts - lastInject.at < cfg.injectCooldownMs) return decision
       const expandedTerms = await rewriteQueryTerms(query)
       const excludeIds = currentTurnId ? new Set([currentTurnId]) : null
@@ -399,7 +421,11 @@ export function apply(ctx, config = {}) {
       const message = await memoryMessage(block)
       if (!message) return decision
       messages.splice(lastUserIndex + 1, 0, message)
-      lastInject = { at: ts, sig }
+      if (lastInjectByScope.size >= 256 && !lastInjectByScope.has(scopeKey)) {
+        const oldest = lastInjectByScope.keys().next().value
+        if (oldest !== undefined) lastInjectByScope.delete(oldest)
+      }
+      lastInjectByScope.set(scopeKey, { at: ts, sig })
       for (const h of hits) store.touch(h.rec.id)
       return { ...decision, messages }
     } catch (error) {
