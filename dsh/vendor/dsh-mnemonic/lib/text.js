@@ -62,6 +62,39 @@ export function isDegradedAssistantText(text) {
   return s.length <= DEGRADED_MARK_MAX_LEN && DEGRADED_MARK_RE.test(s)
 }
 
+// 一个问题要多个点（「还欠几件」「哪些」「分别」「要注意什么」）时，4 条 / 900 字
+// 往往只够一半答案——P01 实测 900/4 有 3 道只答半个。命中这里的问句才放大预算。
+const MULTI_NEED_RE = /几件|哪些|分别|各自|几个|都(?:是|有|要|得)|注意什么|要带|需要带|带什么|列一下|列出|还有(?:什么|哪些)/
+
+export function isMultiNeedQuery(text) {
+  return MULTI_NEED_RE.test(String(text || ''))
+}
+
+// 原话和问法常常没有一个共同词：「我叫沈知夏，24」与「全名咋写」「多大来着」。
+// 写入时按句型补属性词，只进检索权重（keywords），不改变注入给模型的原文。
+const ATTRIBUTE_RULES = [
+  [/我叫|我的名字|我名字|叫我/, ['名字', '姓名', '全名', '称呼', '自称']],
+  [/\d+\s*岁|我今年|周岁/, ['年龄', '多大', '几岁']],
+  [/生日|出生|农历|公历/, ['生日', '出生', '日期']],
+  [/过敏|忌口|一口不沾/, ['过敏', '忌口', '忌讳']],
+  [/上班|工作|职业|入职|客服/, ['工作', '职业', '单位']],
+  [/搬到|住在|住址|哪个城市/, ['住址', '城市', '家']],
+  [/手机号|电话|联系方式/, ['电话', '号码', '联系']],
+]
+const ATTRIBUTE_MAX = 12
+
+/** 从一段原话里抽出属性检索词（名字/年龄/生日/忌口/职业/住址/联系方式）。 */
+export function attributeKeywords(text, { max = ATTRIBUTE_MAX } = {}) {
+  const s = String(text || '')
+  if (!s) return []
+  const out = []
+  for (const [re, words] of ATTRIBUTE_RULES) {
+    if (!re.test(s)) continue
+    for (const w of words) if (!out.includes(w)) out.push(w)
+  }
+  return out.slice(0, max)
+}
+
 /**
  * 切词：中文走二元组（bigram）+ 单字兜底，英文/数字走整词。
  * 不引入任何分词依赖——记忆检索要的是召回，不是语言学。

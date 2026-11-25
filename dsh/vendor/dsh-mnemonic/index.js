@@ -13,7 +13,7 @@ import { buildIndex, indexRecord, search } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
 import { loadAliasGroups, expandAliases } from './lib/aliases.js'
 import { renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
-import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, sanitizeMemoryText } from './lib/text.js'
+import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, attributeKeywords, sanitizeMemoryText } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -68,6 +68,10 @@ export function apply(ctx, config = {}) {
     itemChars: Number(config.itemChars ?? 200),
     cardChars: Number(config.cardChars ?? 300),
     limit: Number(config.limit ?? 4),
+    // 多要点问句的放大档：只在 isMultiNeedQuery 命中时用，普通闲聊仍走上面的小预算。
+    multiInjectChars: Number(config.multiInjectChars ?? 1800),
+    multiItemChars: Number(config.multiItemChars ?? 260),
+    multiLimit: Number(config.multiLimit ?? 8),
     minScore: Number(config.minScore ?? 2.4),
     minHits: Number(config.minHits ?? 1),
     injectCooldownMs: Number(config.injectCooldownMs ?? 0),
@@ -205,21 +209,21 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  const RERANK_SYS = `你是记忆检索排序器。给定查询和编号候选记忆，选出与查询真正相关的最多 ${cfg.limit} 条，按相关度从高到低。只输出 JSON：{"picks":[序号,...]}。完全不相关的不要选，不要解释。`
-  async function rerank(query, hits) {
-    if (!cfg.rerank || hits.length <= cfg.limit) return hits.slice(0, cfg.limit)
+  const rerankSys = (cap) => `你是记忆检索排序器。给定查询和编号候选记忆，选出与查询真正相关的最多 ${cap} 条，按相关度从高到低。只输出 JSON：{"picks":[序号,...]}。完全不相关的不要选，不要解释。`
+  async function rerank(query, hits, cap = cfg.limit) {
+    if (!cfg.rerank || hits.length <= cap) return hits.slice(0, cap)
     const svc = llmAndModel()
-    if (!svc) return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
+    if (!svc) return diversify(hits, { limit: cap, gramsIndex: ensureIndex().grams })
     try {
       const lines = hits
-        .slice(0, cfg.rerankPool)
+        .slice(0, Math.max(cfg.rerankPool, cap * 3))
         .map((h, i) => `${i + 1}. ${String(h.rec.text).slice(0, 140).replace(/\s+/g, ' ')}`)
         .join('\n')
-      const out = await streamText(svc.llm, svc.sel, RERANK_SYS, `查询: ${query}\n候选:\n${lines}`, 200, cfg.rerankTimeoutMs)
+      const out = await streamText(svc.llm, svc.sel, rerankSys(cap), `查询: ${query}\n候选:\n${lines}`, 200, cfg.rerankTimeoutMs)
       const m = out.match(/\{[\s\S]*\}/)
-      if (!m) return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
+      if (!m) return diversify(hits, { limit: cap, gramsIndex: ensureIndex().grams })
       const picks = JSON.parse(m[0]).picks
-      if (!Array.isArray(picks)) return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
+      if (!Array.isArray(picks)) return diversify(hits, { limit: cap, gramsIndex: ensureIndex().grams })
       const out2 = []
       const seen = new Set()
       for (const p of picks) {
@@ -227,12 +231,12 @@ export function apply(ctx, config = {}) {
         if (!Number.isInteger(i) || i < 0 || i >= hits.length || seen.has(i)) continue
         seen.add(i)
         out2.push(hits[i])
-        if (out2.length >= cfg.limit) break
+        if (out2.length >= cap) break
       }
-      return out2.length ? out2 : diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
+      return out2.length ? out2 : diversify(hits, { limit: cap, gramsIndex: ensureIndex().grams })
     } catch (error) {
       try { ctx.logger?.warn?.(`dsh-mnemonic: 重排失败，回退去重顺序: ${error?.message || error}`) } catch (_err) { console.error('[mnemonic]', _err?.message || _err) }
-      return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
+      return diversify(hits, { limit: cap, gramsIndex: ensureIndex().grams })
     }
   }
 
@@ -277,7 +281,7 @@ export function apply(ctx, config = {}) {
     archivedMsgIds.add(msgKey)
 
     const msgTs = parseEventTimestamp(asstMsg?.createdAt ?? asstMsg?.timestamp ?? userMsg?.createdAt ?? userMsg?.timestamp) || Date.now()
-    const rec = store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: msgTs, source: { kind: 'auto' }, scope })
+    const rec = store.add({ text, keywords: attributeKeywords(text), tags: [], importance: 0.35, eventAt: msgTs, source: { kind: 'auto' }, scope })
     return rec?.id || null
   }
 
@@ -321,7 +325,7 @@ export function apply(ctx, config = {}) {
           }
           const rec = store.add({
             text: args?.text,
-            keywords: args?.keywords || [],
+            keywords: [...new Set([...(Array.isArray(args?.keywords) ? args.keywords : []), ...attributeKeywords(args?.text)])],
             tags: args?.tags || [],
             importance: args?.importance ?? 0.5,
             eventAt: args?.eventAt ?? null,
@@ -416,17 +420,20 @@ export function apply(ctx, config = {}) {
       if (cfg.injectCooldownMs && ts - lastInject.at < cfg.injectCooldownMs) return decision
       const expandedTerms = await rewriteQueryTerms(query)
       const excludeIds = currentTurnId ? new Set([currentTurnId]) : null
-      const pool = recall(query, cfg.limit, cfg.rerankPool, { expandedTerms, excludeIds, nowTs: ts, scope })
+      const budget = isMultiNeedQuery(qTrim)
+        ? { limit: cfg.multiLimit, inject: cfg.multiInjectChars, item: cfg.multiItemChars }
+        : { limit: cfg.limit, inject: cfg.injectChars, item: cfg.itemChars }
+      const pool = recall(query, budget.limit, Math.max(cfg.rerankPool, budget.limit * 3), { expandedTerms, excludeIds, nowTs: ts, scope })
       const hits = cfg.rerank
-        ? await rerank(expandedTerms ? `${query} ${expandedTerms}` : query, pool)
-        : diversify(pool, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
+        ? await rerank(expandedTerms ? `${query} ${expandedTerms}` : query, pool, budget.limit)
+        : diversify(pool, { limit: budget.limit, gramsIndex: ensureIndex().grams })
       if (!hits.length) return decision
       const sig = hits.map((h) => h.rec.id).join(',')
       // 2026-11-25：原来只看 120s + sig，宿主不持久化临时注入消息或上下文裁剪后，连续追问会被静默吞掉回忆；
       // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
       const hasPrevInjectInWindow = messages.some(isMnemonicRecallMessage)
       if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
-      const block = renderRecallBlock(hits, { maxChars: cfg.injectChars, itemChars: cfg.itemChars, now: ts })
+      const block = renderRecallBlock(hits, { maxChars: budget.inject, itemChars: budget.item, now: ts })
       if (!block) return decision
       const message = await memoryMessage(block)
       if (!message) return decision
