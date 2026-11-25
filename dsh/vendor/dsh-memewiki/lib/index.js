@@ -1,3 +1,19 @@
+import { mkdirSync as _atomicMkdirSync, renameSync as _atomicRenameSync, unlinkSync as _atomicUnlinkSync, writeFileSync as _atomicWriteSync } from 'node:fs'
+import { dirname as _atomicDirname } from 'node:path'
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 /**
  * dsh-memewiki —— 梗百科（移植自 AstrBot 的 astrbot_plugin_memewiki）
  *
@@ -230,7 +246,7 @@ function 写配置(patch) {
       : (typeof 当前.联系方式 === 'string' ? 当前.联系方式 : ''),
   }
   try {
-    writeFileSync(配置文件, JSON.stringify(下一个, null, 2), 'utf8')
+    _atomicWriteFileSync(配置文件, JSON.stringify(下一个, null, 2), 'utf8')
   } catch (e) {
     自检('写配置失败：' + (e && e.message))
   }
@@ -260,7 +276,7 @@ function 读反馈() {
 
 function 写反馈(数据) {
   try {
-    writeFileSync(反馈文件, JSON.stringify(数据, null, 2), 'utf8')
+    _atomicWriteFileSync(反馈文件, JSON.stringify(数据, null, 2), 'utf8')
   } catch (e) { 自检('写反馈文件失败：' + (e && e.message)) }
 }
 

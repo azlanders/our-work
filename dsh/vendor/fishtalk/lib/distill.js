@@ -1,3 +1,19 @@
+const { mkdirSync: _atomicMkdirSync, renameSync: _atomicRenameSync, unlinkSync: _atomicUnlinkSync, writeFileSync: _atomicWriteSync } = require('node:fs')
+const { dirname: _atomicDirname } = require('node:path')
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 // 蒸馏：把一堆语料提炼成一份小小的「文风包」。v1 全用规则统计，不调模型。
 'use strict'
 
@@ -175,8 +191,8 @@ function run(opts = {}) {
     fishReasons: Object.fromEntries(fishy.map((x) => [x.id, x.reasons])), // 控制台「误判放回」用
   }
   store.ensure()
-  fs.writeFileSync(store.P.pack, JSON.stringify(pack, null, 2))
-  fs.writeFileSync(store.P.packMd, render(pack))
+  _atomicWriteFileSync(store.P.pack, JSON.stringify(pack, null, 2))
+  _atomicWriteFileSync(store.P.packMd, render(pack))
   return pack
 }
 

@@ -1,3 +1,19 @@
+const { mkdirSync: _atomicMkdirSync, renameSync: _atomicRenameSync, unlinkSync: _atomicUnlinkSync, writeFileSync: _atomicWriteSync } = require('node:fs')
+const { dirname: _atomicDirname } = require('node:path')
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 // 0.3：比统计更深的两样东西，工具本身仍然不调模型。
 // like：按话题/要回的那条评论，找语料里最像的几条真人发言当现场范例。
 // 打法：工具挑一批有代表性的语料 + 一份固定提纲，交给 agent 自己读、自己写一页《打法》，存回来，pack 时一起读。
@@ -316,10 +332,10 @@ function save(text, opts = {}) {
   const all = readPlaybooks()
   const overwrote = !!all[key]
   store.ensure()
-  if (overwrote) fs.writeFileSync(PLAYBOOKS.replace(/\.json$/, '.bak.json'), JSON.stringify({ [key]: all[key] }, null, 2))
+  if (overwrote) _atomicWriteFileSync(PLAYBOOKS.replace(/\.json$/, '.bak.json'), JSON.stringify({ [key]: all[key] }, null, 2))
   const made = require('./distill').localTime()
   all[key] = { text: t, made, basedOn: inScene(humanItems(), scene).length }
-  fs.writeFileSync(PLAYBOOKS, JSON.stringify(all, null, 2))
+  _atomicWriteFileSync(PLAYBOOKS, JSON.stringify(all, null, 2))
   const chars = [...t.replace(/[「“"][^」”"]*[」”"]/g, '')].length
   return { ok: true, key, overwrote, long: chars > 1000 }
 }

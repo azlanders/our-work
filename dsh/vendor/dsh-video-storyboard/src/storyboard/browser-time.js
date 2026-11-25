@@ -1,3 +1,19 @@
+import { mkdirSync as _atomicMkdirSync, renameSync as _atomicRenameSync, unlinkSync as _atomicUnlinkSync, writeFileSync as _atomicWriteSync } from 'node:fs'
+import { dirname as _atomicDirname } from 'node:path'
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 /**
  * browser-time.js — 直接从浏览器里读 `video.currentTime`，毫秒级准。
  *
@@ -496,7 +512,7 @@ export async function writeBrowserCookiesFile({ port = DEFAULT_PORT, dir = null 
   const target = dir ?? join(homedir(), '.dsh', 'bili-cookies-from-browser.txt');
   try {
     mkdirSync(join(target, '..'), { recursive: true });
-    writeFileSync(target, cookiesToNetscape(cookies), 'utf8');
+    _atomicWriteFileSync(target, cookiesToNetscape(cookies), 'utf8');
     return target;
   } catch {
     return null;

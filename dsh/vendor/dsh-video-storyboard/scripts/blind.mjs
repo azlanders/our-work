@@ -1,3 +1,19 @@
+import { mkdirSync as _atomicMkdirSync, renameSync as _atomicRenameSync, unlinkSync as _atomicUnlinkSync, writeFileSync as _atomicWriteSync } from 'node:fs'
+import { dirname as _atomicDirname } from 'node:path'
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 /**
  * blind.mjs — 编号盲测：标签从固定池里随机取、随机分配，脚本**不打印答案**。
  * 用法：node scripts/blind.mjs <N> <scale> <seed>
@@ -99,8 +115,8 @@ function main() {
   });
 
   const tag = process.env.TIER_LIST ? 'mix' : 'flat';
-  writeFileSync(join(OUT, `blind-${SCALE}${tag === 'mix' ? '-m' : ''}.png`), encodePng(buf, W, H));
-  writeFileSync(join(OUT, `blind-${SCALE}${tag === 'mix' ? '-m' : ''}.truth.json`), JSON.stringify(pool));
+  _atomicWriteFileSync(join(OUT, `blind-${SCALE}${tag === 'mix' ? '-m' : ''}.png`), encodePng(buf, W, H));
+  _atomicWriteFileSync(join(OUT, `blind-${SCALE}${tag === 'mix' ? '-m' : ''}.truth.json`), JSON.stringify(pool));
   console.log(`已出图 blind-${SCALE}.png（${N} 格，scale=${SCALE}，答案另存，未打印）`);
 }
 

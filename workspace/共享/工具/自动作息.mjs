@@ -359,7 +359,7 @@ const r2 = endSleep('natural')
       try {
         const fs2 = fs
         const bj2 = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ')
-        fs2.writeFileSync(base + '/刚醒.json', JSON.stringify({
+        原子写(base + '/刚醒.json', JSON.stringify({
           at: bj2,
           quality: (r2 && r2.quality) || 0,
           deep_min: (r2 && r2.deep_min) || 0,

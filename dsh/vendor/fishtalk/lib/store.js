@@ -1,3 +1,19 @@
+const { mkdirSync: _atomicMkdirSync, renameSync: _atomicRenameSync, unlinkSync: _atomicUnlinkSync, writeFileSync: _atomicWriteSync } = require('node:fs')
+const { dirname: _atomicDirname } = require('node:path')
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 // 本地存储：所有东西都在 ~/.fishtalk/（可用环境变量 FISHTALK_HOME 改）。
 // corpus.jsonl  语料，一行一条
 // labels.json   手动批注 { id: "good|fish|bad|funny" }
@@ -20,7 +36,7 @@ function pickHome() {
   try {
     fs.mkdirSync(home, { recursive: true })
     const probe = path.join(home, '.probe')
-    fs.writeFileSync(probe, '')
+    _atomicWriteFileSync(probe, '')
     fs.unlinkSync(probe)
     return home
   } catch {
@@ -107,7 +123,7 @@ function setLabel(id, label) {
   const l = labels()
   if (label) l[id] = label
   else delete l[id]
-  fs.writeFileSync(P.labels, JSON.stringify(l))
+  _atomicWriteFileSync(P.labels, JSON.stringify(l))
   return l
 }
 
@@ -129,7 +145,7 @@ function rewrite(fn) {
     if (out) kept.push(JSON.stringify(out))
     else trashed.push(JSON.stringify({ ...it, deletedAt: new Date().toISOString() }))
   }
-  fs.writeFileSync(P.corpus, kept.length ? kept.join('\n') + '\n' : '')
+  _atomicWriteFileSync(P.corpus, kept.length ? kept.join('\n') + '\n' : '')
   if (trashed.length) fs.appendFileSync(path.join(HOME, 'trash.jsonl'), trashed.join('\n') + '\n')
   return { kept: kept.length, trashed: trashed.length }
 }

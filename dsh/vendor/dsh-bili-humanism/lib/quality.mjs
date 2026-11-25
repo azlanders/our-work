@@ -1,3 +1,19 @@
+import { mkdirSync as _atomicMkdirSync, renameSync as _atomicRenameSync, unlinkSync as _atomicUnlinkSync, writeFileSync as _atomicWriteSync } from 'node:fs'
+import { dirname as _atomicDirname } from 'node:path'
+
+function _atomicWriteFileSync(filePath, data, encoding = 'utf8') {
+  const _tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  try {
+    _atomicMkdirSync(_atomicDirname(filePath), { recursive: true })
+    if (typeof data === 'string') _atomicWriteSync(_tmp, data, encoding)
+    else _atomicWriteSync(_tmp, data)
+    _atomicRenameSync(_tmp, filePath)
+  } catch (err) {
+    try { _atomicUnlinkSync(_tmp) } catch (_e) { console.error('[atomic-write]', _e?.message || _e) }
+    throw err
+  }
+}
+
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -147,7 +163,7 @@ export async function runTextProbe({
       duration: duration || reading.duration,
       segments: reading.segments,
     };
-    writeFileSync(input, JSON.stringify(body), { mode: 0o600 });
+    _atomicWriteFileSync(input, JSON.stringify(body), { mode: 0o600 });
     const args = [
       textProbeScript,
       "all",
