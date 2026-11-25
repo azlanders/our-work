@@ -152,14 +152,21 @@ const CATEGORY_RULES = [
 
 export function expandLocal(query) {
   const s = String(query || '')
-  const extra = new Set()
+  const extra = []
   for (const [re, words] of LOCAL_EXPAND_RULES) {
-    if (re.test(s)) for (const w of words) extra.add(w)
+    if (re.test(s)) extra.push(...words)
   }
+  // 类目词只做增量：旧规则已给出的词保持原有重复权重，不在这里改变既有排序。
+  const seen = new Set(extra)
   for (const [re, words] of CATEGORY_RULES) {
-    if (re.test(s)) for (const w of words) extra.add(w)
+    if (!re.test(s)) continue
+    for (const w of words) {
+      if (seen.has(w)) continue
+      seen.add(w)
+      extra.push(w)
+    }
   }
-  return extra.size ? [...extra].join(' ') : ''
+  return extra.length ? extra.join(' ') : ''
 }
 
 /**
