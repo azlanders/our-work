@@ -76,7 +76,7 @@ SnowLuma 是「一个 service 注入本机所有 QQ 进程」，加 bot 不需�
 - [ ] 看门狗 timer 已启用，跑一次退出码为 0
 - [ ] 不在任何别的 bot 的目录里写文件
 
-## 七、DSH 插件与 profile 模板（2026-11-24 加）
+## 七、DSH 插件与 profile 模板
 
 `/data/bot-template/dsh/` 是 DSH profile 的模板，跟 workspace 分开：
 
@@ -97,7 +97,7 @@ rsync -a --exclude '*.old-*' --exclude node_modules   /data/<实例>-dsh/profile
 
 改完跑 `自检.sh`，[4/4] 会核对 `dsh/package.json.tpl` 是合法 JSON 且 bundles 含 `dsh-live-compact`。
 
-### 7.1 DSH profile 的同步脚本（2026-11-24 补）
+### 7.1 DSH profile 的同步脚本
 
 `同步模板.sh` / `推给所有实例.sh` 只管 workspace（根文件 + `共享/工具`）。
 DSH profile 的 `package.json`、`cordis.patch.yml`、`vendor/` 用另一对脚本：

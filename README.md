@@ -115,7 +115,7 @@ DSH profile（`package.json` / `cordis.patch.yml` / `vendor/`）不在 workspace
 - 新 bot 第一次起面板会自动生成 `面板密钥.json`；`面板用户.json` 由主人第一次登录时写入，不随模板分发。
 
 
-## 跨 bot 面板切换（2026-11-24）
+## 跨 bot 面板切换
 
 `ALT_BOT_KEY` / `ALT_PANEL_PORT` 是「另一个 bot」的标识和面板端口，写在各自 `instances/*.env` 和 panel 的 systemd 单元里。
 
