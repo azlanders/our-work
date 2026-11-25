@@ -4,7 +4,6 @@
   "dependencies": {
     "dsh-bili-humanism": "file:./vendor/dsh-bili-humanism",
     "dsh-{{ALT_BOT_KEY}}-tone": "file:./vendor/dsh-{{ALT_BOT_KEY}}-tone",
-    "dsh-hippocampus": "https://codeload.github.com/coner13/dsh-hippocampus/tar.gz/refs/tags/v0.2.40-r8",
     "dsh-live-compact": "file:./vendor/dsh-live-compact",
     "dsh-memewiki": "file:./vendor/dsh-memewiki",
     "dsh-onebot-channel": "file:./vendor/dsh-onebot-channel",
@@ -22,7 +21,6 @@
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app",
         "dsh-onebot-channel",
-        "dsh-hippocampus",
         "dsh-tieba-dive",
         "dsh-bili-humanism",
         "dsh-{{ALT_BOT_KEY}}-tone",

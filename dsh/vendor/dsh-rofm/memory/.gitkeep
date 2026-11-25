@@ -1,2 +1,0 @@
-# Requirement: this folder must exist inside the plugin folder.
-# The plugin writes one subdirectory per recall folder here at runtime.

@@ -1,6 +1,6 @@
-// 检索：倒排索引取候选 + BM25（中文 bigram）+ 关键词加分 + 重要度/新鲜度加权。
+// 检索：倒排索引取候选 + BM25（中文 bigram）+ 关键词/标签加分 + 重要度/新鲜度加权。
 // 先按词项倒排查候选，再只给候选打分——1 万条库单次查询降到毫秒级。
-import { queryGrams } from './text.js'
+import { expandLocal, queryGrams } from './text.js'
 
 const K1 = 1.2
 const B = 0.75
@@ -8,6 +8,15 @@ const DAY = 86400000
 // 单字关键词只在这些“实词”上放行：茶/猫/胃/钱 这类；虚词放进来只会制造误召回。
 const STOP_CHARS = new Set('的了是在有和就都而及与着或一个我你他她它们这那什么怎么哪里为以对把被让给从到向上下里外前后中时'.split(''))
 const CJK = /[\u4e00-\u9fff]/
+
+function addPosting(map, key, idx) {
+  const arr = map.get(key)
+  if (arr) {
+    if (arr[arr.length - 1] !== idx) arr.push(idx)
+  } else {
+    map.set(key, [idx])
+  }
+}
 
 export function buildIndex(records) {
   const df = new Map()
@@ -18,21 +27,24 @@ export function buildIndex(records) {
   let totalLen = 0
   for (let i = 0; i < records.length; i += 1) {
     const rec = records[i]
-    const body = rec.text + ' ' + (rec.keywords || []).join(' ')
+    const kwList = [...(rec.keywords || []), ...(rec.tags || [])]
+      .map((k) => String(k || '').trim().toLowerCase())
+      .filter(Boolean)
+    const body = rec.text + ' ' + kwList.join(' ')
     const g = queryGrams(body)
     grams.set(rec.id, g)
-    keywords.set(rec.id, new Set(rec.keywords || []))
+    keywords.set(rec.id, new Set(kwList))
     totalLen += g.size
     for (const t of g.keys()) {
       df.set(t, (df.get(t) || 0) + 1)
-      const p = postings.get(t)
-      if (p) p.push(i)
-      else postings.set(t, [i])
+      addPosting(postings, t, i)
     }
     for (const k of keywords.get(rec.id)) {
-      const p = kwPost.get(k)
-      if (p) p.push(i)
-      else kwPost.set(k, [i])
+      addPosting(kwPost, k, i)
+      // 3 字以上长词（如「半坡酒馆」「桂花乌龙」）同时索引其二元组，保证局部词也能捞出候选。
+      if (k.length > 2) {
+        for (const sub of queryGrams(k).keys()) addPosting(kwPost, sub, i)
+      }
     }
   }
   const n = records.length || 1
@@ -41,27 +53,43 @@ export function buildIndex(records) {
 
 function idf(index, term) {
   const df = index.df.get(term) || 0
-  return Math.log(1 + (index.n - df + 0.5) / (df + 0.5))
+  // 小库（新 bot 头几天）里 df≈n，原始 idf 只有 0.3，够不到 minScore → 一条都不召回。
+  // 给个下限，大库本来的 idf 都在 3 以上，不受影响。
+  return Math.max(0.5, Math.log(1 + (index.n - df + 0.5) / (df + 0.5)))
 }
 
 /**
  * @returns {{rec, score, hits, why}[]} 按分数降序；分数没过闸门的直接不返回。
  */
-export function search(index, records, query, { limit = 3, minScore = 2.4, minHits = 1, now = Date.now() } = {}) {
-  const q = queryGrams(query)
-  if (!q.size) return []
+export function search(index, records, query, { limit = 3, minScore = 2.4, minHits = 1, localExpand = true, now = Date.now() } = {}) {
+  const baseQ = queryGrams(query)
+  if (!baseQ.size) return []
+
+  const q = new Map(baseQ)
+  if (localExpand) {
+    const extra = expandLocal(query)
+    if (extra) {
+      for (const [term] of queryGrams(extra)) {
+        if (!q.has(term)) q.set(term, 0.55)
+      }
+    }
+  }
+
   const candidates = new Set()
   // 双字以上：df 过一半的算通用词，不做候选入口，避免全库扫描。
-  for (const [term, qtf] of q) {
+  for (const [term] of q) {
     if (term.length < 2) continue
     const df = index.df.get(term) || 0
-    if (!df || df * 2 > index.n) continue
-    for (const i of index.postings.get(term)) candidates.add(i)
-    const p = index.kwPost.get(term)
-    if (p) for (const i of p) candidates.add(i)
+    if (df > 0 && df * 2 <= index.n) {
+      const p = index.postings.get(term)
+      if (p) for (const i of p) candidates.add(i)
+    }
+    const kp = index.kwPost.get(term)
+    if (kp) for (const i of kp) candidates.add(i)
   }
   // 单字面：查询里的 CJK 实词单字（“茶”“猫”）走关键词倒排，命中才算候选。
-  for (const ch of String(query).toLowerCase()) {
+  const lowerQuery = String(query || '').toLowerCase()
+  for (const ch of lowerQuery) {
     if (!CJK.test(ch) || STOP_CHARS.has(ch)) continue
     const p = index.kwPost.get(ch)
     if (p) for (const i of p) candidates.add(i)
@@ -88,11 +116,12 @@ export function search(index, records, query, { limit = 3, minScore = 2.4, minHi
     }
     const recKw = index.keywords.get(rec.id)
     if (recKw) {
-      const chars = String(query)
       for (const k of recKw) {
-        const inQuery = k.length === 1 ? !STOP_CHARS.has(k) && chars.includes(k) : q.has(k)
+        const inQuery = k.length === 1
+          ? !STOP_CHARS.has(k) && lowerQuery.includes(k)
+          : (q.has(k) || lowerQuery.includes(k))
         if (!inQuery) continue
-        // 显式存过的关键词是人工确认过的强信号：单字给够分量，避免“茶”“猫”这类漏掉。
+        // 显式存过的关键词是人工确认过的强信号：单字给够分量，多字/跨大小写同享加分。
         score += k.length === 1 ? 2.2 : 1.4
         hits += 1
         why.push('kw:' + k)

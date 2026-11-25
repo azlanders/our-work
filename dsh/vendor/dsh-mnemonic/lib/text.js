@@ -45,11 +45,32 @@ export function tokenSet(text) {
   return new Set(tokens(text))
 }
 
-/** 关键词兜底：取查询里最长的几个二元组/词，供关键词命中做一次低价加分。 */
+/** 关键词兜底：统计查询里各二元组/词的出现次数。 */
 export function queryGrams(text) {
   const map = new Map()
   for (const t of tokens(text)) map.set(t, (map.get(t) || 0) + 1)
   return map
+}
+
+// 零延迟本地方言/同义词补充，作为 LLM 查询改写的保底与增强（权重低于原词）。
+const LOCAL_EXPAND_RULES = [
+  [/全名|叫什么|咋写|怎么称呼|叫啥|名字/, ['名字', '姓名', '称呼', '自称']],
+  [/多大|几岁|年龄|年纪|生日/, ['年龄', '岁', '生日']],
+  [/住哪|住的|住址|家在哪|哪个城市|什么地方|地址|搬家/, ['住址', '搬家', '搬到', '家']],
+  [/欠|答应|约定|说好|承诺|保证/, ['约定', '答应', '欠', '承诺']],
+  [/喜欢|讨厌|爱吃|爱喝|偏好|口味|忌口/, ['喜欢', '讨厌', '偏好', '爱', '忌口']],
+  [/多少钱|价格|花了|买了|钱/, ['钱', '价格', '元', '买']],
+  [/工作|上班|职业|干啥|干什么/, ['工作', '上班', '职业']],
+  [/身体|病|疼|不舒服|医院|吃药/, ['身体', '病', '疼', '医院', '药']],
+]
+
+export function expandLocal(query) {
+  const s = String(query || '')
+  const extra = []
+  for (const [re, words] of LOCAL_EXPAND_RULES) {
+    if (re.test(s)) extra.push(...words)
+  }
+  return extra.length ? extra.join(' ') : ''
 }
 
 export function clip(text, max) {

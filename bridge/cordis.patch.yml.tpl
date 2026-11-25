@@ -20,8 +20,6 @@
   name: "@deepseek-ai/dsh-system-prompt"
   config: {}
 
-- id: hippocampus
-  name: "dsh-hippocampus"
 
 - id: bili-humanism
   name: "dsh-bili-humanism"
@@ -77,12 +75,12 @@
     keepRoundTokens: 9000
     chunkMin: 1000
 
-# 2026-11-24：回忆块对齐基准测试配置（4 条 / 每条 160 字 / 整块 700 字）。
+# 2026-11-24：回忆块对齐基准测试配置（4 条 / 每条 200 字 / 整块 900 字）。
 # 生产默认 3/120/600 偏紧，时间题和多方线索题容易缺上下文。
 - id: dsh-mnemonic
   config:
-    injectChars: 700
-    itemChars: 160
+    injectChars: 900
+    itemChars: 200
     limit: 4
 
 # 2026-11-25：剪工具结果的活交给官方 pruner。

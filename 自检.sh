@@ -169,6 +169,13 @@ if [ -f "$HERE/tests/test-tpl-engine.py" ]; then
 else
   bad "缺少 tests/test-tpl-engine.py"
 fi
+if command -v node >/dev/null 2>&1 && [ -f "$HERE/tests/test-mnemonic.mjs" ]; then
+  if node --test "$HERE/tests/test-mnemonic.mjs" >/dev/null 2>&1; then
+    ok "test-mnemonic.mjs 全部通过"
+  else
+    bad "test-mnemonic.mjs 失败（手动运行查看详情）"
+  fi
+fi
 
 [ "$KEEP" = 1 ] && echo "临时目录保留在 $TMP" || rm -rf "$TMP"
 

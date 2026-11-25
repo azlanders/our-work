@@ -3,6 +3,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeF
 import { dirname, join } from 'node:path'
 import { hash32 } from './text.js'
 
+function uniqList(arr, max) {
+  return [...new Set((arr || []).map((x) => String(x).trim()).filter(Boolean))].slice(0, max)
+}
+
 export class Store {
   constructor(file) {
     this.file = file
@@ -16,6 +20,7 @@ export class Store {
     if (!existsSync(this.file)) { this.records = []; this.byId.clear(); return this }
     const lines = readFileSync(this.file, 'utf8').split('\n')
     const records = []
+    this.byId.clear()
     for (const line of lines) {
       const trimmed = line.trim()
       if (!trimmed) continue
@@ -33,24 +38,30 @@ export class Store {
     return this
   }
 
-  /** 同一段正文只存一次；重复写入只更新使用计数，防止记忆库被复读撑爆。 */
+  /** 同一段正文只存一次；重复写入更新使用计数，并合并新补充的关键词/标签/重要度。 */
   add({ text, keywords = [], tags = [], importance = 0.5, eventAt = null, source = null }) {
     const clean = String(text || '').trim()
     if (!clean) return null
     const id = 'm' + hash32(clean).slice(0, 10)
+    const nextImp = Math.min(1, Math.max(0.05, Number(importance) || 0.5))
     const existing = this.byId.get(id)
     if (existing) {
       existing.uses = (existing.uses || 1) + 1
       existing.lastUsed = Date.now()
+      if (keywords?.length) existing.keywords = uniqList([...(existing.keywords || []), ...keywords], 16)
+      if (tags?.length) existing.tags = uniqList([...(existing.tags || []), ...tags], 8)
+      if (nextImp > (existing.importance || 0)) existing.importance = nextImp
+      if (source?.kind === 'tool') existing.source = source
       this.touched = true
+      this.dirty = true
       return existing
     }
     const rec = {
       id,
       text: clean,
-      keywords: [...new Set(keywords.map((k) => String(k).trim()).filter(Boolean))].slice(0, 16),
-      tags: [...new Set(tags.map((t) => String(t).trim()).filter(Boolean))].slice(0, 8),
-      importance: Math.min(1, Math.max(0.05, Number(importance) || 0.5)),
+      keywords: uniqList(keywords, 16),
+      tags: uniqList(tags, 8),
+      importance: nextImp,
       createdAt: Date.now(),
       eventAt: eventAt ? Number(eventAt) : null,
       uses: 1,
@@ -62,6 +73,15 @@ export class Store {
     // 追加一行就落盘：O(1)，不像整体重写那样每写一条就把整库抄一遍。
     this.appendLine(rec)
     return rec
+  }
+
+  remove(id) {
+    if (!this.byId.has(id)) return false
+    this.byId.delete(id)
+    this.records = this.records.filter((r) => r.id !== id)
+    this.touched = true
+    this.dirty = true
+    return true
   }
 
   touch(id, count = 1) {
@@ -87,7 +107,7 @@ export class Store {
   persist() {
     mkdirSync(dirname(this.file), { recursive: true })
     const body = this.records.map((r) => JSON.stringify(r)).join('\n')
-    const tmp = this.file + '.tmp'
+    const tmp = this.file + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8)
     writeFileSync(tmp, body ? body + '\n' : '')
     renameSync(tmp, this.file)
     this.dirty = false
