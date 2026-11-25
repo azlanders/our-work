@@ -502,6 +502,38 @@ test('diversify reuses precomputed index.grams cleanly', () => {
   assert.deepEqual(picked.map((x) => x.rec.id), ['d1', 'd3'])
 })
 
+test('autoArchive stores the last complete user→assistant pair, not the new question with the previous reply', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-pair-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    let preStep = null
+    const ctx = {
+      inject() {},
+      on(ev, fn) { if (ev === 'agent/pre-step') preStep = fn },
+      get() { return null },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, queryRewrite: false, autoArchive: true })
+    try {
+      const msgs = [
+        { id: 'pair-u1', role: 'user', content: '周六三点在半坡酒馆喝桂花乌龙' },
+        { id: 'pair-a1', role: 'assistant', content: '记下了，周六三点半坡酒馆桂花乌龙' },
+        { id: 'pair-u2', role: 'user', content: '那天要不要带伞' },
+      ]
+      await preStep({}, async () => ({ kind: 'enter', messages: msgs }))
+      const s = new Store(storePath).load()
+      assert.equal(s.records.length, 1)
+      assert.match(s.records[0].text, /周六三点在半坡酒馆喝桂花乌龙/)
+      assert.match(s.records[0].text, /记下了，周六三点半坡酒馆桂花乌龙/)
+      assert.equal(s.records[0].text.includes('那天要不要带伞'), false, '当前这条还没回复的问题不能进存档')
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('autoArchive skips prompt injection payloads so they never enter store', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mnemonic-inj-'))
   try {

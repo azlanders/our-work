@@ -227,18 +227,23 @@ export function apply(ctx, config = {}) {
     return id ? String(id) : ''
   }
 
+  // pre-step 时当前这条用户消息还没得到回复，配上一轮的助手回复会张冠李戴。
+  // 存「上一轮完整的一问一答」：先找最近的助手回复，再找它前面那条真人用户消息。
   const archiveTurn = (messages, lastUserIndex, scope = '') => {
-    const userMsg = messages[lastUserIndex]
-    if (!isHumanUserMessage(userMsg)) return null
+    let asstIndex = -1
+    for (let i = lastUserIndex - 1; i >= 0; i -= 1) {
+      if (roleOf(messages[i]) === 'assistant') { asstIndex = i; break }
+    }
+    if (asstIndex < 0) return null
+    let userIndex = -1
+    for (let i = asstIndex - 1; i >= 0; i -= 1) {
+      if (isHumanUserMessage(messages[i])) { userIndex = i; break }
+    }
+    if (userIndex < 0) return null
+    const userMsg = messages[userIndex]
     const user = messageText(userMsg) || ''
     if (isLowValueOrInjection(user)) return null
-
-    let prevAssistant = ''
-    for (let i = lastUserIndex - 1; i >= 0; i -= 1) {
-      const role = roleOf(messages[i])
-      if (role === 'assistant') { prevAssistant = messageText(messages[i]) || ''; break }
-      if (isHumanUserMessage(messages[i])) break
-    }
+    const prevAssistant = messageText(messages[asstIndex]) || ''
     const cleanUser = sanitizeMemoryText(clip(user, cfg.archiveChars))
     const cleanAsst = prevAssistant ? sanitizeMemoryText(clip(prevAssistant, cfg.archiveChars)) : ''
     const text = cleanAsst ? `用户：${cleanUser}\n我：${cleanAsst}` : `用户：${cleanUser}`
