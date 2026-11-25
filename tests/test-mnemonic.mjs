@@ -7,8 +7,35 @@ import test from 'node:test'
 import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
-import { buildIndex, search } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
+import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
+
+test('groupAdjacent 只并同会话的下一轮，跨会话/超时差都不并', () => {
+  const base = 1_700_000_000_000
+  const records = [
+    { id: 'a', text: '问冰袋咋存', scope: 'p1', createdAt: base },
+    { id: 'b', text: '多备两个轮着冻', scope: 'p1', createdAt: base + 60_000 },
+    { id: 'c', text: '别的会话', scope: 'p2', createdAt: base + 120_000 },
+    { id: 'd', text: '隔了一小时', scope: 'p1', createdAt: base + 3_600_000 },
+  ]
+  assert.deepEqual(groupAdjacent([{ rec: records[0], score: 3 }], records).map((h) => h.rec.id), ['a', 'b'])
+  // 下一条跨了会话 id：不并
+  assert.deepEqual(groupAdjacent([{ rec: { ...records[0], id: 'a2' } }, { rec: records[1], score: 1 }], [{ ...records[0], id: 'a2' }, records[1], records[2]]).map((h) => h.rec.id), ['a2', 'b'])
+  // 下一条隔了一小时：不并
+  assert.deepEqual(groupAdjacent([{ rec: records[2], score: 3 }], records).map((h) => h.rec.id), ['c'])
+  // 上限 2：三张命中卡至多并进两张邻轮
+  const many = [
+    { id: 'm1', text: '1', scope: 's', createdAt: base },
+    { id: 'n1', text: 'n1', scope: 's', createdAt: base + 1000 },
+    { id: 'm2', text: '2', scope: 's', createdAt: base + 2000 },
+    { id: 'n2', text: 'n2', scope: 's', createdAt: base + 3000 },
+    { id: 'm3', text: '3', scope: 's', createdAt: base + 4000 },
+    { id: 'n3', text: 'n3', scope: 's', createdAt: base + 5000 },
+  ]
+  const out = groupAdjacent([{ rec: many[0], score: 3 }, { rec: many[2], score: 2 }, { rec: many[4], score: 1 }], many)
+  assert.equal(out.length, 5)
+  assert.deepEqual(out.map((h) => h.rec.id), ['m1', 'n1', 'm2', 'n2', 'm3'])
+})
 
 test('isHumanUserMessage filters host synthetic and plugin messages', () => {
   assert.equal(isHumanUserMessage({ role: 'user', content: '你好呀', source: { kind: 'user' } }), true)
@@ -376,6 +403,26 @@ test('security: sanitizeMemoryText neutralizes spoofed headers and archive filte
   assert.equal(isLowValueOrInjection('周六下午三点去半坡酒馆喝桂花乌龙'), false)
 })
 
+test('annotate: relative dates resolve against the record date, corrections are flagged', async () => {
+  const { relativeDateHints, isCorrectionStatement, renderAnnotation } = await import('../dsh/vendor/dsh-mnemonic/lib/annotate.js')
+  const jun18 = Date.parse('2026-06-18T15:20:00+08:00')
+  const may3 = Date.parse('2026-05-03T02:10:00+08:00')
+  const jun10 = Date.parse('2026-06-10T09:00:00+08:00')
+
+  assert.deepEqual(relativeDateHints('跟阿婆说定的下周二下午', jun18).map((h) => [h.term, h.when]), [['下周二', '2026-06-23']])
+  assert.deepEqual(relativeDateHints('昨天在江北回声那边', may3).map((h) => h.when), ['2026-05-02'])
+  assert.deepEqual(relativeDateHints('我姐生日是上周五', jun10).map((h) => h.when), ['2026-06-05'])
+  assert.deepEqual(relativeDateHints('今天下雨了', jun18), [], '今天不是需要换算的相对日期')
+
+  assert.equal(isCorrectionStatement('其实还剩半袋，之前说喂完是记岔了'), true)
+  assert.equal(isCorrectionStatement('别记错了，是蓝色文件夹'), false, '提醒不是更正')
+  assert.equal(isCorrectionStatement('蓝夹，绿色的是旧酒单'), false)
+
+  assert.equal(renderAnnotation('跟阿婆说定的下周二下午', jun18), '〔下周二＝2026-06-23〕')
+  assert.equal(renderAnnotation('其实还剩半袋，之前说喂完是记岔了', jun18), '〔这版是事后更正，以它为准〕')
+  assert.equal(renderAnnotation('抄手不要葱', jun18), '')
+})
+
 test('multi-need questions get a bigger recall budget, plain chat keeps the lean one', async () => {
   assert.equal(isMultiNeedQuery('上次说的夜班见闻，我还欠你几件？已经讲过哪件？'), true)
   assert.equal(isMultiNeedQuery('我爸明天要坐很久，路上要注意什么'), true)
@@ -409,7 +456,9 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
         const messages = [{ id: 'u1', role: 'user', content: question }]
         const out = await preStep({}, async () => ({ kind: 'enter', messages }))
         const hit = out.messages.find((m) => JSON.stringify(m).includes('相关的存档原文'))
-        return hit ? JSON.stringify(hit) : ''
+        const content = hit?.content
+        if (Array.isArray(content)) return content.map((part) => part?.text ?? '').join('\n')
+        return String(content ?? '')
       } finally {
         dispose()
       }
@@ -421,7 +470,10 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
     const multi = await injected('我们约定过的还箱子的事都有哪些', lean)
     const count = (block) => block.split(/\\n|\n/).filter((l) => /^\d+\. \(/.test(l.trim())).length
     assert.ok(count(plain) >= 1, 'plain question still recalls a couple of items')
-    assert.ok(count(plain) <= 2, `plain chat must stay lean, got ${count(plain)}`)
+    // 邻轮分组会往命中卡后面补一张（同一件事的下一轮），所以条目数上限是 limit+2；
+    // 真正的预算约束是字数，纪律尾注约 215 字，留 300 字余量。
+    assert.ok(count(plain) <= 4, `plain chat must stay lean, got ${count(plain)}`)
+    assert.ok(plain.length <= 900 + 300, `plain chat must stay inside the char budget, got ${plain.length}`)
     assert.ok(count(multi) > count(plain), `multi-need question must widen the budget, got ${count(multi)} vs ${count(plain)}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })

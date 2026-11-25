@@ -9,7 +9,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Store, defaultStorePath } from './lib/store.js'
-import { buildIndex, indexRecord, search } from './lib/recall.js'
+import { buildIndex, indexRecord, search, groupAdjacent } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
 import { loadAliasGroups, expandAliases } from './lib/aliases.js'
 import { renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
@@ -428,12 +428,14 @@ export function apply(ctx, config = {}) {
         ? await rerank(expandedTerms ? `${query} ${expandedTerms}` : query, pool, budget.limit)
         : diversify(pool, { limit: budget.limit, gramsIndex: ensureIndex().grams })
       if (!hits.length) return decision
-      const sig = hits.map((h) => h.rec.id).join(',')
+      // 邻轮分组：把命中卡的下一轮并进同一条证据链（预算不变，渲染层截断）。
+      const grouped = groupAdjacent(hits, store.records)
+      const sig = grouped.map((h) => h.rec.id).join(',')
       // 2026-11-25：原来只看 120s + sig，宿主不持久化临时注入消息或上下文裁剪后，连续追问会被静默吞掉回忆；
       // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
       const hasPrevInjectInWindow = messages.some(isMnemonicRecallMessage)
       if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
-      const block = renderRecallBlock(hits, { maxChars: budget.inject, itemChars: budget.item, now: ts })
+      const block = renderRecallBlock(grouped, { maxChars: budget.inject, itemChars: budget.item, now: ts })
       if (!block) return decision
       const message = await memoryMessage(block)
       if (!message) return decision

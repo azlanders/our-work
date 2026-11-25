@@ -61,6 +61,35 @@ export function buildIndex(records) {
   return index
 }
 
+/**
+ * 邻轮分组：命中卡后面那一轮常是同一件事的补充说明（问「冰袋咋存」→ 下一轮「多备两个轮着冻」）。
+ * 只并同 scope、且时间差在 gapMs 内的下一条；最多 maxNeighbors 张，注入预算由渲染层截断，
+ * 所以并进来的邻轮挤掉的是最末那张弱相关卡，不是白加 token。
+ */
+export function groupAdjacent(hits, records, { gapMs = 10 * 60 * 1000, maxNeighbors = 2 } = {}) {
+  if (!hits.length || !records.length) return hits
+  const pos = new Map()
+  for (let i = 0; i < records.length; i += 1) pos.set(records[i].id, i)
+  const taken = new Set(hits.map((h) => h.rec.id))
+  const out = []
+  let added = 0
+  for (const h of hits) {
+    out.push(h)
+    if (added >= maxNeighbors) continue
+    const i = pos.get(h.rec.id)
+    if (i === undefined) continue
+    const next = records[i + 1]
+    if (!next || taken.has(next.id)) continue
+    if ((next.scope || '') !== (h.rec.scope || '')) continue
+    if (!next.createdAt || !h.rec.createdAt) continue
+    if (Math.abs(next.createdAt - h.rec.createdAt) > gapMs) continue
+    taken.add(next.id)
+    added += 1
+    out.push({ rec: next, score: h.score, hits: 0, why: ['adjacent'] })
+  }
+  return out
+}
+
 function idf(index, term) {
   const df = index.df.get(term) || 0
   return Math.max(0.5, Math.log(1 + (index.n - df + 0.5) / (df + 0.5)))
