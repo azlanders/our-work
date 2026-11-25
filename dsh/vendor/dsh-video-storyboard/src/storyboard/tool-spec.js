@@ -93,7 +93,7 @@ const DESC_INTEGRAL_SECONDS = 'Change per sampled frame, 1-30 (default 6); NOT "
  */
 const TIER_MAP_SCHEMA = {
   type: 'object',
-  description: 'Override tiers after the policy: {"1":3,"5":4} → tier 1..8 (keys and values both 1..8).',
+  description: '按格覆盖分档，如 {"1":3,"5":4}，键值 1-8。',
   additionalProperties: true,
 };
 // probe / locate / 段图那三个工具都只做"读"，cookies 只用来取流，一句话就够。
@@ -273,109 +273,107 @@ export function zoomToolSpec() {
   return {
     name: ZOOM_TOOL_NAME,
     description: [
-      'Re-read a short window at higher per-cell resolution.',
+      '放大重看视频里的一小段：用户问某几秒画面上写了什么、要看清脸或字幕时用它。',
       '',
-      'Use it after video_storyboard when one cell needs a closer look ("what is on screen at',
-      '01:12-01:20?"), or pass the `cellId` storyboard printed. Returns ONE image with few large cells',
-      '(default 6), so faces, subtitles and on-screen text become legible where a 16-cell overview',
-      'cannot. Costs one image (~233 tokens). For another wide pass use video_storyboard.',
+      '格少、每格大。对某段（from/to）或某一格（cellId）调；返回一张图（几格大图，',
+      '约 233 token）。要整片看一遍用 qq_watch_video。',
     ].join('\n'),
     parameters: {
       input: {
         type: 'string',
         required: true,
-        description: 'Path or http(s) link. Required.',
+        description: '必填；本地路径或 http(s) 链接。',
       },
-      from: { type: 'number', description: 'Window start in seconds. Required unless cellId is given.' },
-      to: { type: 'number', description: 'Window end in seconds. Required unless cellId is given.' },
+      from: { type: 'number', description: '窗口起点（秒）；给了 cellId 可不填。' },
+      to: { type: 'number', description: '窗口终点（秒）；给了 cellId 可不填。' },
       scanGap: {
         type: 'number',
-        description: 'Min seconds between cuts (0 = merge none).',
+        description: '切点最小间隔（秒），0=不合并。',
       },
       integral: {
         type: 'boolean',
-        description: 'Add frames inside long takes (default true).',
+        description: '长镜头内补帧（默认 true）。',
       },
       integralSeconds: {
         type: 'number',
-        description: 'Change per sampled frame, 1-30 (default 6); NOT "N s per frame".',
+        description: '每个采样帧的变化量 1-30（默认 6）。',
       },
       maxFrames: {
         type: 'integer',
-        description: 'Frames in this window (default 9, max 48).',
+        description: '本窗口帧数（默认 9，上限 48）。',
       },
       tierMap: { ...TIER_MAP_SCHEMA },
       maxSheets: {
         type: 'integer',
-        description: 'Cap on images (default 1).',
+        description: '图片数上限（默认 1）。',
       },
       strategy: {
         type: 'string',
         enum: ['full', 'standard', 'compact', 'native', 'skim', 'brief'],
-        description: 'Size policy, default full.',
+        description: '尺寸策略，默认 full。',
       },
       // zoom 的窗口通常只有几十秒、格数很少，切点门槛对结果影响极小；
       // 声明它纯粹是因为 boardOptions 共用了同一批参数（schema 审计要求两边一致）。
       cutFloor: {
         type: 'integer',
-        description: 'Shot-change sensitivity, 0-255 (omit → 80). Rarely matters for zoom.',
+        description: '切点灵敏度 0-255（省略=80），zoom 很少用。',
       },
       pick: {
         type: 'string',
         enum: ['sharp', 'mid', 'thumb'],
-        description: 'Frame choice: sharp (default) / mid / thumb.',
+        description: '选帧：sharp(默认)/mid/thumb。',
       },
       burn: {
         type: 'string',
         enum: ['index', 'none'],
-        description: 'Burn cell numbers: index (default) / none.',
+        description: '烧格号：index(默认)/none。',
       },
       transcript: {
         type: 'string',
         enum: ['auto', 'off'],
-        description: 'auto (default) or off.',
+        description: 'auto(默认)/off。',
       },
       transcriptFile: {
         type: 'string',
-        description: 'Existing SRT/JSON transcript → skips track and ASR.',
+        description: '已有字幕文件，跳过轨与识别。',
       },
       detail: {
         type: 'string',
         enum: ['low', 'med', 'high'],
-        description: 'Transcript chars per cell: low 60 / med 120 / high 400.',
+        description: '每格转写字数：low 60/med 120/high 400。',
       },
       cellId: {
         type: 'integer',
-        description: 'Cell number from the last storyboard of this input.',
+        description: '上一次全片分镜里的格号。',
       },
       quality: {
         type: 'string',
         enum: ['low', 'medium', 'high'],
-        description: 'Close-up height: low/medium/high = 480/720/1080p.',
+        description: '特写高度 low/medium/high=480/720/1080p。',
       },
       zoomHeight: {
         type: 'integer',
-        description: 'Read the original stream at this height (default 1080).',
+        description: '原流读取高度（默认 1080）。',
       },
       scanHeight: {
         type: 'integer',
-        description: 'Fallback scan copy height (default 360).',
+        description: '扫描副本高度（默认 360）。',
       },
       ocr: {
         type: 'boolean',
-        description: 'Force hard-subtitle OCR on/off.',
+        description: '强制硬字幕 OCR 开/关。',
       },
       cookies: {
         type: 'string',
-        description: 'cookies.txt for links (or DSH_VIDEO_COOKIES).',
+        description: 'cookies.txt 路径（或 DSH_VIDEO_COOKIES）。',
       },
       allowAnonymous: {
         type: 'boolean',
-        description: 'Allow links without cookies (default false).',
+        description: '无 cookie 也允许取（默认 false）。',
       },
       sourceHash: {
         type: 'boolean',
-        description: 'Internal: scan cache key.',
+        description: '内部字段，勿传。',
       },
     },
     output: {

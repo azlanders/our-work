@@ -126,16 +126,16 @@ export async function registerShareCardTool(ctx) {
       // 「你补一个发卡片消息」——他要的是她能发卡片，不是一个只有他喊才动的按钮。
       // 安全阀不靠描述：白名单和「必须有 message_id 回执」都在 sendShareCard 里硬校验（第 99、101 行）。
       // 所以这里改成写清「什么时候用」，用不用还是她自己定。
-      description: '分享一首歌或 B 站视频时用卡片，比裸链接好看。他发来歌/视频、你真心觉得好时回一张。要给目标、HTTPS 链接和 confirm=true；目标必须在服务白名单里，否则直接报错。',
+      description: '发音乐/视频分享卡（整张卡片，不是纯文字）：用户要分享歌或 B 站视频、或你觉得该给卡片时用。要给 target_type/target_id、HTTPS 链接、source、confirm=true；目标须在白名单。只发文字用 qq_send。',
       parameters: { type: 'object', additionalProperties: false, properties: {
         target_type: { type: 'string', enum: ['private', 'group'], description: '好友私聊或群聊。' },
-        target_id: { type: 'string', description: '好友QQ号或群号，必须在服务白名单。' },
+        target_id: { type: 'string', description: '好友QQ号或群号，须在白名单。' },
         title: { type: 'string', description: '卡片标题，最多60字。' },
-        summary: { type: 'string', description: '可选摘要，最多120字。' },
+        summary: { type: 'string', description: '摘要，最多120字。' },
         url: { type: 'string', description: '白名单音乐/哔哩哔哩HTTPS链接。' },
-        preview: { type: 'string', description: '可选HTTPS预览图链接。' },
+        preview: { type: 'string', description: 'HTTPS 预览图链接。' },
         source: { type: 'string', enum: ['音乐', '哔哩哔哩'], description: '卡片来源。' },
-        confirm: { type: 'boolean', description: '必填 true：确认目标、链接都对，是真想发。' }
+        confirm: { type: 'boolean', description: '必填 true：确认目标与链接都对。' }
       }, required: ['target_type', 'target_id', 'title', 'url', 'confirm'] },
       output: { schema: { type: 'object', additionalProperties: false, properties: { message_id: { type: 'number' } }, required: ['message_id'] },
         render: (_args, value) => [{ type: 'text', text: '分享卡已发送，message_id=' + Number(value?.message_id ?? 0) }] },
@@ -168,7 +168,7 @@ export async function registerWatchVideoTool(ctx) {
     if (!tools || typeof tools.register !== 'function') return note('tool', 'no tools service')
     const disposeTool = tools.register({
       name: 'qq_watch_video',
-      description: '看/总结视频（B站 BV号、bilibili.com 或 b23.tv 链接、本机 .mp4 路径）。自动选音画理解或分镜图+时间码台词；要看某几秒细节可带 from/to。',
+      description: '看视频内容并总结（BV号、bilibili.com/b23.tv 链接、本机 .mp4）：用户让你看/讲/总结视频就用它，别用 bash 自己下。自动选音画理解或分镜+时间码台词；只看某几秒带 from/to。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -559,25 +559,25 @@ export async function registerSendTool(ctx) {
     const disposeTool = tools.register(
       {
         name: 'qq_send',
-        description: "QQ 唯一发消息工具；不调用就不会发出去。默认私聊主人，user_id 指定好友，group_id 指定群。分条用 segments，每条之间停顿。final:true = 这句发完就结束本轮；还要接着干活就不带。想沉默就别调工具，用 qq_pass 结束。表情写 [表情:名字/编号]，群里 @ 写 [[at:QQ号]]。照片由相册给路径后用 images 发；走路、购物、睡觉等实际行动用对应工具。说错了调 qq_unsend 两分钟内撤回并写理由。只聊天没干别的活，final 收尾即可，不用再补 qq_pass。",
+        description: "QQ 唯一发送工具，不调就不会发出去。默认发主人私聊；user_id 发好友、group_id 发群。多句用 segments 逐条发。final:true=这句发完本轮结束，还要干活就不带。想沉默就 qq_pass。表情写 [表情:名/编号]，群 @ 写 [[at:QQ号]]。图片用 images，文件用 files。发错用 qq_unsend 两分钟内撤回并写理由。",
         parameters: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            text: { type: 'string', description: '要发的文字；只发表情时可空。' },
+            text: { type: 'string', description: '要发的文字（可空）。' },
             segments: {
               type: 'array',
               items: { type: 'string' },
-              description: '可选；每元素一条，按序发；给了忽略 text。'
+              description: '每元素一条，按序发；给了就没有 text。'
             },
-            emoji: { type: 'string', description: `可选；名或编号（如「呲牙」「13」）。常用：${COMMON_EMOJI}。` },
-            custom_emoji: { type: 'string', description: '可选；收藏的商城大表情，给名字或关键词，单独发一条。' },
-            images: { type: 'array', items: { type: 'string' }, description: '可选；URL 或本机路径，每张一条。' },
-            files: { type: 'array', items: { type: 'string' }, description: '可选；本机文件路径，每个一条。' },
-            user_id: { type: 'string', description: '可选；好友 QQ 号，不填=主人。' },
-            group_id: { type: 'string', description: '可选；群号；留空=私聊。' },
-            final: { type: 'boolean', description: '可选；true=最后一句，发完结束；还要干活就别带。' },
-            feel_tag: { type: 'string', enum: ['被夸', '被怼', '陪伴', '委屈', '想笑'], description: '可选；只记情绪标签，不影响关系。' },
+            emoji: { type: 'string', description: `名或编号（如「呲牙」「13」）。常用：${COMMON_EMOJI}。` },
+            custom_emoji: { type: 'string', description: '收藏的大表情名或关键词，单独一条。' },
+            images: { type: 'array', items: { type: 'string' }, description: 'URL 或本机路径，每张一条。' },
+            files: { type: 'array', items: { type: 'string' }, description: '本机文件路径，每个一条。' },
+            user_id: { type: 'string', description: '好友 QQ 号，不填=主人。' },
+            group_id: { type: 'string', description: '群号；留空=私聊。' },
+            final: { type: 'boolean', description: 'true=最后一句，发完结束。' },
+            feel_tag: { type: 'string', enum: ['被夸', '被怼', '陪伴', '委屈', '想笑'], description: '只记情绪标签，不影响关系。' },
             proactive_material_ids: { type: 'array', items: { type: 'string' }, maxItems: 6, description: '仅主动搭话：用到的材料编号，不用就留空。' },
           }
         },
@@ -1149,24 +1149,23 @@ export async function registerCollectTool(ctx) {
     if (tools === undefined || tools === null || typeof tools.register !== 'function') return note('tool', 'no tools service')
     const disposeTool = tools.register({
       name: 'qq_collect_face',
-      description: "收藏一张收到的图片进QQ表情收藏夹（可按 recent 最近第N张、index 目录第N张或 file 路径），desc 填简短表情名。"
-          + "list=true 时列出收藏夹：有名字的带场合（委屈/被气到/没话接/好吃），没名字的会给本地路径，"
-          + "可以用 read_image 看一眼再起名。",
+      description: "收藏收到的图片进 QQ 表情夹：index/recent 选图或 file 给路径，desc 起名。"
+          + "list=true 列收藏夹（有名带场合，没名给路径，可 read_image 看一眼再起名）。",
         parameters: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          index: { type: 'number', description: '可选；按「收到的图片」目录里的序号收藏（1 = 最早收到的那张）。' },
-          recent: { type: 'number', description: '可选；收藏最近收到的那张图，1 = 最新那张。' },
-          file: { type: 'string', description: '可选；本地文件路径或 http(s) 图片直链。' },
-          desc: { type: 'string', description: '可选；给这个表情起个名字（备注）。起了名以后才能按名字找它。' },
-          dir: { type: 'boolean', description: '可选；true 时列出「收到的图片」目录里的所有图，不执行收藏。' },
+          index: { type: 'number', description: '「收到的图片」目录序号，1=最早。' },
+          recent: { type: 'number', description: '最近收到第 N 张，1=最新。' },
+          file: { type: 'string', description: '本地路径或 http(s) 直链。' },
+          desc: { type: 'string', description: '表情名，起了才能按名找。' },
+          dir: { type: 'boolean', description: 'true=列「收到的图片」目录。' },
           // LIMIT_DECLARE 2026-11-14（批次450）：execute 里一直读 args?.limit（默认 100），
           // 但 schema 没声明它 —— additionalProperties:false，所以她永远填不进去。
           // 表现是「这个旋钮拧不动，但因为默认值兜着，从来没报过错」。
-          limit: { type: 'integer', description: '可选；dir=true 时列几张，默认 100。' },
-          list: { type: 'boolean', description: '可选；true 时列出收藏夹里已有的表情。' },
-          delete: { type: 'string', description: '可选；要删除的收藏表情的 emoji_id。不可逆。' }
+          limit: { type: 'integer', description: 'dir=true 时列几张，默认 100。' },
+          list: { type: 'boolean', description: 'true=列收藏夹。' },
+          delete: { type: 'string', description: '要删的 emoji_id，不可逆。' }
         }
       },
       output: {
@@ -2211,18 +2210,18 @@ export async function registerRememberTool(ctx) {
     if (tools === undefined || tools === null || typeof tools.register !== 'function') return note('tool', 'no tools service')
     const disposeTool = tools.register({
       name: 'qq_remember',
-      description: "往备忘里记一条关于他/这个群的长期事实或偏好（fact 写人话结论）。只记对方的事：喜好、习惯、在意的东西、纠正过你的话。你的教训、系统 bug、代码改动都不记这儿，那是运行记录。不确定是事实还是推测就别写。用明确偏好更正旧推断时，supersedes 必须填旧 id。",
+      description: "记一条关于他/这个群的长期事实或偏好，fact 写人话结论。只记对方的事：喜好、习惯、在意的东西、纠正过你的话；教训/bug/代码改动不记这儿。不确定是事实还是推测就别写。用明确偏好更正旧推断时，supersedes 填旧 id。",
         parameters: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          fact: { type: 'string', description: '要记的一件事，一句话（最多 120 字）。' },
+          fact: { type: 'string', description: '一件事，一句话（≤120 字）。' },
           kind: { type: 'string', enum: ['event', 'semantic_fact', 'user_preference', 'program_skill', 'inference'], description: '事件/语义事实/用户明确偏好/程序技能/推测。' },
-          supersedes: { type: 'string', description: '更正时的旧 id；旧证据留档。' },
-          nick: { type: 'string', description: '可选；以后怎么称呼。' },
-          user_id: { type: 'string', description: '可选；哪个好友，空=主人。' },
-          group_id: { type: 'string', description: '可选；记哪个群。' },
-          slang: { type: 'string', description: '可选；梗/缩写，fact 即其释义，不入常驻卡。' }
+          supersedes: { type: 'string', description: '更正的旧 id，旧证据留档。' },
+          nick: { type: 'string', description: '以后怎么称呼。' },
+          user_id: { type: 'string', description: '哪个好友，空=主人。' },
+          group_id: { type: 'string', description: '记哪个群。' },
+          slang: { type: 'string', description: '梗/缩写，fact 即释义，不进常驻卡。' }
         }
       },
       output: {

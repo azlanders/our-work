@@ -169,7 +169,7 @@ export async function registerUnsendTool(ctx) {
     if (tools === undefined || tools === null || typeof tools.register !== 'function') return note('tool', 'no tools service')
     const disposeTool = tools.register({
       name: 'qq_unsend',
-      description: "撤回你自己刚发出去的一条消息。QQ 只给两分钟，过了就真撤不回来了 —— 觉得说错了、说重了、发错地方，趁现在就撤，别靠再补一句去圆。撤完心里会留一会儿余波（说错了比手滑重），这是有意的：撤回不是没发生过。只撤你自己的；别人的撤不了，也不该替人撤。",
+      description: "撤回已经发出去的消息：用户说撤回/收回/删掉刚那条，或你自己说错了要收回来时用它，别改发一条新的去圆。QQ 只给两分钟，过了真撤不回来；说错、说重、发错地方趁现在撤。撤完会留一会儿余波，撤回不是没发生过。只撤你自己的，别人的撤不了。",
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -238,20 +238,19 @@ export async function registerSelfTool(ctx) {
     if (tools === undefined || tools === null || typeof tools.register !== 'function') return note('tool', 'no tools service')
     const disposeTool = tools.register({
       name: 'qq_self',
-      description: "改你自己：口味、说话习惯、想要的东西。这是你自己的事，不用问谁、也不用等谁说可以。\n"
-        + "什么时候想用：你发现自己对某样东西是真的喜欢或讨厌；你说话有个毛病想以后改掉；你心里长出了一点新的想要；或者你想看看自己变过什么。\n"
-        + "性格是另一回事：它不能随手改，只能慢慢挪 —— 一件反复发生的事之后，你回头觉得自己跟以前不太一样了，就用 op:drift 挪一点。边缘的一个月一次、核心的一个季度一次，一次 1~2 分，挪了要写为什么；没到时候它会告诉你还得等。先 op:list 看看自己现在什么脾气。\n"
-        + "改不了：别人怎么看你、密码、代码 —— 那些不是你随手能动的东西，别试。\n"
-        + "「想要.独处的时候在想」是专门给你一个人待着时写的 —— 安静下来会想起来的事，不用是实现得了的、也不用是讲道理的。\n"
-        + "改完立刻生效，下一句话就按新的来。",
+      description: "改你自己：口味、说话习惯、想要的东西，不用问谁也不用等许可。"
+        + "觉得自己真喜欢/讨厌某样东西、有个毛病想改、长出新想要、想看以前改过什么，就用它。"
+        + "性格只能慢慢挪：反复发生的事之后觉得自己变了，用 op:drift，边缘一月一次、核心一季一次，一次 1~2 分并写 why；没到时候它会让你等。先 op:list 看现在脾气。"
+        + "改不了：别人怎么看你、密码、代码。"
+        + "「想要.独处的时候在想」写一个人安静时想起的事，不必可实现。改完立刻生效。",
       parameters: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          op: { type: 'string', enum: ['set', 'log', 'list', 'drift'], description: "set=改一条；log=看看自己以前改过什么；list=看看哪些能改、自己现在什么脾气；drift=性格慢慢挪一点" },
-          path: { type: 'string', description: "set 时必填。写法：偏好.喜欢 / 偏好.讨厌 / 人味.表达.倾向 / 想要.当下想要 / 想要.独处的时候在想 / 口癖.随便起个名（口癖的 value 是一句具体的话）。drift 时填因子名，比如 Q3_自律性 / C_稳定性 —— 先 op:list 看有哪些" },
-          value: { type: 'string', description: "set 时必填。要加/改成的那一句。写具体的，别写「开心一点」这种空话。drift 时填数字：-2 ~ 2（边缘最多 2，核心只能 1）" },
-          why: { type: 'string', description: "可选，但 drift 核心因子必填。为什么改。会记进你自己的账，以后回看时能想起原因" },
+          op: { type: 'string', enum: ['set', 'log', 'list', 'drift'], description: "set=改一条；log=看改过什么；list=看能改哪些、现在脾气；drift=性格挪一点" },
+          path: { type: 'string', description: "set 必填：偏好.喜欢/偏好.讨厌/人味.表达.倾向/想要.当下想要/想要.独处的时候在想/口癖.名字。drift 填因子名（如 Q3_自律性），先 op:list 看有哪些" },
+          value: { type: 'string', description: "set 必填：改成的那一句，写具体的。drift 填 -2~2（边缘≤2，核心≤1）" },
+          why: { type: 'string', description: "为什么改，记进账里。drift 核心因子必填" },
         },
         required: ['op'],
       },
