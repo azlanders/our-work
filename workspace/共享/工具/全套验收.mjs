@@ -213,7 +213,7 @@ try {
   const paths = ['/three/three.module.js', '/models/whale_girl.glb', '/models/furniture2.glb', '/models/small_items.glb']
   for (const p of paths) {
     try {
-      const code = execFileSync('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '-m', '8', '-b', '/tmp/new.txt', 'http://127.0.0.1:8790' + p], { encoding: 'utf8' }).trim()
+      const _ck = process.env.PANEL_COOKIE_FILE || '/tmp/{{BOT_NAME}}-panel.cookie'; const code = execFileSync('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '-m', '8', '-b', _ck, 'http://127.0.0.1:{{PANEL_PORT}}' + p], { encoding: 'utf8' }).trim()
       code === '200' ? ok('资源 ' + p) : no('资源 ' + p, '返回 ' + code)
     } catch (e) { no('资源 ' + p, e.message.slice(0, 30)) }
   }

@@ -44,3 +44,20 @@ test('dsh-live-compact/turn-helpers: turn boundary helpers behave deterministica
   assert.equal(latestTurnStart(events)?.seq, 3)
   assert.equal(turnStartForBoundary(events, events[3])?.seq, 3)
 })
+
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { atomicWriteFileSync } from '../dsh/vendor/dsh-onebot-channel/lib/atomic-fs.js'
+
+test('dsh-onebot-channel/lib/atomic-fs: writes atomically and leaves zero .tmp files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ob-atomic-'))
+  try {
+    const target = join(dir, 'sub/state.json')
+    atomicWriteFileSync(target, JSON.stringify({ ok: true }))
+    assert.deepEqual(JSON.parse(readFileSync(target, 'utf8')), { ok: true })
+    assert.deepEqual(readdirSync(join(dir, 'sub')).filter((n) => n.includes('.tmp-')), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

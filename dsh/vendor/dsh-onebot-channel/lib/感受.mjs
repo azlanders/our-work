@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 // 感受.mjs —— 她自己记的「这句话让我有什么感觉」。
 //
 // 为什么不由系统替她判断：拿 6624 条真实群聊语料试过，「回滚」「滚动」「滚木」「越滚越费」
@@ -99,7 +100,7 @@ function trimIfHuge() {
     if (!existsSync(FILE)) return
     if (statSync(FILE).size <= MAX_BYTES) return
     const lines = readFileSync(FILE, 'utf8').split('\n').filter((l) => l.trim() !== '')
-    writeFileSync(FILE, lines.slice(-Math.floor(lines.length / 2)).join('\n') + '\n', 'utf8')
+    atomicWriteFileSync(FILE, lines.slice(-Math.floor(lines.length / 2)).join('\n') + '\n', 'utf8')
   } catch { /* 裁剪失败就让它先长着 */ }
 }
 

@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 // 碎片话题.mjs —— 当前对话里出现了旧事的关键词，才把那条旧事翻出来接一句。
 //
 // 触发条件比 碎片召回.mjs 严：weight≥0.75、得有 tags、得命中 2~6 字的滑窗词，
@@ -77,7 +78,7 @@ export function topicLine(text, opts = {}) {
     const roll = opts.random ?? Math.random;
     if (!chosen || roll() >= 0.25) return '';
     const { item, tag } = chosen;
-    fs.writeFileSync(COOL_FILES[0], JSON.stringify({ lastAt: Date.now() }));
+    atomicWriteFileSync(COOL_FILES[0], JSON.stringify({ lastAt: Date.now() }));
     // REDLINE 2026-11-17（批次622）：命中只给旧事素材，不生成「我想起来了」的固定台词。
     if (item.weight < 0.85) return `[旧事素材·模糊] 和「${tag}」有关，具体哪天想不起来；提不提、怎么提由你定。`;
     const scene = [...item.scene.replace(/[\r\n]+/g, '')].slice(0, 18).join('');

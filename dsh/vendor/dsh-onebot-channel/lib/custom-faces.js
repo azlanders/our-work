@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 /**
  * custom-faces.js —— QQ 收藏表情（商城大表情 / 收藏表情包）的列举、查找与发送。
  */
@@ -39,7 +40,7 @@ export function saveFaceName(emojiId, name, filePath = '') {
     const prev = all[id] && typeof all[id] === 'object' ? all[id] : {}
     const resolvedPath = String(filePath || prev.path || '').trim()
     all[id] = { name: label, at: Date.now(), ...(resolvedPath ? { path: resolvedPath } : {}) }
-    writeFileSync(namesFile(), JSON.stringify(all, null, 1), 'utf8')
+    atomicWriteFileSync(namesFile(), JSON.stringify(all, null, 1), 'utf8')
     return true
   } catch {
     return false
@@ -79,7 +80,7 @@ export function recordFaceUse(emojiId) {
     // 只留最近 40 个名字 —— 这不是账本，是「最近用过谁」
     const 键 = Object.keys(all).sort((a, b) => Number(all[b]) - Number(all[a]))
     for (const k of 键.slice(40)) delete all[k]
-    writeFileSync(join(记忆目录(), '表情用过.json'), JSON.stringify(all, null, 1), 'utf8')
+    atomicWriteFileSync(join(记忆目录(), '表情用过.json'), JSON.stringify(all, null, 1), 'utf8')
     return true
   } catch {
     return false

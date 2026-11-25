@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 // toolrecord.js —— 工具调用账本（批次243，主人 2026-11-08 03:11 点头）
 //
 // 为什么要有：工具调用原来只在 session jsonl 里，跟着对话一起压、跨不了会话。
@@ -42,7 +43,7 @@ function 记(行) {
     fs.appendFileSync(账, JSON.stringify(行) + '\n')
     if (fs.statSync(账).size > 上限) {
       const 全 = fs.readFileSync(账, 'utf8').split('\n').filter(Boolean)
-      fs.writeFileSync(账, 全.slice(Math.floor(全.length / 2)).join('\n') + '\n')
+      atomicWriteFileSync(账, 全.slice(Math.floor(全.length / 2)).join('\n') + '\n')
     }
   } catch { /* 记账是旁路，绝不影响工具本身 */ }
 }

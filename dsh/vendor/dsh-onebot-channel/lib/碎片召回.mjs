@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 // 碎片召回.mjs —— 没人搭话的时候，她自己想起一件旧事。
 //
 // 只在「空场」用：抽一条 weight≥0.6 的碎片，套一句模糊的转述，4 小时冷却。
@@ -43,7 +44,7 @@ export function recallLineSync(state = {}) {
     const scene = pick.length > 40 ? pick.slice(0, 40) + '…' : pick;
     // REDLINE 2026-11-17（批次622）：只递素材，不替她生成第一人称回忆句。
     const line = '[旧事素材·模糊] ' + scene + '（什么时候的记不清了；提不提、怎么提由你定）';
-    try { writeFileSync(COOLDOWN, JSON.stringify({ lastAt: Date.now() })); } catch { /* 冷却写不进也不影响返回 */ }
+    try { atomicWriteFileSync(COOLDOWN, JSON.stringify({ lastAt: Date.now() })); } catch { /* 冷却写不进也不影响返回 */ }
     return line;
   } catch { return ''; }
 }

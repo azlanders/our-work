@@ -33,7 +33,7 @@ for dp, dns, fns in os.walk(root):
             if b'\x00' in raw[:4096]:
                 continue
             txt = raw.decode('utf-8')
-        except Exception:
+        except (UnicodeDecodeError, OSError):
             continue
         for lineno, line in enumerate(txt.splitlines(), 1):
             stripped = allow_re.sub('', line)

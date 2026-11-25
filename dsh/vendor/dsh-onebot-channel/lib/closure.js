@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 /**
  * closure.js —— 这段对话是不是可以收了。
  *
@@ -350,7 +351,7 @@ export function saveClosing(key, entry) {
   })
   table[key] = list.slice(-5)
   try {
-    writeFileSync(CLOSURE_FILE, JSON.stringify(table, null, 2), 'utf8')
+    atomicWriteFileSync(CLOSURE_FILE, JSON.stringify(table, null, 2), 'utf8')
   } catch (error) {
     note('closure', `收尾记录写失败：${error instanceof Error ? error.message : error}`)
   }

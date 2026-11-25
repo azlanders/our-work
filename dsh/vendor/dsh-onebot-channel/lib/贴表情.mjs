@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 /**
  * 贴表情.mjs —— QQ「表情回应」（reaction）的收发两侧。
  *
@@ -178,7 +179,7 @@ function noteUnknown(id) {
     rec.n = (Number(rec.n) || 0) + 1
     rec.last = now
     db[id] = rec
-    writeFileSync(TODO, JSON.stringify(db, null, 1))
+    atomicWriteFileSync(TODO, JSON.stringify(db, null, 1))
   } catch {
     /* 记档失败不影响主流程 */
   }
@@ -344,7 +345,7 @@ export function writeCursor(at, group = '') {
   try {
     const table = cursorTable()
     table[String(group ?? '')] = value
-    writeFileSync(CURSOR, JSON.stringify(table))
+    atomicWriteFileSync(CURSOR, JSON.stringify(table))
   } catch {
     /* 游标写不进去最多是重复播报一次，不值得中断流程 */
   }

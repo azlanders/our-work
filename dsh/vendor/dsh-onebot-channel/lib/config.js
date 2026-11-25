@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 /**
  * config.js —— 配置加载 / 保存 / 迁移。
  *
@@ -338,7 +339,7 @@ export function loadConfig() {
 /** 把当前 config 写回配置文件（UTF-8 无 BOM）。 */
 export function saveConfig() {
   try {
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', 'utf8')
+    atomicWriteFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', 'utf8')
     return true
   } catch (error) {
     note('config', `save failed ${error instanceof Error ? error.message : error}`)

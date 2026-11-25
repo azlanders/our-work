@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 /**
  * images.js —— QQ 图片 -> DSH 附件库 -> image 块。
  *
@@ -84,7 +85,7 @@ function 存图鉴(o) {
   try {
     const p = join(图鉴目录(), '看图记录.json')
     mkdirSync(dirname(p), { recursive: true })
-    writeFileSync(p, JSON.stringify(o, null, 1))
+    atomicWriteFileSync(p, JSON.stringify(o, null, 1))
     return true
   } catch { return false }
 }
@@ -236,7 +237,7 @@ function saveImageCopy(data, mediaType, seg, uin) {
     //   之前原样保留 .jpg，导致「看到的格式」和「实际格式」对不上 ——
     //   收藏夹里存进去的 GIF 顶着 .jpg 的名字，AI 看图时也认不出是动图。
     const path = join(dir, `${stamp}_${uin}_${withExt(base, ext)}`)
-    writeFileSync(path, data)
+    atomicWriteFileSync(path, data)
     note('image', `副本已存 ${path}`)
     // 记进「最近收到的图片」索引 —— 收藏表情包时要用它拿本地路径。
     // name 用**落盘后的真实文件名**（扩展名已按真实格式修正），别用 QQ 原始的 .jpg 名。

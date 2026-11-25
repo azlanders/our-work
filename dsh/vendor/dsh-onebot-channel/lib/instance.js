@@ -1,3 +1,4 @@
+import { atomicWriteFileSync } from './atomic-fs.js'
 /**
  * instance.js —— 单实例锁（防止两套收发循环同时跑）。
  *
@@ -74,7 +75,7 @@ export function acquireInstanceLock() {
   }
 
   try {
-    writeFileSync(LOCK_FILE, JSON.stringify({ pid: me, at: new Date().toISOString() }, null, 2), 'utf8')
+    atomicWriteFileSync(LOCK_FILE, JSON.stringify({ pid: me, at: new Date().toISOString() }, null, 2), 'utf8')
     return { ok: true }
   } catch (error) {
     // 写不了锁文件（权限/磁盘满）不该阻断插件 —— 降级成「当自己拿到了」
