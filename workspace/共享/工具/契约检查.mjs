@@ -943,8 +943,8 @@ const 生产单元 = String(process.env.SERVICES || 'dsh-bot,fish-panel,fish-ups
     const __lib = process.env.QQ_PLUGIN_LIB || '{{DSH_ROOT}}/profiles/web/node_modules/dsh-onebot-channel/lib'
     const __m = __lib.match(/^(.*?)\/profiles\//)
     const __dsh = (process.env.DSH_HOME || (__m ? __m[1] : '{{DSH_ROOT}}'))
-    // 每个实例的快照目录可能不同（hajimi 用 /root/hajimi-patches，大肥鱼用 /root/onebot-patches）。
-    // 有实例专用入口就走它，否则才退回通用脚本；否则检查会拿错目录，永远红。
+    // 每个实例的快照目录可能不同；有专用入口就走它，否则才退回通用脚本。
+    // 否则检查会拿错目录，永远红。
     const 实例名 = path.basename(__dsh).replace(/-dsh$/, '')
     const 专用 = `/root/运维服务/reapply-patches-${实例名}.sh`
     const 脚本 = fs.existsSync(专用) ? 专用 : '/root/运维服务/reapply-patches.sh'
