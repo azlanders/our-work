@@ -61,7 +61,7 @@ export class Store {
    * 同一段正文只存一次（按正文精确匹配 + 防哈希碰撞）；
    * 返回 { rec, isNew, metaChanged } 便于调用方区分增量建索引还是重建索引。
    */
-  add({ text, keywords = [], tags = [], importance = 0.5, eventAt = null, source = null }) {
+  add({ text, keywords = [], tags = [], importance = 0.5, eventAt = null, source = null, scope = '' }) {
     const clean = sanitizeMemoryText(text)
     if (!clean) return null
     const nextImp = Math.min(1, Math.max(0.05, Number(importance) || 0.5))
@@ -128,6 +128,7 @@ export class Store {
       uses: 1,
       lastUsed: nowTs,
       source: source || null,
+      scope: scope || null,
     }
     this.records.push(rec)
     this.byId.set(id, rec)

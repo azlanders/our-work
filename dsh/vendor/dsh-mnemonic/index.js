@@ -221,7 +221,13 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  const archiveTurn = (messages, lastUserIndex) => {
+  // 作用域取会话 id（private:/group:）。拿不到就留空，退化成不隔离，避免把老记录全屏蔽。
+  const sessionScope = (agent) => {
+    const id = agent?.session?.id
+    return id ? String(id) : ''
+  }
+
+  const archiveTurn = (messages, lastUserIndex, scope = '') => {
     const userMsg = messages[lastUserIndex]
     if (!isHumanUserMessage(userMsg)) return null
     const user = messageText(userMsg) || ''
@@ -247,7 +253,7 @@ export function apply(ctx, config = {}) {
     }
     archivedMsgIds.add(msgKey)
 
-    const rec = store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: Date.now(), source: { kind: 'auto' } })
+    const rec = store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: Date.now(), source: { kind: 'auto' }, scope })
     return rec?.id || null
   }
 
@@ -280,7 +286,7 @@ export function apply(ctx, config = {}) {
             return [{ type: 'text', text: value.text }]
           },
         },
-        async execute(args) {
+        async execute(args, exec) {
           let replaced = false
           if (args?.supersedes && typeof args.supersedes === 'string') {
             replaced = store.remove(args.supersedes.trim())
@@ -293,6 +299,7 @@ export function apply(ctx, config = {}) {
             importance: args?.importance ?? 0.5,
             eventAt: args?.eventAt ?? null,
             source: { kind: 'tool' },
+            scope: sessionScope(exec?.agent),
           })
           if (!rec) return { ok: false, id: '', total: store.records.length, text: '没写进去：正文是空的。' }
           if (replaced) store.flush()
@@ -324,9 +331,9 @@ export function apply(ctx, config = {}) {
             return [{ type: 'text', text: value.text }]
           },
         },
-        async execute(args) {
+        async execute(args, exec) {
           const limit = Math.min(10, Math.max(1, Number(args?.limit) || 5))
-          const pool = recall(String(args?.query || ''), limit, Math.max(limit * 2, cfg.rerankPool))
+          const pool = recall(String(args?.query || ''), limit, Math.max(limit * 2, cfg.rerankPool), { scope: sessionScope(exec?.agent) })
           const hits = diversify(pool, { limit, gramsIndex: ensureIndex().grams })
           if (!hits.length) return { hits: 0, text: '记忆库里没有相关的存档。' }
           const body = hits.map((h, i) => {
@@ -364,17 +371,18 @@ export function apply(ctx, config = {}) {
     try {
       if (decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
       const messages = decision.messages
+      const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserMessage(m) ? i : found), -1)
       if (lastUserIndex < 0) return decision
       const query = messageText(messages[lastUserIndex])
-      const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex) : null
+      const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex, scope) : null
       if (messages[lastUserIndex + 1]?.source?.kind === 'plugin:dsh-mnemonic') return decision
       if (query.trim().length < 6) return decision
       const ts = Date.now()
       if (cfg.injectCooldownMs && ts - lastInject.at < cfg.injectCooldownMs) return decision
       const expandedTerms = await rewriteQueryTerms(query)
       const excludeIds = currentTurnId ? new Set([currentTurnId]) : null
-      const pool = recall(query, cfg.limit, cfg.rerankPool, { expandedTerms, excludeIds, nowTs: ts })
+      const pool = recall(query, cfg.limit, cfg.rerankPool, { expandedTerms, excludeIds, nowTs: ts, scope })
       const hits = cfg.rerank
         ? await rerank(expandedTerms ? `${query} ${expandedTerms}` : query, pool)
         : diversify(pool, { limit: cfg.limit, gramsIndex: ensureIndex().grams })

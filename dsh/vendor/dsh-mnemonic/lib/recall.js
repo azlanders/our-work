@@ -81,6 +81,7 @@ export function search(
     expandedTerms = '',
     aliasTerms = '',
     excludeIds = null,
+    scope = '',
     now = Date.now(),
   } = {},
 ) {
@@ -147,6 +148,8 @@ export function search(
   for (const idx of candidates) {
     const rec = records[idx]
     if (!rec || (excludeIds && excludeIds.has(rec.id))) continue
+    // 作用域隔离：带 scope 的记录只在本会话召回；旧记录没有 scope 时才全局可见。
+    if (scope && rec.scope && rec.scope !== scope) continue
     const g = index.grams.get(rec.id)
     if (!g) continue
     const len = g.size || 1

@@ -42,6 +42,27 @@ test('recall supports multi-char keywords, mixed-case keywords, tags, and local 
   assert.equal(h4.length, 0, 'unrelated chitchat must not false-trigger')
 })
 
+test('recall 按 scope 隔离：私聊记录不进群聊召回，无 scope 的老记录仍可见', () => {
+  const now = Date.parse('2026-06-15T12:00:00+08:00')
+  const records = [
+    { id: 'p1', text: '主人说周三要去看牙医。', keywords: ['牙医'], tags: [], importance: 0.6, createdAt: now, uses: 1, scope: 'private:1' },
+    { id: 'g1', text: '群里有人喊周三开黑打游戏。', keywords: ['开黑'], tags: [], importance: 0.6, createdAt: now, uses: 1, scope: 'group:2' },
+    { id: 'old1', text: '周三的老约定是买菜。', keywords: ['周三'], tags: [], importance: 0.6, createdAt: now, uses: 1 },
+  ]
+  const idx = buildIndex(records)
+
+  const inGroup = search(idx, records, '周三 开黑 牙医', { limit: 5, minScore: 0.5, now, scope: 'group:2' })
+  const groupIds = inGroup.map((h) => h.rec.id)
+  assert.ok(groupIds.includes('g1'), '本群记录应该能召回')
+  assert.ok(!groupIds.includes('p1'), '私聊记录不该在群里被召回')
+  assert.ok(groupIds.includes('old1'), '无 scope 的老记录保持全局可见')
+
+  const inPrivate = search(idx, records, '周三 开黑 牙医', { limit: 5, minScore: 0.5, now, scope: 'private:1' })
+  const privateIds = inPrivate.map((h) => h.rec.id)
+  assert.ok(privateIds.includes('p1'))
+  assert.ok(!privateIds.includes('g1'), '群聊记录不该在私聊被召回')
+})
+
 test('diversify prevents redundant near-duplicate hits from crowding out distinct records', () => {
   const hits = [
     { rec: { id: 'a1', text: '周三下午去图书馆借了一本算法书', keywords: ['图书馆', '算法书'] }, score: 10 },
