@@ -141,13 +141,25 @@ const LOCAL_EXPAND_RULES = [
   [/服务器|端口|配置|密码|脚本|部署|代码/, ['服务器', '端口', '配置', '密码', '脚本', '部署']],
 ]
 
+// 属性类目归一：问法常用上位词（口味/哪台/什么歌），原话用具体实例（美式/电磨/粤语歌）。
+// 只补检索词、权重低于原词；触发词必须是明确的类目名词，避免「吃」这种动词过扩。
+const CATEGORY_RULES = [
+  [/喝的|饮品|饮料|喝啥|喝什么/, ['咖啡', '美式', '拿铁', '茶', '奶茶', '奶', '果汁']],
+  [/口味|吃的|吃啥|吃什么|早饭|午饭|晚饭|宵夜|辣不辣/, ['口味', '辣', '甜', '咸', '奶', '咖啡', '美式', '拿铁', '茶', '奶茶', '早饭', '午饭', '晚饭', '宵夜']],
+  [/歌单|听啥|听什么|什么歌|流派|曲子|音乐/, ['歌', '歌单', '流派', '曲子', '音乐', '爵士', '粤语']],
+  [/哪台|器具|电器|磨豆|咖啡机|手冲|机器/, ['磨豆机', '咖啡机', '电磨', '手摇', '器具', '机器']],
+]
+
 export function expandLocal(query) {
   const s = String(query || '')
-  const extra = []
+  const extra = new Set()
   for (const [re, words] of LOCAL_EXPAND_RULES) {
-    if (re.test(s)) extra.push(...words)
+    if (re.test(s)) for (const w of words) extra.add(w)
   }
-  return extra.length ? extra.join(' ') : ''
+  for (const [re, words] of CATEGORY_RULES) {
+    if (re.test(s)) for (const w of words) extra.add(w)
+  }
+  return extra.size ? [...extra].join(' ') : ''
 }
 
 /**
