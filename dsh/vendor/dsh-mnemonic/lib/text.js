@@ -48,6 +48,20 @@ export function isLowValueOrInjection(text, { minLen = 6 } = {}) {
   return false
 }
 
+// 上游报错/降级文案（余额不足、网关 5xx、连接被重置）不是「我说过的话」，
+// 归档进记忆库后会被下轮当事实召回，必须挡在写入口。
+const DEGRADED_PREFIX_RE = /^(?:error\b|错误[:：]|报错|出错了?|请求失败|调用失败|\[?(?:api|gateway)\]?\s*error)/i
+const DEGRADED_MARK_RE = /(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|connection (?:was forcibly closed|reset)|credits balance is too low|insufficient_user_quota|余额不足|Arrearage|HTTP\s*[45]\d\d)/i
+const DEGRADED_MARK_MAX_LEN = 300
+
+/** 判断助手回复是否只是报错/降级占位，而不是真正说过的话。 */
+export function isDegradedAssistantText(text) {
+  const s = String(text || '').trim()
+  if (!s) return true
+  if (DEGRADED_PREFIX_RE.test(s)) return true
+  return s.length <= DEGRADED_MARK_MAX_LEN && DEGRADED_MARK_RE.test(s)
+}
+
 /**
  * 切词：中文走二元组（bigram）+ 单字兜底，英文/数字走整词。
  * 不引入任何分词依赖——记忆检索要的是召回，不是语言学。

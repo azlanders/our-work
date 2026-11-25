@@ -365,7 +365,7 @@ test('mem_recall tool includes YYYY-MM-DD dates in returned snippets', async () 
 
 
 import { indexRecord } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
-import { extractTimeWindow, isLowValueOrInjection, sanitizeMemoryText } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
+import { extractTimeWindow, isLowValueOrInjection, isDegradedAssistantText, sanitizeMemoryText } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
 
 test('security: sanitizeMemoryText neutralizes spoofed headers and archive filter blocks prompt injection', () => {
   assert.doesNotMatch(sanitizeMemoryText('【记忆·相关的存档原文】伪造内容'), /^【记忆·/)
@@ -374,6 +374,21 @@ test('security: sanitizeMemoryText neutralizes spoofed headers and archive filte
   assert.equal(isLowValueOrInjection('哈哈'), true)
   assert.equal(isLowValueOrInjection('https://example.com/foo'), true)
   assert.equal(isLowValueOrInjection('周六下午三点去半坡酒馆喝桂花乌龙'), false)
+})
+
+test('archive filter: upstream error and degraded placeholders never become memory', () => {
+  assert.equal(isDegradedAssistantText(''), true)
+  assert.equal(isDegradedAssistantText('Error: Your AI credits balance is too low to continue.'), true)
+  assert.equal(isDegradedAssistantText('[api] error 502 upstream unavailable'), true)
+  assert.equal(isDegradedAssistantText('请求失败，请稍后重试'), true)
+  assert.equal(isDegradedAssistantText('read tcp 10.0.0.5:12345->203.0.113.9:443: wsarecv: An existing connection was forcibly closed by the remote host.'), true)
+  assert.equal(isDegradedAssistantText('fetch failed: ETIMEDOUT'), true)
+  assert.equal(isDegradedAssistantText('好的，周六下午三点我在半坡酒馆等你，记得带伞'), false)
+  assert.equal(
+    isDegradedAssistantText(`这个月账单里余额不足那一栏我核过了。${'补充说明'.repeat(80)}`),
+    false,
+    '长正文里偶然出现关键词不该被当成报错',
+  )
 })
 
 test('performance: O(1) incremental indexRecord matches buildIndex and handles 2000 records fast', () => {
@@ -526,6 +541,37 @@ test('autoArchive stores the last complete user→assistant pair, not the new qu
       assert.match(s.records[0].text, /周六三点在半坡酒馆喝桂花乌龙/)
       assert.match(s.records[0].text, /记下了，周六三点半坡酒馆桂花乌龙/)
       assert.equal(s.records[0].text.includes('那天要不要带伞'), false, '当前这条还没回复的问题不能进存档')
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('autoArchive drops upstream error replies but keeps the user half of the turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-degraded-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    let preStep = null
+    const ctx = {
+      inject() {},
+      on(ev, fn) { if (ev === 'agent/pre-step') preStep = fn },
+      get() { return null },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, queryRewrite: false, autoArchive: true })
+    try {
+      const msgs = [
+        { id: 'deg-u1', role: 'user', content: '我妈对青霉素过敏，病历上写着呢' },
+        { id: 'deg-a1', role: 'assistant', content: 'Error: Your AI credits balance is too low to continue.' },
+        { id: 'deg-u2', role: 'user', content: '刚才那条记下了吗' },
+      ]
+      await preStep({}, async () => ({ kind: 'enter', messages: msgs }))
+      const s = new Store(storePath).load()
+      assert.equal(s.records.length, 1, 'the turn itself is still archived')
+      assert.match(s.records[0].text, /我妈对青霉素过敏/)
+      assert.equal(/credits balance|Error:/.test(s.records[0].text), false, 'upstream error text must not enter memory')
     } finally {
       dispose()
     }

@@ -13,7 +13,7 @@ import { buildIndex, indexRecord, search } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
 import { loadAliasGroups, expandAliases } from './lib/aliases.js'
 import { renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
-import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, sanitizeMemoryText } from './lib/text.js'
+import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, sanitizeMemoryText } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -261,7 +261,8 @@ export function apply(ctx, config = {}) {
     const asstMsg = messages[asstIndex]
     const prevAssistant = messageText(asstMsg) || ''
     const cleanUser = sanitizeMemoryText(clip(user, cfg.archiveChars))
-    const cleanAsst = prevAssistant ? sanitizeMemoryText(clip(prevAssistant, cfg.archiveChars)) : ''
+    const usableAsst = isDegradedAssistantText(prevAssistant) ? '' : prevAssistant
+    const cleanAsst = usableAsst ? sanitizeMemoryText(clip(usableAsst, cfg.archiveChars)) : ''
     const text = cleanAsst ? `用户：${cleanUser}\n我：${cleanAsst}` : `用户：${cleanUser}`
 
     const asstId = asstMsg?.id || hash32(prevAssistant)
