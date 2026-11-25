@@ -101,8 +101,10 @@ function outerPresetIds(fiber) {
   const push = (value) => {
     if (value && (typeof value === "object" || typeof value === "function") && !seen.has(value)) queue.push(value);
   };
-  try { push(fiber?.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
-  try { push(fiber?.fiber?.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+  // 这几个都是「探一下有没有」的可选属性：Cordis 对没注入的字段直接抛
+  // `cannot get property "x" without inject`，属正常返回值，不该当错误刷日志。
+  try { push(fiber?.parent) } catch {}
+  try { push(fiber?.fiber?.parent) } catch {}
   while (queue.length) {
     const current = queue.shift();
     if (seen.has(current)) continue;
@@ -115,13 +117,13 @@ function outerPresetIds(fiber) {
         current?.config?.id,
         current?.id,
       ];
-    } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+    } catch {}
     const candidate = ids.find((id) => typeof id === "string" && id.length > 0);
     if (candidate && !found.includes(candidate)) found.push(candidate);
-    try { push(current.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
-    try { push(current.fiber); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
-    try { push(current.parent?.fiber); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
-    try { push(current.fiber?.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+    try { push(current.parent) } catch {}
+    try { push(current.fiber) } catch {}
+    try { push(current.parent?.fiber) } catch {}
+    try { push(current.fiber?.parent) } catch {}
   }
   return found;
 }
