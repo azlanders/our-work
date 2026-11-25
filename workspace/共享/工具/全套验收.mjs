@@ -57,7 +57,7 @@ const files = [
   [base + '/睡醒.json', '作息标记'],
 ]
 // ROOM_OFF 2026-11-05：房间功能停用时不该把它的产物当红的
-try { if (JSON.parse(readFileSync(base + '/功能开关.json', 'utf8')).房间 === true) files.push([base + '/房间对话.json', '房间对话']) } catch {}
+try { if (JSON.parse(readFileSync(base + '/功能开关.json', 'utf8')).房间 === true) files.push([base + '/房间对话.json', '房间对话']) } catch (_err) { console.error('[全套验收]', _err?.message || _err) }
 for (const [f, name] of files) (existsSync(f) ? ok(name) : no(name, '文件不存在'))
 
 // HERE 2026-11-17（批次619）：只写不读的产物单独列，不让“文件存在”冒充链路健康。
@@ -125,7 +125,7 @@ const 可选端口集 = new Set(String(process.env.ACCEPT_OPTIONAL_PORTS
 if (角色参数 !== 'full') console.log('  · 本机角色=' + 角色参数 + '，可选组件不启用不算红')
 // ROOM_OFF 2026-11-05：房间服务停用后不再列进必查服务（功能开关 房间=true 时自动加回）
 let ROOM_ON2 = false
-try { ROOM_ON2 = JSON.parse(readFileSync('{{BOT_ROOT}}/记忆/功能开关.json', 'utf8')).房间 === true } catch {}
+try { ROOM_ON2 = JSON.parse(readFileSync('{{BOT_ROOT}}/记忆/功能开关.json', 'utf8')).房间 === true } catch (_err) { console.error('[全套验收]', _err?.message || _err) }
 const svcs = ['dsh-bot', 'fish-panel', ...(ROOM_ON2 ? ['fish-room'] : []), 'napcat-fish']
 for (const s of svcs) {
   let st
@@ -179,7 +179,7 @@ for (const s of svcs) {
 // ROOM_OFF 2026-11-05：3D 房间服务已按主人要求 stop+disable，
 // 验收时不再把它当红的；想恢复就把 功能开关.json 的 房间 改回 true。
 let ROOM_ON = false
-try { ROOM_ON = JSON.parse(readFileSync('{{BOT_ROOT}}/记忆/功能开关.json', 'utf8')).房间 === true } catch {}
+try { ROOM_ON = JSON.parse(readFileSync('{{BOT_ROOT}}/记忆/功能开关.json', 'utf8')).房间 === true } catch (_err) { console.error('[全套验收]', _err?.message || _err) }
 for (const [name, port] of [['面板', 8788], ...(ROOM_ON ? [['房间', 8790]] : [])]) {
   if (可选端口集.has(String(port))) { ok(name + '端口（本机未启用，跳过）'); continue }
   try {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 /**
  * 余额预警.mjs —— 上游余额低了就往面板待办里提一条。
  *
@@ -126,13 +127,13 @@ const 明细 = 要提.map((x) => `${x.名} 只剩 ${x.余额.toFixed(2)} ${x.币
   更新于: new Date(现在 + 8 * 3600e3).toISOString().slice(0, 10)
 })
 try {
-  writeFileSync(待办, JSON.stringify(档, null, 1), 'utf8')
+  原子写(待办, JSON.stringify(档, null, 1), 'utf8')
 } catch (e) {
   console.error('[余额] 写待办失败：' + (e instanceof Error ? e.message : e))
   process.exit(1)
 }
 try {
-  writeFileSync(提醒档, JSON.stringify(提醒, null, 1), 'utf8')
+  原子写(提醒档, JSON.stringify(提醒, null, 1), 'utf8')
 } catch { /* 提醒档写不进去最多多提一次，不影响主流程 */ }
 
 console.log('[余额] 已写面板待办：' + 明细)

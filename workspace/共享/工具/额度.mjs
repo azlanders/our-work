@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 // 读取 Gemini Web 账号的 5 小时 / 7 天额度窗口，给 WebUI 用量页用。
 // 思路和 Magpie 的 usage.mjs 一致：从 gemini-web2api 的 SQLite 里拿活 cookie，
 // 走后端同一个代理出口，请求 gemini.google.com 的 UsagePageQuery。
@@ -67,7 +68,7 @@ function readCache() {
 function writeCache(v) {
   try {
     mkdirSync(dirname(CACHE), { recursive: true })
-    writeFileSync(CACHE, JSON.stringify(v))
+    原子写(CACHE, JSON.stringify(v))
   } catch { /* 写不进去就不缓存，下次重新读 */ }
 }
 
@@ -156,7 +157,7 @@ function appendHistory(windows, now) {
       hist.push({ at: now, windows: windows.map((w) => ({ name: w.name, used: w.used })) })
       hist = hist.filter((h) => now - h.at < 7 * 24 * 3600 * 1000)
       mkdirSync(dirname(HISTORY), { recursive: true })
-      writeFileSync(HISTORY, JSON.stringify(hist))
+      原子写(HISTORY, JSON.stringify(hist))
     }
   } catch { /* 历史只是画图，写不了不影响主结果 */ }
 }

@@ -39,7 +39,7 @@ const 注册 = []
           // 单个注册函数失败不影响整体；下面用数量对账
         }
       }
-    } catch {}
+    } catch (_err) { console.error('[工具面审计]', _err?.message || _err) }
   }
 }
 
@@ -50,7 +50,7 @@ const 收文本 = (p, 标签) => {
     const t = fs.readFileSync(p, 'utf8')
     if (t.length < 4 || t.length > 2 * 1024 * 1024) return
     提示源.push({ 标签, 文本: t })
-  } catch {}
+  } catch (_err) { console.error('[工具面审计]', _err?.message || _err) }
 }
 // 她自己读的文件
 for (const f of ['SOUL.md', '门牌.md', '梗知识.md', '热记忆.md']) 收文本(path.join(DIR, f), f)

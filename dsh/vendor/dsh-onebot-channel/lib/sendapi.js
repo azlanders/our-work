@@ -132,7 +132,7 @@ export function startSendApi(stopFns) {
     })
     if (Array.isArray(stopFns)) {
       stopFns.push(() => {
-        try { server.close() } catch {}
+        try { server.close() } catch (_err) { console.error('[onebot:sendapi]', _err?.message || _err) }
       })
     }
   } catch (error) {

@@ -748,7 +748,7 @@ export function slotSurfInsights(ctx) {
         parts.push(标 + '看B站攒下的：「' + 引 + '」')
       }
     }
-  } catch {}
+  } catch (_err) { console.error('[onebot:voiceSlots]', _err?.message || _err) }
   try {
     const bsPath = (process.env.DSH_HOME || '{{DSH_ROOT}}') + '/tieba-duty/bar-styles.json'
     if (existsSync(bsPath)) {
@@ -766,7 +766,7 @@ export function slotSurfInsights(ctx) {
         parts.push((s1.日 ? s1.日 + ' ' : '') + '逛贴吧记下的真人短句味：「' + s1.话 + '」')
       }
     }
-  } catch {}
+  } catch (_err) { console.error('[onebot:voiceSlots]', _err?.message || _err) }
   if (!parts.length) return ''
   // 口径写死在尾巴上：这些是攒的，不是今天刷的；被问就照实说，没看就说没看。
   // 2026-11-12 那次唯一的编造（「剩下全是刷小说」）就是从「没有这层口径」来的。

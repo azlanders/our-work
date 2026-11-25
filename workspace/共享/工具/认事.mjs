@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 // ⛔ 已停用（2026-11-05，批次 63）。**没有任何东西再调它。**
 //
 // 它原来由 poll.js 的 RENSHI_HOOK 每条群消息 spawn 一次：拿 奖惩.mjs --识别
@@ -61,6 +62,6 @@ const k = kind.replace('认成：', '').trim()
 try {
   const out = execFileSync('/usr/local/bin/node', [tools + '/奖惩.mjs', '--' + k, ...(from ? ['--from', from] : []), '--why', text.slice(0, 24)], { encoding: 'utf8', timeout: 12000 }).trim()
   th.count += 1
-  writeFileSync(throttleP, JSON.stringify(th))
+  原子写(throttleP, JSON.stringify(th))
   console.log('认到「' + k + '」：' + out.split('\n')[0])
 } catch (e) { console.log('落账失败：' + e.message.slice(0, 40)) }

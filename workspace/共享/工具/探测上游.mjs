@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 /**
  * 探测上游.mjs —— 每 10 分钟摸一次中转：让她调一个假工具，看 tool_use 有没有回来。
  *
@@ -24,7 +25,7 @@ const 候选档 = DSH + '/fish-api-keys.json'
 const 阈值 = 2
 
 const 读 = (p, d) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } catch { return d } }
-const 写 = (p, o) => fs.writeFileSync(p, JSON.stringify(o, null, 2) + '\n', 'utf8')
+const 写 = (p, o) => 原子写(p, JSON.stringify(o, null, 2) + '\n', 'utf8')
 const 京 = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' ')
 
 const 体 = {

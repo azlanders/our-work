@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sendPngFile, isFreshFile } from './出口/面板响应/index.mjs'
 // 面板.mjs v7 —— 注册登录 + 访客只看人话 + 主人可预览客人视角（2026-11-02）
 //
 // 为什么这么写：
@@ -149,7 +150,7 @@ const 服装表 = (() => {
     const 出 = {}
     for (const [n, v] of Object.entries(衣)) 出[n] = { 价: Number((v.穿 && v.穿.价) || v.价 || 0), 类别: '穿', 标签: v.标签 || [] }
     if (Object.keys(出).length) return 出
-  } catch {}
+  } catch (_err) { console.error('[面板]', _err?.message || _err) }
   try { return JSON.parse(readFileSync(tools + '/服装表.json', 'utf8')) } catch { return {} }
 })()
 const SHOP = Object.assign({},
@@ -499,7 +500,7 @@ function 读文档(key) {
       内容 = readFileSync(项.路, 'utf8')
     } catch (e) {
       if (!e || e.code !== 'ENOENT' || 项.默认 === undefined) throw e
-      try { _mkd(dirname(项.路), { recursive: true }) } catch {}
+      try { _mkd(dirname(项.路), { recursive: true }) } catch (_err) { console.error('[面板]', _err?.message || _err) }
       writeFileSync(项.路, JSON.stringify(项.默认, null, 2) + '\n', 'utf8')
       内容 = readFileSync(项.路, 'utf8')
     }
@@ -626,7 +627,7 @@ async function 写一项(id, 值) {
     const 回 = Number(项.读(源))
     const 写成 = 数差极小(回, v)
     let 更新 = ''
-    try { 更新 = 京分(_st(base + '/' + 项.文件).mtimeMs) } catch {}
+    try { 更新 = 京分(_st(base + '/' + 项.文件).mtimeMs) } catch (_err) { console.error('[面板]', _err?.message || _err) }
     return {
       ok: 写成, id: 项.id, 名: 项.名, 值: v, ...(前后 || {}), 回: Number.isFinite(回) ? 回 : null, 更新,
       msg: 写成 ? '已写入并回读确认' : '写入后回读不一致，请重试',
@@ -692,8 +693,7 @@ async function 守调试覆盖() {
     if (!有变) return
     后['更新时间'] = 京分(now)
     存状态(p, 后, 前)
-  } catch {
-  } finally {
+  } catch (_err) { console.error('[面板]', _err?.message || _err) } finally {
     __守覆盖中 = false
   }
 }
@@ -1032,7 +1032,7 @@ it('别扭', 试(() => { const p = 别.people || {}; const k = Object.keys(p); r
   const 惦记数 = 试(() => {
     const m = new Map()
     for (const l of readFileSync(base + '/惦记.jsonl', 'utf8').trim().split(/\r?\n/).filter(Boolean)) {
-      try { const j = JSON.parse(l); if (j && j.what) m.set(String(j.what), j) } catch {}
+      try { const j = JSON.parse(l); if (j && j.what) m.set(String(j.what), j) } catch (_err) { console.error('[面板]', _err?.message || _err) }
     }
     const open = [...m.values()].filter((x) => x.done !== true).length
     return `${open} 条未决（共 ${m.size} 项）`
@@ -2370,7 +2370,7 @@ function 存候选钥匙(list) {
     _rn(tmp, API_KEYS_FILE)
     return true
   } catch {
-    try { unlinkSync(tmp) } catch {}
+    try { unlinkSync(tmp) } catch (_err) { console.error('[面板]', _err?.message || _err) }
     return false
   }
 }
@@ -4122,36 +4122,16 @@ const 面板服务 = createServer((req, res) => {
       }).catch(() => r(false))
     })
     if (req.method === 'GET' && url === '/api/fleet/qrcode') {
-      const 发图 = () => {
-        try {
-          if (!existsSync(qrFile)) return send(404, 'application/json; charset=utf-8', JSON.stringify({ ok: false, msg: '二维码还没抓到，QQ 客户端可能没在跑' }))
-          const buf = readFileSync(qrFile)
-          res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' })
-          return res.end(buf)
-        } catch (e) {
-          return send(500, 'application/json; charset=utf-8', JSON.stringify({ ok: false, msg: String(e.message || e) }))
-        }
-      }
+      const 发图 = () => sendPngFile(res, qrFile, '二维码还没抓到，QQ 客户端可能没在跑')
       const 强刷 = /[?&]refresh=1/.test(String(req.url || ''))
-      const 够新 = !强刷 && existsSync(qrFile) && Date.now() - _st(qrFile).mtimeMs < 4000
-      if (够新) return 发图()
+      if (!强刷 && isFreshFile(qrFile, 4000)) return 发图()
       跑抓码(强刷).then(发图)
       return
     }
     if (req.method === 'GET' && url === '/api/fleet/qqwin') {
       const winFile = '/tmp/_qqwin-{{BOT_NAME}}.png'
-      const 发全窗 = () => {
-        try {
-          if (!existsSync(winFile)) return send(404, 'application/json; charset=utf-8', JSON.stringify({ ok: false, msg: '还没抓到 QQ 窗口' }))
-          const buf = readFileSync(winFile)
-          res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' })
-          return res.end(buf)
-        } catch (e) {
-          return send(500, 'application/json; charset=utf-8', JSON.stringify({ ok: false, msg: String(e.message || e) }))
-        }
-      }
-      const 窗够新 = existsSync(winFile) && Date.now() - _st(winFile).mtimeMs < 4000
-      if (窗够新) return 发全窗()
+      const 发全窗 = () => sendPngFile(res, winFile, '还没抓到 QQ 窗口')
+      if (isFreshFile(winFile, 4000)) return 发全窗()
       跑抓码(false).then(发全窗)
       return
     }
@@ -4159,7 +4139,7 @@ const 面板服务 = createServer((req, res) => {
       ;(async () => {
         const 探口 = (port) => new Promise((r) => {
           const s = connect({ host: '127.0.0.1', port, timeout: 600 })
-          const 完 = (ok) => { try { s.destroy() } catch {} r(ok) }
+          const 完 = (ok) => { try { s.destroy() } catch (_err) { console.error('[面板]', _err?.message || _err) } r(ok) }
           s.on('connect', () => 完(true))
           s.on('timeout', () => 完(false))
           s.on('error', () => 完(false))
@@ -4192,16 +4172,16 @@ const 面板服务 = createServer((req, res) => {
             const st = _st(qrFile)
             qrMeta = { exists: st.size > 100, mtimeMs: Math.round(st.mtimeMs), ageSec: Math.max(0, Math.round((Date.now() - st.mtimeMs) / 1000)) }
           }
-        } catch {}
+        } catch (_err) { console.error('[面板]', _err?.message || _err) }
 
         let fleet = { ok: false, slots: [], activeSlot: '', fallbackSlot: '', sharedKeys: [] }
         try {
           const fr = await fetch('http://127.0.0.1:' + GW_PORT + '/__fleet/state', { headers: fleetHeaders, signal: AbortSignal.timeout(2500) })
           if (fr.ok) fleet = await fr.json()
-        } catch {}
+        } catch (_err) { console.error('[面板]', _err?.message || _err) }
 
         let soul = ''
-        try { soul = readFileSync('{{BOT_ROOT}}/SOUL.md', 'utf8') } catch {}
+        try { soul = readFileSync('{{BOT_ROOT}}/SOUL.md', 'utf8') } catch (_err) { console.error('[面板]', _err?.message || _err) }
 
         send(200, 'application/json; charset=utf-8', JSON.stringify({
           ok: true,
@@ -4245,7 +4225,7 @@ const 面板服务 = createServer((req, res) => {
                 const j = await r.json()
                 已登 = !!(j && j.retcode === 0 && j.data && j.data.user_id)
               }
-            } catch {}
+            } catch (_err) { console.error('[面板]', _err?.message || _err) }
             if (已登) return send(200, 'application/json; charset=utf-8', JSON.stringify({ ok: true, msg: '{{BOT_DISPLAY}}已经在线上啦，不用扫码喵' }))
             // 2026-11-24：不再重启 SnowLuma（会把已登录的号踢掉）。直接让 QQ 登录窗
             // 切两次页签重新取码，然后由 qq扫码.py 截屏裁出来。
@@ -5393,7 +5373,7 @@ const 面板服务 = createServer((req, res) => {
             try {
               const 旧态 = load(base + '/一起听.json', null)
               if (旧态) 写档(base + '/一起听.json', Object.assign({}, 旧态, { active: false, disabled: true }))
-            } catch {}
+            } catch (_err) { console.error('[面板]', _err?.message || _err) }
           }
           存接入(新)
           return json({ ok: true, msg: '存好了，下一句生效', 快照: 接入快照() })

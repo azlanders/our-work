@@ -1,21 +1,19 @@
 /**
  * dsh-mnemonic — 自研长期记忆。
  *
- * 设计取舍（都是拿别的插件实测换来的）：
- * - 静态成本压到最低：2 个工具（约 1.2k 字）+ 一张 ≤300 字状态卡，不用 14 个工具换 21k 字。
- * - 每轮最多注入一块 ≤900 字的回忆，且在分数闸门之下宁可不投——防“刚说完就忘”变成“见缝就翻旧账”。
- *   900 是基准换来的：600/700 字在多条命中+纪律尾注下容易把末条截断，题就答「记不清」。
- * - 检索全本地：BM25（中文 bigram）+ 关键词/标签加分 + 重要度/新鲜度加权 + MMR 去冗余，不依赖云端 embedding。
- * - 存储是纯 JSONL，一条一行，坏行跳过；正文去重，靠 hash 防复读把库撑爆。
- * - 只归档与检索真人用户发言，过滤 runtime-context/checkpoint/plugin 合成消息。
+ * 设计取舍：
+ * - 静态成本压到最低：2 个工具（mem_save / mem_recall）+ 一张 ≤300 字状态卡。
+ * - 增量倒排索引（O(1) 追加）+ BM25 + 关键词/标签 + 中文相对时间窗加权 + MMR 去冗余（复用已建 grams）。
+ * - 防自我回声、防提示词注入污染、容量自动压实（maxRecords）、UTC+8 北京时间渲染、上游超时熔断。
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Store, defaultStorePath } from './lib/store.js'
-import { buildIndex, search } from './lib/recall.js'
+import { buildIndex, indexRecord, search } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
-import { renderCard, renderRecallBlock, renderClock } from './lib/card.js'
-import { messageText, roleOf, clip, hash32 } from './lib/text.js'
+import { loadAliasGroups, expandAliases } from './lib/aliases.js'
+import { renderCard, renderRecallBlock, renderClock, ymd } from './lib/card.js'
+import { messageText, roleOf, clip, hash32, isLowValueOrInjection, sanitizeMemoryText } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -33,7 +31,6 @@ const NON_USER_KINDS = new Set([
   'nudge',
 ])
 
-/** 仅放行真人发言：排除 runtime-context / checkpoint / 插件注入等非真人 user 角色消息。 */
 export function isHumanUserMessage(msg) {
   if (roleOf(msg) !== 'user') return false
   const kind = msg?.source?.kind ?? msg?.message?.source?.kind
@@ -48,10 +45,19 @@ export function isHumanUserMessage(msg) {
   return true
 }
 
+export function effectiveMinScore(recordCount, targetMinScore) {
+  const low = Math.min(targetMinScore, 1.2)
+  if (recordCount <= 30) return low
+  if (recordCount >= 200) return targetMinScore
+  const ratio = (recordCount - 30) / (200 - 30)
+  return Math.round((low + (targetMinScore - low) * ratio) * 100) / 100
+}
+
 export function apply(ctx, config = {}) {
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   const cfg = {
     storePath: config.storePath || defaultStorePath(home),
+    maxRecords: Number(config.maxRecords ?? 5000),
     injectChars: Number(config.injectChars ?? 900),
     itemChars: Number(config.itemChars ?? 200),
     cardChars: Number(config.cardChars ?? 300),
@@ -64,36 +70,60 @@ export function apply(ctx, config = {}) {
     rerank: config.rerank ?? false,
     rerankPool: Number(config.rerankPool ?? 12),
     queryRewrite: config.queryRewrite ?? true,
+    rewriteTimeoutMs: Number(config.rewriteTimeoutMs ?? 4000),
+    rerankTimeoutMs: Number(config.rerankTimeoutMs ?? 5000),
   }
 
-  const store = new Store(cfg.storePath).load()
+  const store = new Store(cfg.storePath, { maxRecords: cfg.maxRecords }).load()
+  const aliasGroups = loadAliasGroups(cfg.storePath, config.aliases)
   let index = buildIndex(store.records)
-  let indexSize = store.records.length
+  let indexedCount = store.records.length
   let indexDirty = false
-  let lastInject = { at: 0, text: '' }
+  let lastInject = { at: 0, sig: '' }
+  let queryCount = 0
+  let totalQueryMs = 0
   const archivedMsgIds = new Set()
   const rewriteCache = new Map()
 
+  /** 增量同步索引：仅追加新记录时 O(1) 增量更新，删除/压实/改写元数据时才全量重建。 */
   const ensureIndex = () => {
-    if (indexDirty || indexSize !== store.records.length) {
+    if (indexDirty || store.dirty || indexedCount > store.records.length) {
       index = buildIndex(store.records)
-      indexSize = store.records.length
+      indexedCount = store.records.length
       indexDirty = false
+      store.dirty = false
+      return index
+    }
+    while (indexedCount < store.records.length) {
+      indexRecord(index, store.records[indexedCount], indexedCount)
+      indexedCount += 1
     }
     return index
   }
 
-  const recall = (query, limit = cfg.limit, pool = limit) => {
-    // 新库（<50 条）词项 df 几乎等于 n，分数天然低，2.4 的闸门会一条都不召回。
-    const minScore = store.records.length < 50 ? Math.min(cfg.minScore, 1.2) : cfg.minScore
-    return search(ensureIndex(), store.records, query, { limit: pool, minScore, minHits: cfg.minHits })
+  const recall = (query, limit = cfg.limit, pool = limit, { expandedTerms = '', excludeIds = null, nowTs = Date.now() } = {}) => {
+    const t0 = performance.now()
+    const minScore = effectiveMinScore(store.records.length, cfg.minScore)
+    const idx = ensureIndex()
+    const aliasTerms = expandAliases(query, aliasGroups)
+    const res = search(idx, store.records, query, {
+      limit: pool,
+      minScore,
+      minHits: cfg.minHits,
+      expandedTerms,
+      aliasTerms,
+      excludeIds,
+      now: nowTs,
+    })
+    queryCount += 1
+    totalQueryMs += performance.now() - t0
+    return res
   }
 
-  // 把用户那句话翻成检索词再查库。
-  // 基准实测（P16 123 题）：不改写 91，改写 99，只加重排不改写 90 —— 有效的就是这一步。
   const REWRITE_SYS = `把用户的这句话转成往旧聊天记录里检索用的词。只输出词，空格分隔，8-12 个。
 要写人名、物件、动作，以及同义词和上位词（问"喝的"写 咖啡 美式 拿铁 茶；问"吃的"写 抄手 面 饭 早饭）。
 不要解释，不要句子。`
+
   const llmAndModel = () => {
     try {
       const llm = ctx.get('llm')
@@ -104,61 +134,75 @@ export function apply(ctx, config = {}) {
       return null
     }
   }
-  const streamText = async (llm, sel, system, user, maxTokens) => {
-    let out = ''
-    const stream = llm.stream({
-      provider: sel.provider,
-      model: sel.model,
-      system,
-      messages: [{ role: 'user', content: user }],
-      temperature: 0,
-      maxTokens,
-    })
-    for await (const chunk of stream) {
-      if (chunk?.type === 'text-delta') out += chunk.text
+
+  const streamText = async (llm, sel, system, user, maxTokens, timeoutMs) => {
+    let timer = null
+    const run = async () => {
+      let out = ''
+      const stream = llm.stream({
+        provider: sel.provider,
+        model: sel.model,
+        system,
+        messages: [{ role: 'user', content: user }],
+        temperature: 0,
+        maxTokens,
+      })
+      for await (const chunk of stream) {
+        if (chunk?.type === 'text-delta') out += chunk.text
+      }
+      return out.trim()
     }
-    return out.trim()
+    if (!timeoutMs || timeoutMs <= 0) return run()
+    try {
+      return await Promise.race([
+        run(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs)
+          timer.unref?.()
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
-  /** 改写失败就用原句，不能因为这一步把整轮卡住；同问短时缓存避免工具循环重复调模型。 */
-  async function rewriteQuery(query) {
-    if (!cfg.queryRewrite) return query
+
+  async function rewriteQueryTerms(query) {
+    if (!cfg.queryRewrite) return ''
     const cacheKey = query.trim()
     const cached = rewriteCache.get(cacheKey)
     const ts = Date.now()
-    if (cached && ts - cached.at < REWRITE_TTL_MS) return cached.expanded
+    if (cached && ts - cached.at < REWRITE_TTL_MS) return cached.words
     const svc = llmAndModel()
-    if (!svc) return query
+    if (!svc) return ''
     try {
-      const words = (await streamText(svc.llm, svc.sel, REWRITE_SYS, query, 120)).replace(/\n+/g, ' ')
-      const expanded = words ? `${query} ${words}` : query
+      const words = (await streamText(svc.llm, svc.sel, REWRITE_SYS, query, 120, cfg.rewriteTimeoutMs)).replace(/\n+/g, ' ').trim()
       if (rewriteCache.size >= 64) {
         const firstKey = rewriteCache.keys().next().value
         if (firstKey !== undefined) rewriteCache.delete(firstKey)
       }
-      rewriteCache.set(cacheKey, { expanded, at: ts })
-      return expanded
+      rewriteCache.set(cacheKey, { words, at: ts })
+      return words
     } catch (error) {
-      try { ctx.logger?.warn?.(`dsh-mnemonic: 查询改写失败，用原句: ${error?.message || error}`) } catch {}
-      return query
+      try { ctx.logger?.warn?.(`dsh-mnemonic: 查询改写失败，用原句: ${error?.message || error}`) } catch (_err) { console.error('[mnemonic]', _err?.message || _err) }
+      return ''
     }
   }
 
-  // 重排保留但默认关：基准里单独加重排不提分（P16 91 → 90）。
   const RERANK_SYS = `你是记忆检索排序器。给定查询和编号候选记忆，选出与查询真正相关的最多 ${cfg.limit} 条，按相关度从高到低。只输出 JSON：{"picks":[序号,...]}。完全不相关的不要选，不要解释。`
   async function rerank(query, hits) {
     if (!cfg.rerank || hits.length <= cfg.limit) return hits.slice(0, cfg.limit)
     const svc = llmAndModel()
-    if (!svc) return diversify(hits, { limit: cfg.limit })
+    if (!svc) return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
     try {
       const lines = hits
         .slice(0, cfg.rerankPool)
         .map((h, i) => `${i + 1}. ${String(h.rec.text).slice(0, 140).replace(/\s+/g, ' ')}`)
         .join('\n')
-      const out = await streamText(svc.llm, svc.sel, RERANK_SYS, `查询: ${query}\n候选:\n${lines}`, 200)
+      const out = await streamText(svc.llm, svc.sel, RERANK_SYS, `查询: ${query}\n候选:\n${lines}`, 200, cfg.rerankTimeoutMs)
       const m = out.match(/\{[\s\S]*\}/)
-      if (!m) return diversify(hits, { limit: cfg.limit })
+      if (!m) return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
       const picks = JSON.parse(m[0]).picks
-      if (!Array.isArray(picks)) return diversify(hits, { limit: cfg.limit })
+      if (!Array.isArray(picks)) return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
       const out2 = []
       const seen = new Set()
       for (const p of picks) {
@@ -168,45 +212,49 @@ export function apply(ctx, config = {}) {
         out2.push(hits[i])
         if (out2.length >= cfg.limit) break
       }
-      return out2.length ? out2 : diversify(hits, { limit: cfg.limit })
+      return out2.length ? out2 : diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
     } catch (error) {
-      try { ctx.logger?.warn?.(`dsh-mnemonic: 重排失败，回退去重顺序: ${error?.message || error}`) } catch {}
-      return diversify(hits, { limit: cfg.limit })
+      try { ctx.logger?.warn?.(`dsh-mnemonic: 重排失败，回退去重顺序: ${error?.message || error}`) } catch (_err) { console.error('[mnemonic]', _err?.message || _err) }
+      return diversify(hits, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
     }
   }
 
-  // 每轮把「用户这句 + 上一句回复」顺手存一条：零模型成本，保证刚说过的也检索得到。
   const archiveTurn = (messages, lastUserIndex) => {
     const userMsg = messages[lastUserIndex]
-    if (!isHumanUserMessage(userMsg)) return
-    const msgKey = userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(messageText(userMsg))}`
-    if (archivedMsgIds.has(msgKey)) return
-    if (archivedMsgIds.size >= 128) {
-      const oldest = archivedMsgIds.values().next().value
-      if (oldest !== undefined) archivedMsgIds.delete(oldest)
-    }
-    archivedMsgIds.add(msgKey)
-
+    if (!isHumanUserMessage(userMsg)) return null
     const user = messageText(userMsg) || ''
-    if (!user.trim()) return
+    if (isLowValueOrInjection(user)) return null
+
     let prevAssistant = ''
     for (let i = lastUserIndex - 1; i >= 0; i -= 1) {
       const role = roleOf(messages[i])
       if (role === 'assistant') { prevAssistant = messageText(messages[i]) || ''; break }
       if (isHumanUserMessage(messages[i])) break
     }
-    const text = prevAssistant
-      ? `用户：${clip(user, cfg.archiveChars)}\n我：${clip(prevAssistant, cfg.archiveChars)}`
-      : `用户：${clip(user, cfg.archiveChars)}`
-    store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: Date.now(), source: { kind: 'auto' } })
+    const cleanUser = sanitizeMemoryText(clip(user, cfg.archiveChars))
+    const cleanAsst = prevAssistant ? sanitizeMemoryText(clip(prevAssistant, cfg.archiveChars)) : ''
+    const text = cleanAsst ? `用户：${cleanUser}\n我：${cleanAsst}` : `用户：${cleanUser}`
+
+    const msgKey = userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(user)}`
+    if (archivedMsgIds.has(msgKey)) {
+      return store.byText.get(text)?.id || null
+    }
+    if (archivedMsgIds.size >= 128) {
+      const oldest = archivedMsgIds.values().next().value
+      if (oldest !== undefined) archivedMsgIds.delete(oldest)
+    }
+    archivedMsgIds.add(msgKey)
+
+    const rec = store.add({ text, keywords: [], tags: [], importance: 0.35, eventAt: Date.now(), source: { kind: 'auto' } })
+    return rec?.id || null
   }
 
-  // ── 工具：写档 / 检索 ─────────────────────────────────────────────────
+  // ── 工具：写档（含纠错替代与事件日期） / 检索 ───────────────────────────
   ctx.inject(['tools'], (tctx) => {
     tctx.effect(() => {
       const save = tctx.tools.register({
         name: 'mem_save',
-        description: '把一条值得长期记住的事写进记忆库：约定、偏好、人物、参数、结论。正文写清“谁、什么时候、什么事”，别写流水账。',
+        description: '把一条值得长期记住的事写进记忆库：约定、偏好、人物、参数、结论。正文写清“谁、什么时候、什么事”，别写流水账；若纠正旧记录可传 supersedes 旧 ID。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -216,6 +264,8 @@ export function apply(ctx, config = {}) {
             keywords: { type: 'array', items: { type: 'string' }, description: '3-8 个检索词，覆盖人物/地点/事件/参数' },
             tags: { type: 'array', items: { type: 'string' }, description: '分类标签，如 偏好/约定/人物/项目' },
             importance: { type: 'number', description: '0.05-1，越重要越高；日常寒暄给 0.2' },
+            eventAt: { type: 'string', description: '可选：事件发生日期，如 2026-11-24' },
+            supersedes: { type: 'string', description: '可选：要覆盖/作废的旧记忆 ID（来自 mem_recall）' },
           },
         },
         output: {
@@ -229,16 +279,24 @@ export function apply(ctx, config = {}) {
           },
         },
         async execute(args) {
+          let replaced = false
+          if (args?.supersedes && typeof args.supersedes === 'string') {
+            replaced = store.remove(args.supersedes.trim())
+            if (replaced) indexDirty = true
+          }
           const rec = store.add({
             text: args?.text,
             keywords: args?.keywords || [],
             tags: args?.tags || [],
             importance: args?.importance ?? 0.5,
+            eventAt: args?.eventAt ?? null,
             source: { kind: 'tool' },
           })
           if (!rec) return { ok: false, id: '', total: store.records.length, text: '没写进去：正文是空的。' }
+          if (replaced) store.flush()
           indexDirty = true
-          return { ok: true, id: rec.id, total: store.records.length, text: `已存（库内 ${store.records.length} 条）。` }
+          const extra = replaced ? `（已替换旧条 ${args.supersedes}）` : ''
+          return { ok: true, id: rec.id, total: store.records.length, text: `已存 ${rec.id}${extra}（库内 ${store.records.length} 条）。` }
         },
       })
 
@@ -267,9 +325,12 @@ export function apply(ctx, config = {}) {
         async execute(args) {
           const limit = Math.min(10, Math.max(1, Number(args?.limit) || 5))
           const pool = recall(String(args?.query || ''), limit, Math.max(limit * 2, cfg.rerankPool))
-          const hits = diversify(pool, { limit })
+          const hits = diversify(pool, { limit, gramsIndex: ensureIndex().grams })
           if (!hits.length) return { hits: 0, text: '记忆库里没有相关的存档。' }
-          const body = hits.map((h, i) => `${i + 1}. ${clip(h.rec.text, 200)}`).join('\n')
+          const body = hits.map((h, i) => {
+            const when = ymd(h.rec.eventAt || h.rec.createdAt)
+            return `${i + 1}. [${h.rec.id}] (${when}) ${clip(h.rec.text, 200)}`
+          }).join('\n')
           for (const h of hits) store.touch(h.rec.id)
           return { hits: hits.length, text: body }
         },
@@ -279,7 +340,7 @@ export function apply(ctx, config = {}) {
     }, 'dsh-mnemonic: tools')
   })
 
-  // ── 常驻状态卡：只报数，不命令 ────────────────────────────────────────
+  // ── 常驻状态卡 ────────────────────────────────────────────────────────
   ctx.inject(['systemPrompt'], (sctx) => {
     sctx.effect(() => sctx.systemPrompt.section({
       name: 'dsh-mnemonic:clock',
@@ -295,7 +356,7 @@ export function apply(ctx, config = {}) {
     }), 'dsh-mnemonic: card')
   })
 
-  // ── 每轮自动回忆：紧跟最后一条真人消息注入，闸门不过就不投 ─────────────
+  // ── 每轮自动回忆 ──────────────────────────────────────────────────────
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     try {
@@ -304,44 +365,51 @@ export function apply(ctx, config = {}) {
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserMessage(m) ? i : found), -1)
       if (lastUserIndex < 0) return decision
       const query = messageText(messages[lastUserIndex])
-      // 每轮把当前这句和上一句回复顺手存档：零模型成本，保证“刚说完”的也检索得到。
-      if (cfg.autoArchive) archiveTurn(messages, lastUserIndex)
-      // 同回合工具循环后续步若已注入回忆，跳过重复检索与注入。
+      const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex) : null
       if (messages[lastUserIndex + 1]?.source?.kind === 'plugin:dsh-mnemonic') return decision
-      // 太短的招呼不打捞，省一轮检索和一块注入。
       if (query.trim().length < 6) return decision
       const ts = Date.now()
       if (cfg.injectCooldownMs && ts - lastInject.at < cfg.injectCooldownMs) return decision
-      const expanded = await rewriteQuery(query)
-      const pool = recall(expanded, cfg.limit, cfg.rerankPool)
-      const hits = cfg.rerank ? await rerank(expanded, pool) : diversify(pool, { limit: cfg.limit })
+      const expandedTerms = await rewriteQueryTerms(query)
+      const excludeIds = currentTurnId ? new Set([currentTurnId]) : null
+      const pool = recall(query, cfg.limit, cfg.rerankPool, { expandedTerms, excludeIds, nowTs: ts })
+      const hits = cfg.rerank
+        ? await rerank(expandedTerms ? `${query} ${expandedTerms}` : query, pool)
+        : diversify(pool, { limit: cfg.limit, gramsIndex: ensureIndex().grams })
       if (!hits.length) return decision
+      const sig = hits.map((h) => h.rec.id).join(',')
+      if (sig === lastInject.sig && ts - lastInject.at < 120000) return decision
       const block = renderRecallBlock(hits, { maxChars: cfg.injectChars, itemChars: cfg.itemChars, now: ts })
-      if (!block || block === lastInject.text) return decision
+      if (!block) return decision
       const message = await memoryMessage(block)
       if (!message) return decision
       messages.splice(lastUserIndex + 1, 0, message)
-      lastInject = { at: ts, text: block }
+      lastInject = { at: ts, sig }
       for (const h of hits) store.touch(h.rec.id)
       return { ...decision, messages }
     } catch (error) {
-      try { ctx.logger?.warn?.(`dsh-mnemonic: 自动回忆失败: ${error?.message || error}`) } catch {}
+      try { ctx.logger?.warn?.(`dsh-mnemonic: 自动回忆失败: ${error?.message || error}`) } catch (_err) { console.error('[mnemonic]', _err?.message || _err) }
       return decision
     }
   }, { prepend: true })
 
-  // ── 只读自检：让 WebUI/运维能确认库是活的 ────────────────────────────
+  // ── 只读自检（含性能与分层统计，不暴露宿主机完整绝对路径） ───────────
   ctx.inject(['webServer'], (wctx) => {
     const route = {
       kind: 'prefix',
       path: '/mnemonic',
       handler: async (req, res) => {
         if (req.url?.startsWith('/mnemonic/health')) {
+          const toolCount = store.records.filter((r) => r.source?.kind === 'tool').length
           const body = JSON.stringify({
             total: store.records.length,
+            toolCount,
+            autoCount: store.records.length - toolCount,
+            indexedCount,
+            maxRecords: cfg.maxRecords,
+            avgQueryMs: queryCount ? Math.round((totalQueryMs / queryCount) * 100) / 100 : 0,
             newest: store.records.at(-1)?.createdAt || null,
             todayAdded: store.records.filter((r) => now() - (r.createdAt || 0) < DAY).length,
-            storePath: cfg.storePath,
           })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(body)
@@ -353,12 +421,11 @@ export function apply(ctx, config = {}) {
     wctx.effect(() => wctx.webServer.register(route), 'dsh-mnemonic: health route')
   })
 
-  // 使用计数是原地修改，攒一会儿再整体落盘；丢了也只是计数不准，不影响记忆内容。
-  const flushTimer = setInterval(() => { try { store.flush() } catch {} }, 30000)
+  const flushTimer = setInterval(() => { try { store.flush() } catch (_err) { console.error('[mnemonic]', _err?.message || _err) } }, 30000)
   flushTimer.unref?.()
 
   return () => {
-    try { clearInterval(flushTimer); store.flush() } catch {}
+    try { clearInterval(flushTimer); store.flush() } catch (_err) { console.error('[mnemonic]', _err?.message || _err) }
     ctx.logger?.info?.('dsh-mnemonic unloaded')
   }
 }

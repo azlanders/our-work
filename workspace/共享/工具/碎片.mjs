@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -16,7 +17,7 @@ if (是入口) {
 if (process.argv.includes('--dry')) { console.log('（碎片.mjs 不支持 --dry，已跳过；真跑请去掉该参数）'); process.exit(0) }
 
 const DIR = '{{BOT_ROOT}}/记忆', OUT = path.join(DIR, '碎片.jsonl');
-const BAK = '/root/bak2/碎片.jsonl.bak', argv = process.argv.slice(2);
+const BAK = `${process.env.BACKUP_DIR || '/root/bak2'}/碎片.jsonl.bak`, argv = process.argv.slice(2);
 const preview = argv.includes('--print'), di = argv.indexOf('--days');
 let days = di >= 0 ? Number(argv[di + 1]) : 7;
 if (!Number.isFinite(days) || days < 1) days = 7;
@@ -95,7 +96,7 @@ try {
       .sort((a, b) => a.at.localeCompare(b.at));
     fs.mkdirSync(path.dirname(BAK), { recursive: true });
     if (fs.existsSync(OUT)) fs.copyFileSync(OUT, BAK);
-    fs.writeFileSync(OUT, all.map(x => JSON.stringify(x)).join('\n') + (all.length ? '\n' : ''));
+    原子写(OUT, all.map(x => JSON.stringify(x)).join('\n') + (all.length ? '\n' : ''));
     console.log(`写入 ${all.length} 条，新增 ${added} 条`);
   }
 } catch (e) {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 /**
  * 算作息.mjs —— 统计他一天里各个小时发消息的次数，写成 他的作息.json。
  *
@@ -54,7 +55,7 @@ const 结果 = {
   均值: Math.round(均),
   说明: '每小时他发过多少条消息；均值以上的时段说明他通常醒着，远低于均值的多半在睡或忙。',
 }
-fs.writeFileSync(出, JSON.stringify(结果, null, 1) + '\n', 'utf8')
+原子写(出, JSON.stringify(结果, null, 1) + '\n', 'utf8')
 console.log('样本 %d 条 / %d 天，均值 %.1f → %s' % (条, 天.size, 均, 出))
 const 活跃 = 小时.map((v, i) => [i, v]).filter(([, v]) => v > 均 * 1.2).map(([i]) => i + '点')
 const 安静 = 小时.map((v, i) => [i, v]).filter(([, v]) => v < 均 * 0.4).map(([i]) => i + '点')

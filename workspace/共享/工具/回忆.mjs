@@ -151,7 +151,7 @@ function 读链() {
   try {
     const v = JSON.parse(readFileSync(join(base, '链-作废.json'), 'utf8'))
     死链 = new Set((v['条目'] || []).map((x) => String(x['at'] || '')))
-  } catch {}
+  } catch (_err) { console.error('[回忆]', _err?.message || _err) }
   return readFileSync(p, 'utf8')
     .split(/^## /m)
     .filter((x) => x.trim() !== '' && !是旧黑话链(x))
@@ -173,7 +173,7 @@ function 所有天() {
         const m = f.match(/^手账-(\d{4}-\d{2}-\d{2})\.md$/)
         if (m) set.add(m[1])
       }
-    } catch {}
+    } catch (_err) { console.error('[回忆]', _err?.message || _err) }
   }
   scan(base)
   scan(join(base, '手账'))
@@ -182,13 +182,13 @@ function 所有天() {
     if (existsSync(archRoot)) {
       for (const ym of readdirSync(archRoot)) scan(join(archRoot, ym))
     }
-  } catch {}
+  } catch (_err) { console.error('[回忆]', _err?.message || _err) }
   try {
     for (const f of readdirSync(日记目录)) {
       const m = f.match(/^(\d{4}-\d{2}-\d{2})\.md$/)
       if (m) set.add(m[1])
     }
-  } catch {}
+  } catch (_err) { console.error('[回忆]', _err?.message || _err) }
   return [...set].sort().reverse()
 }
 

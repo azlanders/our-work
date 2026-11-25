@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 /**
  * 网盘.mjs —— 阿里云 PDS（网盘与相册服务）命令行工具（2026-11-14 批次478）
  *
@@ -71,7 +72,7 @@ function 读缓存() {
 }
 
 function 写缓存(t, 到期) {
-  try { writeFileSync(缓存文件, JSON.stringify({ token: t, 到期 }), { mode: 0o600 }) } catch { /* 写不了不影响主流程 */ }
+  try { 原子写(缓存文件, JSON.stringify({ token: t, 到期 }), { mode: 0o600 }) } catch { /* 写不了不影响主流程 */ }
 }
 
 /** 把新令牌写回 /etc/dshbot.env（600）。PDS 每次刷新会换新的 refresh_token，旧的立刻失效。 */
@@ -82,7 +83,7 @@ function 写回env(键, 值) {
     const 行 = `${键}=${值}`
     const re = new RegExp('^' + 键 + '=.*$', 'm')
     s = re.test(s) ? s.replace(re, 行) : s.replace(/\n*$/, '') + '\n' + 行 + '\n'
-    writeFileSync(p, s, { mode: 0o600 })
+    原子写(p, s, { mode: 0o600 })
     console.log(`[token] ${键} 已轮换回写`)
   } catch (e) {
     console.error(`[token] 回写 ${键} 失败（下次要用旧令牌了）：${e instanceof Error ? e.message : String(e)}`)
@@ -293,7 +294,7 @@ async function 下载(fileId, 输出) {
   const r = await fetch(url)
   if (!r.ok) throw new Error(`下载失败 HTTP ${r.status}`)
   const buf = Buffer.from(await r.arrayBuffer())
-  writeFileSync(输出, buf)
+  原子写(输出, buf)
   console.log(`[get] ${输出}  ${(buf.length / 1048576).toFixed(2)}M`)
   return j
 }

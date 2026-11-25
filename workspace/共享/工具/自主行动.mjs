@@ -1009,7 +1009,7 @@ try {
         } else {
           const out = execFileSync(process.execPath, [join(tools, '走路.mjs'), '--去', String(活配.点)], { encoding: 'utf8', timeout: 10000 }).trim()
           note = `${out || ('出发去' + 活配.点)}（想去干单日零工：${活名}）`
-          try { const trip = load(join(base, '资产.json'), {}).在途; if (trip && Number(trip.arriveAt) > 0) walkArriveAt = Number(trip.arriveAt) } catch {}
+          try { const trip = load(join(base, '资产.json'), {}).在途; if (trip && Number(trip.arriveAt) > 0) walkArriveAt = Number(trip.arriveAt) } catch (_err) { console.error('[自主行动]', _err?.message || _err) }
         }
       }
     } catch (e) { note = '（看了一眼零工没去成：' + String(e.message).slice(0, 40) + '）' }
@@ -1019,7 +1019,7 @@ try {
       note = out || `去${__班次强制动作.去哪}上${__班次强制动作.活}班`
       if (!DRY) {
         try { Object.assign(assets, load(join(base, '资产.json'), assets)) } catch { /* keep snapshot */ }
-        try { const trip = load(join(base, '资产.json'), {}).在途; if (trip && Number(trip.arriveAt) > 0) walkArriveAt = Number(trip.arriveAt) } catch {}
+        try { const trip = load(join(base, '资产.json'), {}).在途; if (trip && Number(trip.arriveAt) > 0) walkArriveAt = Number(trip.arriveAt) } catch (_err) { console.error('[自主行动]', _err?.message || _err) }
       }
     } catch (e) { note = `赶去${__班次强制动作.活}班失败：${String(e.message).slice(0, 60)}` }
   } else if (pick === '走动') {
@@ -1226,7 +1226,7 @@ try {
           foodFailed = false
           return true
         }
-      } catch {}
+      } catch (_err) { console.error('[自主行动]', _err?.message || _err) }
       return false
     }
     // EAT_STOCK 2026-11-06（批次144）：家里存着的东西先吃，别一饿就再买一份。
@@ -1336,11 +1336,11 @@ try {
                 const j = JSON.parse(execFileSync(process.execPath, [join(tools, '地点.mjs'), '--json'], { encoding: 'utf8', env: { ...process.env, QQ_MEM: base, LOG_PREFIX_OFF: '1' }, timeout: 8000 }))
                 const 食点 = (j.能去哪 || []).find((x) => ['便利店', '餐厅', '街市', '咖啡店', '超市'].includes(x.name))
                 if (食点) 去吃哪 = 食点.name
-              } catch {}
+              } catch (_err) { console.error('[自主行动]', _err?.message || _err) }
               const wout = execFileSync(process.execPath, [join(tools, '走路.mjs'), '--去', 去吃哪], { encoding: 'utf8', timeout: 10000 }).trim()
               foodPending = true
               note = `${这}没卖吃的，${wout || ('出发去' + 去吃哪 + '觅食')}`
-              try { const trip = load(join(base, '资产.json'), {}).在途; if (trip && Number(trip.arriveAt) > 0) walkArriveAt = Number(trip.arriveAt) } catch {}
+              try { const trip = load(join(base, '资产.json'), {}).在途; if (trip && Number(trip.arriveAt) > 0) walkArriveAt = Number(trip.arriveAt) } catch (_err) { console.error('[自主行动]', _err?.message || _err) }
             }
           }
         } catch { /* 商店表读不到就用默认第一项 */ }

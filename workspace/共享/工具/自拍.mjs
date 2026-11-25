@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 // 自拍.mjs —— 她想拍一张时调这个：读她「现在在哪、在干嘛、刚买了什么」，写一条请求
 // 用法: node 自拍.mjs [--场景 公园] [--动作 散步] [--心情 还行] [--给谁 QQ号]
 import { 睡着 } from './睡态.mjs'
@@ -330,11 +331,11 @@ try {
     for (let k = 同id.length - 1; k >= 1; k -= 1) items.splice(同id[k], 1)
   } else items.push(条)
   本.items = items.slice(-200)
-  fs.writeFileSync(本P, JSON.stringify(本, null, 1))
+  原子写(本P, JSON.stringify(本, null, 1))
 } catch { /* 记不上不影响拍照 */ }
 
 fs.mkdirSync(path.join(BASE, "请求"), { recursive: true })
-fs.writeFileSync(path.join(BASE, "请求", req.id + ".json"), JSON.stringify(req, null, 2))
+原子写(path.join(BASE, "请求", req.id + ".json"), JSON.stringify(req, null, 2))
 console.log(
   (重跑源 ? "重拍已排队:" : "自拍已排队:"),
   req.id, "｜场景", req.场景, "｜主体", req.主体, "｜动作", req.动作, "｜心情", req.心情,

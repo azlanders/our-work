@@ -110,3 +110,21 @@ export function 解析北京(s, 兜底 = 0) {
   const ms = Date.parse(t)
   return Number.isFinite(ms) ? ms : 兜底
 }
+
+
+/**
+ * 原子写任意文本或二进制内容（drop-in 替代裸 writeFileSync）。
+ * 临时名带 pid + 随机，失败自动清理临时文件并向上抛错。
+ */
+export function 原子写(p, 内容, 编码 = 'utf8') {
+  const 临时 = p + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8)
+  try {
+    mkdirSync(dirname(p), { recursive: true })
+    if (typeof 内容 === 'string') writeFileSync(临时, 内容, 编码)
+    else writeFileSync(临时, 内容)
+    renameSync(临时, p)
+  } catch (e) {
+    try { unlinkSync(临时) } catch (_err) { console.error('[_底层:原子写清理]', _err?.message || _err) }
+    throw e
+  }
+}

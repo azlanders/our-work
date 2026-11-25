@@ -98,7 +98,7 @@ function commitRootStockCompaction(replacement) {
     // the old root fiber can now drain its effects without blocking startup.
     const pending = replacement.fiber?.dispose?.();
     pending?.catch?.(() => {});
-  } catch {}
+  } catch (_err) { console.error('[live-compact:shell]', _err?.message || _err) }
   return true;
 }
 

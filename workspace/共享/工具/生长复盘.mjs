@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -15,7 +16,7 @@ if (是入口) {
 
 const DIR = '{{BOT_ROOT}}/记忆';
 const OUT = path.join(DIR, '生长记录.json');
-const BAK = '/root/bak2/生长记录.json.bak';
+const BAK = `${process.env.BACKUP_DIR || '/root/bak2'}/生长记录.json.bak`;
 const PRINT = process.argv.includes('--print'); // --week 为兼容参数，直接忽略
 const readJson = (name, fallback) => {
   try { return JSON.parse(fs.readFileSync(path.join(DIR, name), 'utf8')); }
@@ -163,7 +164,7 @@ try {
       fs.mkdirSync(path.dirname(BAK), { recursive: true });
       fs.copyFileSync(OUT, BAK);
     }
-    fs.writeFileSync(OUT, text);
+    原子写(OUT, text);
   }
 } catch (e) {
   console.log(`复盘失败：${e.message}`); // 素材异常也正常退出。

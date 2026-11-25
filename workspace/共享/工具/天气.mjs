@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 // 天气.mjs —— 她窗外的天气（2026-11-05 重写：从「每天抽签」改成「连续天气过程」）
 //
 // 为什么重写：
@@ -428,7 +429,7 @@ if (参数.includes('--json')) {
   process.stdout.write(JSON.stringify(data, null, 2) + '\n')
 } else {
   fs.mkdirSync(BASE, { recursive: true })
-  fs.writeFileSync(OUT, JSON.stringify(data, null, 2), 'utf8')
+  原子写(OUT, JSON.stringify(data, null, 2), 'utf8')
 
   // 天气本：每天记一条，供「昨天什么天气」这类问题。
   // 只记当天第一次（cron 每小时跑，不能一小时一条）。

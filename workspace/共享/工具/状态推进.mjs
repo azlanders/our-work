@@ -491,7 +491,7 @@ try {
       if (Number(st.layers.physical) > 顶) st.layers.physical = 顶
       st["虚弱"] = 虚
     } else if (st["虚弱"]) delete st["虚弱"]
-  } catch {}
+  } catch (_err) { console.error('[状态推进]', _err?.message || _err) }
 
   // MOOD_HUNGER 2026-11-07：饱腹感即时影响情绪、千卡长期影响底色，一次只挪一点点，别让面板跳。
   //
@@ -515,10 +515,10 @@ try {
       // LOG_MOOD 2026-11-08（批次262）：把这一轮的心情挪动量留给下面那行日志。
       // 情绪从 42.5 掉到 19.4 查了半天算不出来，就是因为日志只打认知/生理，
       // 情绪这条线在日志里完全看不见。用 globalThis 传是为了不跨作用域改结构。
-      try { globalThis.__心情挪 = 挪 } catch {}
+      try { globalThis.__心情挪 = 挪 } catch (_err) { console.error('[状态推进]', _err?.message || _err) }
       st.layers.emotional = Math.max(0, Math.min(100, Math.round((Number(st.layers.emotional) + 挪) * 10) / 10))
     }
-  } catch {}
+  } catch (_err) { console.error('[状态推进]', _err?.message || _err) }
 
   b['累的那种痒'] = Math.max(0, Math.min(100, Math.round((48 - physical) * 2)))
   b['说不清的不舒服'] = 熬夜档 > 0 ? Math.min(100, 20 + 熬夜档 * 10) : emotional < 30 ? 20 : 0

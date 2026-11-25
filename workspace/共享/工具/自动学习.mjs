@@ -53,7 +53,7 @@ for (const f of files) {
       let text = j.raw_message || j.text || ''
       if (!text && Array.isArray(j.message)) text = j.message.filter((s) => s.type === 'text').map((s) => s.data?.text || '').join('')
       push(uid, name, text)
-    } catch {}
+    } catch (_err) { console.error('[自动学习]', _err?.message || _err) }
   }
 }
 

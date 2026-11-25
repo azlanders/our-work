@@ -165,7 +165,7 @@ if (fs.existsSync(LOG_DIR)) {
         if (!DRY) fs.writeFileSync(p, lines.slice(-2500).join('\n'))
         trimmed++
       }
-    } catch {}
+    } catch (_err) { console.error('[目录卫生]', _err?.message || _err) }
   }
 }
 
@@ -216,13 +216,13 @@ function activeTmpPaths() {
     try {
       const targets = [fs.readlinkSync(path.join(proc, 'cwd'))]
       for (const fd of fs.readdirSync(path.join(proc, 'fd'))) {
-        try { targets.push(fs.readlinkSync(path.join(proc, 'fd', fd))) } catch {}
+        try { targets.push(fs.readlinkSync(path.join(proc, 'fd', fd))) } catch (_err) { console.error('[目录卫生]', _err?.message || _err) }
       }
       for (const target of targets) {
         const match = target.match(/^(\/(?:var\/)?tmp\/[^/]+)(?:\/|$)/)
         if (match) active.add(match[1])
       }
-    } catch {}
+    } catch (_err) { console.error('[目录卫生]', _err?.message || _err) }
   }
   return active
 }

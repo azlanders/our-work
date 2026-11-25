@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 import { readFileSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { 今日锚, 挑怕的 } from './心气.mjs';
@@ -5,7 +6,7 @@ import { 可记内心 } from './惦记.mjs';
 // TIER_ONE_TRUTH 2026-11-17（批次643）：亲近档位原来在这里按「好感>75&&熟悉>65 / 好感>65」
 // 自己判，印象更新按另一套阈值判出「熟稔」，voiceSlots 又按 bond 判「跟他熟」——
 // 同一个人三段注入三种说法。现在统一问 关系档.mjs。
-import { 关系档 } from './关系档.mjs';
+import { 关系档 } from './判据/关系档.mjs';
 // DRY_GUARD 2026-11-04：本脚本没有 --dry 语义，传了就直接退出，避免「以为在演练、其实真写」
 if (process.argv.includes('--dry')) { console.log('（内心.mjs 不支持 --dry，已跳过；真跑请去掉该参数）'); process.exit(0) }
 
@@ -71,7 +72,7 @@ try {
   if (怕话) {
     正文 = 正文 + '；' + 怕话
     try {
-      writeFileSync(怕P, JSON.stringify({ 上次: bjF.toISOString().slice(0, 10), at: bjF.toISOString().slice(11, 16) }, null, 1) + String.fromCharCode(10))
+      原子写(怕P, JSON.stringify({ 上次: bjF.toISOString().slice(0, 10), at: bjF.toISOString().slice(11, 16) }, null, 1) + String.fromCharCode(10))
     } catch { /* 写不进去最多多提一次，不影响这段话 */ }
   }
 } catch { /* 没有怕的就算了 */ }
@@ -145,7 +146,7 @@ else {
   const __next = 正文 + String.fromCharCode(10)
   let __prev = ''
   try { __prev = readFileSync(__path, 'utf8') } catch { __prev = '' }
-  if (__prev !== __next) { mkdirSync(dirname(__path), { recursive: true }); writeFileSync(__path, __next) }
+  if (__prev !== __next) { mkdirSync(dirname(__path), { recursive: true }); 原子写(__path, __next) }
   // HEARTBEAT_TOUCH 2026-11-05（批次101）：内容没变就不重写是对的，但 mtime 也跟着不动，
   // 自我巡检把它当成「6.3 小时没更新」报出来 —— 假告警会把真告警盖掉。
   // 每次都摸一下 mtime：它表示「脚本还活着、这半小时算过一遍」，内容变没变看文件本身。

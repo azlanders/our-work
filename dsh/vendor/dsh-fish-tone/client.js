@@ -17,7 +17,8 @@ window.__ModuleLoader__.load({
       if (res.ok) return res.json()
       throw new Error('HTTP ' + res.status)
     }
-    const jget = async (p) => asJson(await fetch(API + p, { credentials: 'same-origin' }))
+    const _sig = () => (typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined)
+const jget = async (p) => asJson(await fetch(API + p, { credentials: 'same-origin', signal: _sig() }))
     const jpost = async (p, body) => asJson(await fetch(API + p, {
       method: 'POST',
       credentials: 'same-origin',

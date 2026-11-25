@@ -210,10 +210,10 @@ const server = createServer((req, res) => {
             const at = String(m.time || '').slice(0, 16)
             if (at === '') continue
             hers.push({ at, text: text.slice(0, 120), from: 'her' })
-          } catch (e) {}
+          } catch (_err) { console.error('[房间]', _err?.message || _err) }
         }
       }
-    } catch (e) {}
+    } catch (_err) { console.error('[房间]', _err?.message || _err) }
     const all = [...mine, ...hers].sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(-40)
     return sendJson({ ok: true, items: all })
   }

@@ -104,8 +104,8 @@ try {
   if (duplicate || already) console.log('今天已落');
   else if (process.argv.includes('--print')) process.stdout.write(block + '\n');
   else {
-    await mkdir('/root/bak2', { recursive: true });
-    if (oldChain || (await optional(chain))) await copyFile(chain, '/root/bak2/链.md.bak');
+    const BAK_DIR = process.env.BACKUP_DIR || '/root/bak2'; await mkdir(BAK_DIR, { recursive: true });
+    if (oldChain || (await optional(chain))) await copyFile(chain, `${BAK_DIR}/链.md.bak`);
     await appendFile(chain, `${oldChain ? '\n\n' : ''}${block}\n`, 'utf8');
     console.log('已落');
   }

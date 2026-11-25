@@ -128,7 +128,7 @@ export function resolveLocalFacePath(emojiId) {
             return join(dir, files[i])
           }
         }
-      } catch {}
+      } catch (_err) { console.error('[onebot:custom-faces]', _err?.message || _err) }
     }
   }
   return ''

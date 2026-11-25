@@ -189,7 +189,7 @@ export function 喝(毫升, now = Date.now()) {
   const o = { 血糖: 前.血糖, 血At: 北京(now), 水: Math.min(水满 * 上限, 前.水 + 加), 水At: 北京(now), 卡: 前.卡, 卡At: 北京(now), 胃: Math.min(胃满 * 上限, 前.胃 + 加), 胃At: 北京(now), 欠: 前.欠, 欠At: 北京(now),
     账: [...前.账, { at: 北京(now), 喝: 加, 水到: Math.min(水满 * 上限, 前.水 + 加) }].slice(-200) }
   写(o)
-  if (加 > 0) { try { 销账生理惦记(MEM, '该喝口水了', 北京(now)) } catch {} }
+  if (加 > 0) { try { 销账生理惦记(MEM, '该喝口水了', 北京(now)) } catch (_err) { console.error('[饱渴]', _err?.message || _err) } }
   return { 前: 前.水百分比, 后: Math.round(o.水 / 水满 * 1000) / 10, 加 }
 }
 
@@ -231,8 +231,8 @@ export function 吃(名, now = Date.now()) {
     胃: Math.min(胃满 * 上限, 前.胃 + 顶), 胃At: 北京(now), 欠: Math.max(0, Math.round((Number(前.欠) - 还欠) * 1000) / 1000), 欠At: 北京(now),
     账: [...前.账, { at: 北京(now), 吃: 名, kcal, 补, 顶, 血糖 }].slice(-200) }
   写(o)
-  if (kcal > 0) { try { 销账生理惦记(MEM, '有点空了，找点吃的', 北京(now)) } catch {} }
-  if (补 > 0) { try { 销账生理惦记(MEM, '该喝口水了', 北京(now)) } catch {} }
+  if (kcal > 0) { try { 销账生理惦记(MEM, '有点空了，找点吃的', 北京(now)) } catch (_err) { console.error('[饱渴]', _err?.message || _err) } }
+  if (补 > 0) { try { 销账生理惦记(MEM, '该喝口水了', 北京(now)) } catch (_err) { console.error('[饱渴]', _err?.message || _err) } }
   return { kcal, 补, 顶, 前: 前.卡百分比, 后: Math.round(o.卡 / 卡满 * 1000) / 10, 项: it }
 }
 
@@ -264,8 +264,8 @@ export function 吃部分(名, 几成, now = Date.now()) {
     欠: Math.max(0, Math.round((Number(前.欠) - 欠还量(kcal总) * 比) * 1000) / 1000), 欠At: 北京(now), 账: 前.账,
   }
   写(o)
-  if (kcal > 0) { try { 销账生理惦记(MEM, '有点空了，找点吃的', 北京(now)) } catch {} }
-  if (补 > 0) { try { 销账生理惦记(MEM, '该喝口水了', 北京(now)) } catch {} }
+  if (kcal > 0) { try { 销账生理惦记(MEM, '有点空了，找点吃的', 北京(now)) } catch (_err) { console.error('[饱渴]', _err?.message || _err) } }
+  if (补 > 0) { try { 销账生理惦记(MEM, '该喝口水了', 北京(now)) } catch (_err) { console.error('[饱渴]', _err?.message || _err) } }
   return { kcal: Math.round(kcal), 顶: Math.round(顶), 补: Math.round(补), 比, 后: Math.round(o.卡 / 卡满 * 1000) / 10 }
 }
 

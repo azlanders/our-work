@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 /**
  * 看视频.mjs —— B站/本地视频统一下载 + 「Omni 优先 / Storyboard 分镜插件自动兜底」看视频核心。
  *
@@ -70,7 +71,7 @@ export async function resolveBiliId(raw) {
       const loc = execFileSync('curl', ['-sS', '-I', '-L', '--max-redirs', '3', '-o', '/dev/null', '-w', '%{url_effective}',
         '-H', `User-Agent: ${UA}`, s], { encoding: 'utf8', timeout: 15000 }).trim()
       if (loc) s = loc
-    } catch {}
+    } catch (_err) { console.error('[看视频]', _err?.message || _err) }
   }
   const bvMatch = s.match(/^(BV[0-9A-Za-z]{10})$|^https?:\/\/(?:[a-z0-9-]+\.)?bilibili\.com\/video\/(BV[0-9A-Za-z]{10})(?:[/?#]|$)/i)
   if (bvMatch) return { bvid: bvMatch[1] || bvMatch[2], page: biliPage(s) }
@@ -155,7 +156,7 @@ export async function downloadBiliVideo(idOrObj, { outDir = OUT_DIR } = {}) {
             return `${h}:${m}:${s},${f}`
           }
           const srt = body.map((it, idx) => `${idx + 1}\n${fmtT(it.from)} --> ${fmtT(it.to)}\n${String(it.content || '').trim()}\n`).join('\n')
-          writeFileSync(srtPath, srt, 'utf8')
+          原子写(srtPath, srt, 'utf8')
         }
       }
     } catch { /* 没字幕算正常，落回 faster-whisper */ }
@@ -228,7 +229,7 @@ export async function runStoryboardOnFile(mp4, { srtPath = '', outPrefix = '', m
     let p = ''
     if (outPrefix) {
       p = `${outPrefix}.sb-${s.sheet}.png`
-      try { writeFileSync(p, s.png); savedPaths.push(p) } catch { p = '' }
+      try { 原子写(p, s.png); savedPaths.push(p) } catch { p = '' }
     }
     sheets.push({ sheet: s.sheet, png: s.png, path: p })
   }
@@ -378,7 +379,7 @@ export async function watchVideoUnified(input, options = {}) {
     if (omniRes?.ok && omniRes.text) {
       const gridPng = `${prefix}.png`
       if (!existsSync(gridPng)) {
-        try { buildGrid16(mp4, gridPng, meta.时长) } catch {}
+        try { buildGrid16(mp4, gridPng, meta.时长) } catch (_err) { console.error('[看视频]', _err?.message || _err) }
       }
       const sheets = []
       if (existsSync(gridPng)) {
@@ -419,7 +420,7 @@ export async function watchVideoUnified(input, options = {}) {
   // 顺手把第一张分镜图也落一份到 <prefix>.png，保证自主学习等只读单图的旧入口直接拿到高信息量分镜图！
   const mainPng = `${prefix}.png`
   if (sb.sheets[0]?.png) {
-    try { writeFileSync(mainPng, sb.sheets[0].png) } catch {}
+    try { 原子写(mainPng, sb.sheets[0].png) } catch (_err) { console.error('[看视频]', _err?.message || _err) }
   }
   const headLines = []
   if (meta.标题) headLines.push(`视频：《${meta.标题}》${meta.作者 ? `（UP主：${meta.作者}）` : ''}${meta.时长 ? ` · ${meta.时长}s` : ''}`)

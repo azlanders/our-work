@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -78,9 +79,9 @@ try {
       const old = fs.readdirSync(backupDir).filter(x => x.startsWith(prefix)).sort();
       for (const name of old.slice(0, -7)) fs.unlinkSync(path.join(backupDir, name));
     }
-    fs.writeFileSync(awkwardFile, JSON.stringify(awkward, null, 2));
-    fs.writeFileSync(missFile, kept.length ? kept.join('\n') + '\n' : '');
-    fs.writeFileSync(markFile, JSON.stringify({ date: today }, null, 2));
+    原子写(awkwardFile, JSON.stringify(awkward, null, 2));
+    原子写(missFile, kept.length ? kept.join('\n') + '\n' : '');
+    原子写(markFile, JSON.stringify({ date: today }, null, 2));
     console.log(changes.length ? changes.join('\n') : '消退完成，无改动');
   }
 } catch (error) {

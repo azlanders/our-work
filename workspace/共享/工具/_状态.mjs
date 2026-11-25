@@ -102,7 +102,7 @@ export function saveState(p, next, prev) {
       writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8')
       renameSync(tmp, p)
     } catch (err) {
-      try { if (existsSync(tmp)) unlinkSync(tmp) } catch {}
+      try { if (existsSync(tmp)) unlinkSync(tmp) } catch (_err) { console.error('[_状态]', _err?.message || _err) }
       throw err
     }
     return merged

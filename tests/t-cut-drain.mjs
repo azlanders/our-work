@@ -20,8 +20,7 @@ const picked = selectCutIndexes(chat, {
   maxEnd: chat.length - 1, totalTokens: chatTotal, drain: true, urgentTokens: 48000,
 })
 assert.ok(picked, '纯聊天尾巴在 drain 时必须有切点')
-assert.ok(picked.start > 0, '不能切到 system 前面')
-assert.ok(picked.end >= picked.start && picked.end < chat.length, '切点范围必须合法')
+assert.ok(picked.start > 0 && picked.end >= picked.start && picked.end < chat.length, '切点范围合法')
 
 // 2. 没到阈值不该切
 assert.equal(selectCutIndexes(chat, {
@@ -29,7 +28,7 @@ assert.equal(selectCutIndexes(chat, {
   maxEnd: chat.length - 1, totalTokens: 12000, drain: false, urgentTokens: 48000,
 }), null)
 
-// 3. 带工具轮：验证切点不会拆散 assistant(toolCalls) 与紧随的 tool 消息
+// 3. 带工具轮：验证不拆散 assistant(toolCalls) 与 tool
 const tools = [{ type: 'system', tokens: 4000 }]
 for (let i = 0; i < 10; i += 1) {
   tools.push({ type: 'user', tokens: 300 })
@@ -42,14 +41,17 @@ const toolPick = selectCutIndexes(tools, {
   maxEnd: tools.length - 1, totalTokens: 40000, drain: true, urgentTokens: 48000,
 })
 assert.ok(toolPick, '带工具轮的尾巴也要有切点')
-assert.ok(toolPick.start > 0 && toolPick.end >= toolPick.start, '工具轮切点范围合法')
-assert.notEqual(tools[toolPick.start].type, 'tool', '切点起点不能落在孤立 tool 消息上')
-assert.ok(!(tools[toolPick.end].type === 'assistant' && tools[toolPick.end].toolCalls), '切点终点不能把 assistant(toolCalls) 与其 tool 响应拆散')
+assert.notEqual(tools[toolPick.start].type, 'tool', '起点不能落在孤立 tool 消息上')
+assert.ok(!(tools[toolPick.end].type === 'assistant' && tools[toolPick.end].toolCalls), '终点不能拆散 toolCalls 与 tool')
 
-// 4. 仅 system 消息不该切
+// 4. 边界：仅 system 消息或空数组不得越界崩溃
 assert.equal(selectCutIndexes([{ type: 'system', tokens: 4000 }], {
   engine: 'cloud', chunkMin: 1000, chunkMax: 32000, pointerMax: 32000,
   maxEnd: 0, totalTokens: 4000, drain: true, urgentTokens: 48000,
 }), null)
+assert.equal(selectCutIndexes([], {
+  engine: 'cloud', chunkMin: 1000, chunkMax: 32000, pointerMax: 32000,
+  maxEnd: -1, totalTokens: 0, drain: true, urgentTokens: 48000,
+}), null)
 
-console.log('cut 逻辑 ok（含工具轮配对完整性与边界检查）')
+console.log('cut 逻辑 ok（含工具轮配对、越界防护与边界检查）')

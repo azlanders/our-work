@@ -67,7 +67,7 @@ const args = process.argv.slice(2)
 // 开关在 记忆/功能开关.json 的 家具 字段，想恢复改成 true 即可。只读（--看看/--商店）不受影响。
 const __开关文件 = process.env.QQ_ASSET_FEATURES || '{{BOT_ROOT}}/记忆/功能开关.json'
 let __家具开 = false
-try { __家具开 = JSON.parse((await import("node:fs")).readFileSync(__开关文件, "utf8")).家具 === true } catch {}
+try { __家具开 = JSON.parse((await import("node:fs")).readFileSync(__开关文件, "utf8")).家具 === true } catch (_err) { console.error('[资产]', _err?.message || _err) }
 const __要改家底 = ["--买", "--摆"].some((k) => args.includes(k))
 if (__要改家底 && !__家具开) {
   console.log("家具系统这会儿是停着的，先不动家底。")

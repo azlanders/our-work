@@ -84,7 +84,7 @@ export function 设置聊天续话(enabled) {
   try {
     writeFileSync(temporary, JSON.stringify({ ...settings, 聊天续话: enabled }, null, 2), { mode: 0o600 })
     renameSync(temporary, 档)
-  } finally { try { unlinkSync(temporary) } catch {} }
+  } finally { try { unlinkSync(temporary) } catch (_err) { console.error('[onebot:实时续跑]', _err?.message || _err) } }
   if (!enabled) {
     for (const reservation of 续话账.values()) clearTimeout(reservation.定时器)
     续话账.clear()

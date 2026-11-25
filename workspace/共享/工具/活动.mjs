@@ -306,7 +306,7 @@ if (args.includes("--tick")) {
     // 而 `激素.mjs` 读的是 `HJ_BASE`（默认真档）—— 于是活动台账写沙盒、**激素事件写真档**。
     // 实测 14:22~14:40 六次测试把「逛店」灌进真档：dopamine 45 → 60.8、oxytocin 40 → 44。
     // 这跟 MEMORY 里「A spawn B 时两边的变量都要指沙盒」是同一条，但靠人记不住 —— 让它俩永远同源。
-    try { execFileSync(process.execPath, [path.join(TOOLS, "激素.mjs"), "--event", a.激素, "--id", eventId], { encoding: "utf8", env: { ...process.env, HJ_BASE: MEM } }) } catch {}
+    try { execFileSync(process.execPath, [path.join(TOOLS, "激素.mjs"), "--event", a.激素, "--id", eventId], { encoding: "utf8", env: { ...process.env, HJ_BASE: MEM } }) } catch (_err) { console.error('[活动]', _err?.message || _err) }
   }
   追加活动记录({ at: eventAt, 地点, kind, 活动: 活动.名, 名: 活动.名, 生效: true, 体力: a.energy, 困意: a.困意, 困意半衰: 活动困意半衰, 激素: a.激素 })
   console.log(`${地点}：${活动.名}｜体力 ${a.energy >= 0 ? "+" : ""}${a.energy}，困意账 ${a.困意 >= 0 ? "+" : ""}${a.困意}（半衰 ${活动困意半衰} 分）${a.激素 ? "，激素记了「" + a.激素 + "」" : ""}`)

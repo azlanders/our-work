@@ -101,8 +101,8 @@ function outerPresetIds(fiber) {
   const push = (value) => {
     if (value && (typeof value === "object" || typeof value === "function") && !seen.has(value)) queue.push(value);
   };
-  try { push(fiber?.parent); } catch {}
-  try { push(fiber?.fiber?.parent); } catch {}
+  try { push(fiber?.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+  try { push(fiber?.fiber?.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
   while (queue.length) {
     const current = queue.shift();
     if (seen.has(current)) continue;
@@ -115,13 +115,13 @@ function outerPresetIds(fiber) {
         current?.config?.id,
         current?.id,
       ];
-    } catch {}
+    } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
     const candidate = ids.find((id) => typeof id === "string" && id.length > 0);
     if (candidate && !found.includes(candidate)) found.push(candidate);
-    try { push(current.parent); } catch {}
-    try { push(current.fiber); } catch {}
-    try { push(current.parent?.fiber); } catch {}
-    try { push(current.fiber?.parent); } catch {}
+    try { push(current.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+    try { push(current.fiber); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+    try { push(current.parent?.fiber); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
+    try { push(current.fiber?.parent); } catch (_err) { console.error('[live-compact:gate]', _err?.message || _err) }
   }
   return found;
 }

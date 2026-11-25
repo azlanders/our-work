@@ -2448,7 +2448,7 @@ export function pushToBuffer(groupId, message) {
     const uin = String(message?.sender?.user_id ?? message?.user_id ?? '').trim()
     const nm = String(message?.sender?.card || message?.sender?.nickname || message?.nickname || '').trim()
     if (uin !== '' && nm !== '') nicknameCache.set(uin, nm)
-  } catch {}
+  } catch (_err) { console.error('[onebot:poll]', _err?.message || _err) }
   const list = groupBuffers.get(groupId) ?? []
   const seq = seqOf(message)
   if (seq !== null && list.some((item) => seqOf(item) === seq)) return
@@ -3036,7 +3036,7 @@ export async function handleGroupMessage(ctx, groupId, message, history, sinceSe
           ? `（他引用的是你自己发过的那条 —— ${body}；这是你说的，不是他新发的）\n`
           : `（他引用了这条 —— ${who}：${body}）\n`
         if (qImgs.length > 0) {
-          try { quotedImageBlocks = await buildImageBlocks(ctx, [qm]) } catch {}
+          try { quotedImageBlocks = await buildImageBlocks(ctx, [qm]) } catch (_err) { console.error('[onebot:poll]', _err?.message || _err) }
         }
       }
     }
@@ -3846,6 +3846,7 @@ export function startGroupLoop(ctx) {
  * WS 事件跟 HTTP 历史里的结构不一样：sender 是平铺的（user_id / nickname），
  * message 是段数组，message_seq 有没有要看实现 —— 所以统一成 HTTP 那边的形状。
  */
+
 export function normalizeEvent(event) {
   const sender = {
     user_id: String(event?.user_id ?? ''),
@@ -3881,116 +3882,11 @@ export function normalizeEvent(event) {
  * 反例：「只是没打标点」312 条散在 1-8 秒，是正常说话节奏 —— 不能算半句。
  * 只认强信号：宁可漏判（照常 1 秒），不可把正常短句拖成 2 秒。
  */
-export function 是半句(text) {
-  return /[，,、…；;：:—-]$/.test(String(text ?? '').trim())
-}
 
-/** 防抖等待毫秒（2026-11-07 批次186）。三种走法分开写，是为了能被单测直接盯住。
- *
- * - 高优先（@/主人/叫名字）：最多 1 秒。被点名的人不该被拖着等补充；
- *   配置调大时也不能更慢，所以取 min。
- * - 明确半句：至少 2 秒。等对方把那半句说完。
- * - 其余：照配置走（线上 1000）。
- */
-export function 防抖等待(高优先, text, base) {
-  const b = Number(base) || 2000
-  if (高优先) return Math.min(b, 1000)
-  const t = String(text ?? '').trim()
-  if (是半句(t)) return Math.max(b, 2000)
-  // DEBOUNCE_BY_LEN 2026-11-08（批次296）：按字数动态等。
-  // 极短的一句（「在吗」「嗯」「？」）多半还有下文，多等一会儿攒完整再回；
-  // 一大段说完的（>=30 字）基本就是全部，早点回，别让人觉得在打字机上睡着。
-  // 中间长度维持 base 不动。**高优先和半句都不受影响**，它们的判据在上面。
-  const n = t.length
-  // TYPING_HOLD 2026-11-16（批次582）：群聊没有 input_status，只能靠固定窗口。
-  // 实测主人连发「看看」「你的」间隔 3.2 秒；2.5 秒的短句窗口接不住，
-  // 第一条先投出去，第二条只能开新回合。短句下限提到 3.5 秒，
-  // 让「极短一句多半还有下文」真正覆盖到 3 秒级的连发。
-  if (n <= 3) return Math.max(b, 3500)
-  if (n >= 20) return Math.min(b, 600)
-  return b
-}
+// 纯分类与防抖判据已拆至 ./poll-classify.js
+import { 是半句, 防抖等待, isPushback, 只有媒体, 纯图无正文, 是否艾特别人 } from './poll-classify.js'
+export { 是半句, 防抖等待, isPushback, 只有媒体, 纯图无正文, 是否艾特别人 } from './poll-classify.js'
 
-/** 停手/紧急类指令：这类一条都不能被后面的消息顶掉，必须单独投递。 */
-const URGENT_RE = /紧急|立刻|马上|赶紧|先处理|别管别的|急|别找了|不用了|取消|停下|先别|算了/
-
-/**
- * 「别跟我说话」类话术。2026-11-04 加。
- *
- * 起因：群里有人引用她的消息说「@大肥鱼 没跟你说话」，她被这句"@了她"骗过去了，
- * 接了话还回了一句「刚还嫌我多嘴，这会儿问我是谁」——把两个人的话当成同一个人在跟她对呛，
- * 群友的结论是「這ai分不清人」。
- *
- * 这些话术的共同点：出现时**永远不是在邀请她回答**。命中就不接。
- */
-const PUSHBACK_RE = /没跟你说话|没和你说|不是跟你说|没问你|不是问你|没叫你|没喊你|别插嘴|别搭话|别接话|别说话|别说了|闭嘴|安静点|别闹了|没在跟你/
-
-/** 这条是不是在明确拒绝她开口。 */
-export function isPushback(text) {
-  return PUSHBACK_RE.test(String(text ?? ''))
-}
-
-// JUDGE_DEDUP 2026-11-09（批次348）：下面两个判据原来在两处各写一遍
-// （媒体 2490/3270，@别人 2440/3261），媒体那对已经分叉过 ——
-// 一处注释写「照投」、另一处代码是跳过。收成一份，改一处两处都变。
-const 媒体类型 = new Set(['image', 'mface', 'face', 'video'])
-
-/**
- * 这条消息是不是「只有图/表情，没有文字」。@ 与否由调用方另外判，这里只管内容形态。
- *
- * ⚠️ DEAD_JUDGE 2026-11-09（批次350）：**它现在永远返回 false**。
- * `textOf()` 会给图片段生成占位文字 `[图片]`，所以 `text === ''` 从来就不成立。
- * 两处调用（`handleGroupMessage` 的 SEE_ALL 段、`groupNeedsReplyRaw`）实际都走不到这条，
- * 纯图消息一直是「照投，由她判断」——跟 SEE_ALL 那条注释的意图一致，所以没改。
- *
- * 真要拦纯图，判据得改成「看消息段里有没有图、且没有非空 text 段」，不是看 text 是否为空串。
- */
-export function 只有媒体(段, text) {
-  return String(text ?? '') === '' && Array.isArray(段)
-    && 段.some((seg) => 媒体类型.has(String(seg?.type ?? '')))
-}
-
-/**
- * IMG_NOT_TOPIC 2026-11-15（批次506）：这条是不是「只有图、没有正文」。
- *
- * 和 `只有媒体()` 的区别：那个判 `text === ''`，而 `textOf()` 会给图片段生成 `[图片]`，
- * 所以它恒假（MEMORY 里记的老坑，t348 还钉着「与旧实现等价」，不能改它）。
- * 这里改成**剥掉占位符再看还剩不剩正文** —— `[图片]` / `[图片][表情]` 算纯图，
- * `[图片] 这是什么` 不算。用来在群里提醒她「图不是话题中心」。
- */
-export function 纯图无正文(段, text) {
-  const 有图 = Array.isArray(段) && 段.some((seg) => seg?.type === 'image')
-  if (!有图) return false
-  const 剩 = String(text ?? '').replace(/\[[^\]]{1,8}\]/g, '').trim()
-  return 剩 === ''
-}
-
-/**
- * 这条是不是 @ 了「别人」——不含 @自己。
- *
- * 注意 `@全体`（qq === 'all'）会被算成「@别人」，这是**现有行为**，本批不改：
- * 改了会让「@全体」从「让位」变成「可以接」，是一处行为变化，不在纯重构范围里。
- */
-export function 是否艾特别人(段, selfUin) {
-  const 我 = String(selfUin ?? '')
-  return Array.isArray(段) && 段.some(
-    (seg) => seg?.type === 'at' && String(seg?.data?.qq ?? '') !== '' && String(seg?.data?.qq) !== 我
-  )
-}
-
-/**
- * 这条群消息「要不要回」。
- *
- * 为什么单独写一份：handleGroupMessage 会组装上下文并真的投递，副作用太大，
- * 这里只需要一个纯判断来说「这一批里哪条是最后一句该开口的」。
- * 判定必须跟 handleGroupMessage 里的门控长得一样，否则会出现「最后一条不投、
- * 前面该投的却被跳过」的漏话。
- */
-// 2026-11-04：导出给评测用（行为不变），调判据时要能拿真实数据量它
-// REFRACTORY 2026-11-07（批次214）：同群 20 秒内不二次开口。
-// 依据：2026-11-01 01:34–01:43 真实日志重放，她 9 分钟里开口 26 次（29 条消息）；
-// 加 20 秒冷却后 14 次，正好对上方案验收「30 条发 13 条左右」。
-// 例外：@她 / 叫她名字 / 紧急词——紧急词整段跳过冷却（与她本人的紧急通道一致）。
 const 开口时刻 = new Map()
 const 冷却毫秒 = 20000
 const 紧急词 = /紧急|立刻|马上|赶紧|取消|停下|别找了|算了/

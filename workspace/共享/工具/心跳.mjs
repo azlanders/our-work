@@ -26,12 +26,12 @@ import { 睡着 } from './睡态.mjs'
 // 而 目录卫生.mjs 把日志裁到 2500 行 —— 心跳一分钟一行，1.7 天就滚没了。
 // 「某个任务连着失败」这件事，过了两天就完全没有痕迹。
 import * as 待办 from './待办.mjs'
-import { 写档 } from './_底层.mjs'
+import { 写档 , 原子写 } from './_底层.mjs'
 
 const 目录 = dirname(fileURLToPath(import.meta.url))
 // 环境值一律函数内读取：模块顶层捕获会让「import 后再设 env」的沙盒测试失效
 const 记忆 = () => process.env.FISH_SANDBOX_DIR || '{{BOT_ROOT}}/记忆'
-const 日志目录 = () => { const d = join(记忆(), '日志'); try { mkdirSync(d, { recursive: true }) } catch {} return d }
+const 日志目录 = () => { const d = join(记忆(), '日志'); try { mkdirSync(d, { recursive: true }) } catch (_err) { console.error('[心跳]', _err?.message || _err) } return d }
 const 日志路径 = () => join(日志目录(), '心跳.log')
 const 状态路径 = () => join(记忆(), '.心跳上次.json')
 // TASK_LEDGER 2026-11-12：每个任务上次「真跑」的时刻（毫秒）。
@@ -65,7 +65,7 @@ function 记任务(账) {
     // 任务表就 44 条，留 300 个名字足够；防止哪天脚本名带上时间戳把文件撑大
     const 名 = Object.keys(新)
     if (名.length > 300) for (const k of 名.slice(0, 名.length - 300)) delete 新[k]
-    writeFileSync(任务账路径(), JSON.stringify(新, null, 1))
+    原子写(任务账路径(), JSON.stringify(新, null, 1))
   } finally { try { 放() } catch { /* 放锁失败不影响本轮 */ } }
 }
 const 超时毫秒 = () => Math.max(500, Number(process.env.心跳_超时毫秒) || 25000)
@@ -214,7 +214,7 @@ export function 跑一轮(argv = process.argv.slice(2), 输出 = console.log) {
         }
       }
     } catch { /* 状态坏了就当没跑过 */ }
-    try { writeFileSync(状态路径(), JSON.stringify({ lastStart: Date.now() })) } catch { /* 写不进也不拦 */ }
+    try { 原子写(状态路径(), JSON.stringify({ lastStart: Date.now() })) } catch { /* 写不进也不拦 */ }
 
     const 睡 = 睡着了()
     const 基底 = dirname(opt.表) // 任务脚本/相对路径都相对「表所在目录」（生产表就在 共享/工具）

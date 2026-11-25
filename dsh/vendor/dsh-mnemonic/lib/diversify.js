@@ -1,9 +1,10 @@
-// MMR 去冗余（借 dsh-neo4j-memory 的 rerankEvents 思路，纯词袋版）。
-// 目的：一次注入多条时，避免全部都是同一话题的相邻复述。
+// MMR 去冗余：优先复用倒排索引中已切好的 grams，避免每轮重复切词。
 import { queryGrams } from './text.js'
 
-function gramSet(text) {
-  return new Set(queryGrams(text).keys())
+function gramSetFrom(rec, gramsIndex) {
+  const pre = gramsIndex?.get(rec.id)
+  if (pre) return new Set(pre.keys())
+  return new Set(queryGrams(`${rec.text} ${(rec.keywords || []).join(' ')}`).keys())
 }
 
 function jaccard(a, b) {
@@ -13,11 +14,11 @@ function jaccard(a, b) {
   return inter / (a.size + b.size - inter)
 }
 
-export function diversify(hits, { limit = 4, lambda = 0.75 } = {}) {
+export function diversify(hits, { limit = 4, lambda = 0.75, gramsIndex = null } = {}) {
   if (!hits?.length || limit <= 0) return []
   if (hits.length === 1) return hits.slice(0, limit)
   const maxScore = Math.max(1, ...hits.map((h) => Number(h.score) || 0))
-  const grams = new Map(hits.map((h) => [h.rec.id, gramSet(`${h.rec.text} ${(h.rec.keywords || []).join(' ')}`)]))
+  const grams = new Map(hits.map((h) => [h.rec.id, gramSetFrom(h.rec, gramsIndex)]))
   const selected = []
   const remaining = hits.slice()
   while (selected.length < limit && remaining.length) {

@@ -19,7 +19,7 @@ leak_re = re.compile(
 )
 allow_re = re.compile(r'body\.hajimi-mode|on-hajimi|x-bot-target|swHajimi|HAJIMI_', re.IGNORECASE)
 skip_dirs = {'instances', 'vendor', '.git', 'node_modules', '__pycache__', '测试'}
-skip_files = {'README.md', 'vars.example.env', 'clean-persona.py', '自检.sh', 'test-tpl-engine.py', 'REFACTOR-CHANGELOG.md', 'WAVE4-CHANGELOG.md', 'WAVE5-CHANGELOG.md'}
+skip_files = {'README.md', 'vars.example.env', 'clean-persona.py', '自检.sh', 'test-tpl-engine.py'}
 hits = []
 for dp, dns, fns in os.walk(root):
     dns[:] = [d for d in dns if d not in skip_dirs]
@@ -144,7 +144,16 @@ bundles = d2.get('dsh', {}).get('profile', {}).get('bundles', [])
 if 'dsh-live-compact' not in bundles:
     print("  FAIL dsh package.json 少了 dsh-live-compact")
     sys.exit(1)
-print(f"  ok   dsh package.json 合法，bundles {len(bundles)} 个（含 live-compact）")
+missing_vendor = [
+    f"{k} -> {v}"
+    for k, v in d2.get('dependencies', {}).items()
+    if isinstance(v, str) and v.startswith('file:./vendor/')
+    and not (root / 'dsh' / v[len('file:./'):]).is_dir()
+]
+if missing_vendor:
+    print("  FAIL dsh package.json 指向不存在的 vendor 目录:", *missing_vendor, sep="\n    ")
+    sys.exit(1)
+print(f"  ok   dsh package.json 合法，bundles {len(bundles)} 个（含 live-compact），全部 vendor 目录存在")
 PY
 then :; else FAIL=1; fi
 
@@ -175,6 +184,23 @@ if command -v node >/dev/null 2>&1 && [ -f "$HERE/tests/test-mnemonic.mjs" ]; th
   else
     bad "test-mnemonic.mjs 失败（手动运行查看详情）"
   fi
+fi
+if [ -f "$HERE/tests/test-modular-splits.mjs" ]; then
+  if node "$HERE/tests/test-modular-splits.mjs" >/dev/null 2>&1; then
+    ok "test-modular-splits.mjs 全部通过"
+  else
+    bad "test-modular-splits.mjs 失败"
+  fi
+fi
+if [ -f "$HERE/workspace/共享/工具/测试/出口/面板响应.test.mjs" ]; then
+  for mt in "$HERE/workspace/共享/工具/测试/出口/面板响应.test.mjs" "$HERE/workspace/共享/工具/测试/判据/关系档.test.mjs" "$HERE/workspace/共享/工具/测试/核心/账本.test.mjs" "$HERE/workspace/共享/工具/测试/核心/恢复目标.test.mjs"; do
+    [ -f "$mt" ] || continue
+    if node "$mt" >/dev/null 2>&1; then
+      ok "$(basename "$(dirname "$mt")")/$(basename "$mt") 镜像测试通过"
+    else
+      bad "$(basename "$(dirname "$mt")")/$(basename "$mt") 失败"
+    fi
+  done
 fi
 
 [ "$KEEP" = 1 ] && echo "临时目录保留在 $TMP" || rm -rf "$TMP"

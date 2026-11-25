@@ -54,7 +54,7 @@ run('定时任务健康', () => {
   try {
     const hb = readJSON(`${TOOLS}/心跳表.json`);
     hbJobs = (hb.任务 || []).map(t => t.脚本).filter(Boolean);
-  } catch {}
+  } catch (_err) { console.error('[自我巡检]', _err?.message || _err) }
   const jobs = [...new Set([...cronJobs.map(x => path.basename(x)), ...hbJobs.map(x => path.basename(x))])];
   const rlog = fs.existsSync(`${MEM}/日志/日常.log`) ? `${MEM}/日志/日常.log` : `${MEM}/日常.log`;
   const lines = fs.existsSync(rlog) ? fs.readFileSync(rlog, 'utf8').split('\n').slice(-300) : [];

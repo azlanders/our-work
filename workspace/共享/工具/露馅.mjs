@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 // 露馅.mjs —— 允许她说善意的谎，但给这个谎配一个「破绽」（2026-11-01）
 //
 // 用法：
@@ -30,7 +31,7 @@ const 过期了 = (c) => {
   const at = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5], +(m[6] || 0))
   return !Number.isFinite(at) || Date.now() - at > 过期毫秒
 }
-const save = (o) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(o, null, 2), 'utf8') }
+const save = (o) => { mkdirSync(dirname(path), { recursive: true }); 原子写(path, JSON.stringify(o, null, 2), 'utf8') }
 
 const db = load()
 

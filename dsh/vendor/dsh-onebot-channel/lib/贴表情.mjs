@@ -535,7 +535,7 @@ async function 落点文案(mid, group, send = callOneBot) {
     const 文 = Array.isArray(msg) ? msg.filter((x) => x?.type === 'text').map((x) => x?.data?.text ?? '').join('') : String(msg ?? '')
     const 谁 = String(r?.data?.sender?.card || r?.data?.sender?.nickname || r?.data?.user_id || '')
     if (截(文)) return { word: `贴在 ${谁 || '这条'} 那条「${截(文)}」上` }
-  } catch { }
+  } catch (_err) { console.error('[onebot:贴表情]', _err?.message || _err) }
   return { word: `贴在第 ${mid} 条消息上（原文这会儿取不到）` }
 }
 /**

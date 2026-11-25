@@ -455,13 +455,13 @@ void registerGrowTool(ctx) // GROW 2026-11-17（批次606）：提示说能生�
         for (const stop of stopFns) {
           try {
             stop()
-          } catch {}
+          } catch (_err) { console.error('[onebot:index]', _err?.message || _err) }
         }
         for (const timer of timers) clearInterval(timer)
         // 池子里攒着还没放行的消息：这时候不能投（ctx 正在卸载），记一条日志再丢
         try {
           drainMerge()
-        } catch {}
+        } catch (_err) { console.error('[onebot:index]', _err?.message || _err) }
         // 出站队列同理。不清的话，退出前 flushOutbound 还会每秒扫一遍，
         // 每条都等满 30 秒再喊一句「多半是这一回合丢了」—— 日志里 27 条误导全是这么来的。
         // UNLOAD_TRACE 2026-11-16（批次526）：先把「还没等到回复的回合」落一份档。

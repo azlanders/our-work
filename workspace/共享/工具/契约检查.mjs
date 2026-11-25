@@ -907,7 +907,7 @@ const 生产单元 = String(process.env.SERVICES || 'dsh-bot,fish-panel,fish-ups
   })())
   const 源 = []
   for (const f of ['SOUL.md', '门牌.md', '梗知识.md', '热记忆.md']) {
-    try { 源.push({ 标签: f, 文本: fs.readFileSync(path.join(DIR, f), 'utf8') }) } catch {}
+    try { 源.push({ 标签: f, 文本: fs.readFileSync(path.join(DIR, f), 'utf8') }) } catch (_err) { console.error('[契约检查]', _err?.message || _err) }
   }
   for (const f of ['voiceSlots.js', 'poll.js', 'stateVoice.js']) {
     try {
@@ -915,7 +915,7 @@ const 生产单元 = String(process.env.SERVICES || 'dsh-bot,fish-panel,fish-ups
       // 先剥注释再扫：这三处 qq_self / qq_lie / qq_emoji_search 全在 `*` 注释里，
       // 不剥就会把「说明文字」当成「教她调工具」（这个断言第一版就是这么假红的）。
       源.push({ 标签: f, 文本: 原文.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') })
-    } catch {}
+    } catch (_err) { console.error('[契约检查]', _err?.message || _err) }
   }
   const 缺 = new Set()
   for (const { 标签, 文本 } of 源) {

@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 // 刷群.mjs —— 闲下来翻一眼群里刚说了啥，记成一张纸（2026-11-06）
 // 只读群聊日志，不发言、不贴表情。看不看、贴不贴，留给她下一轮自己定。
 import fs from 'node:fs'
@@ -21,7 +22,7 @@ const 群 = (process.argv[2] || '1051483012').split(',')
 
 // ACT_2026-11-06（主人点头）：翻手机要跟着日子走，不在忙的时候硬翻。
 let 态 = ""
-try { 态 = String(JSON.parse(fs.readFileSync("{{BOT_ROOT}}/记忆/自主.json", "utf8"))?.state || "") } catch {}
+try { 态 = String(JSON.parse(fs.readFileSync("{{BOT_ROOT}}/记忆/自主.json", "utf8"))?.state || "") } catch (_err) { console.error('[刷群]', _err?.message || _err) }
 const 忙 = ["走动", "打工", "洗澡"].includes(态)
 if (忙) console.log("这会儿在" + 态 + "，就瞄两眼")
 
@@ -38,10 +39,10 @@ for (const g of 群) {
       const 净 = String(o.text || '').replace(/\[(图片|表情|json|xml|file|image|face|record|video|reply|at|mface|bface|forward)[^\]]*\]/gi, '').replace(/\[\[at:\d+\]\]/g, '').trim()
       if (!净) continue
       条目.push({ 群: g, 时: o.time, 谁: o.nickname, 号: o.message_id, 话: 净.slice(0, 80) })
-    } catch {}
+    } catch (_err) { console.error('[刷群]', _err?.message || _err) }
   }
 }
 const 尾巴 = 条目.slice(忙 ? -3 : -12)
-fs.writeFileSync(出, JSON.stringify({ 看于: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' '), 条目: 尾巴 }, null, 1))
+原子写(出, JSON.stringify({ 看于: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' '), 条目: 尾巴 }, null, 1))
 console.log('记下 ' + 尾巴.length + ' 条')
 }

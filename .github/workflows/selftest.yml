@@ -1,0 +1,29 @@
+name: Template Self-Test & Regression CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run full template self-test (6/6 gates)
+        run: |
+          chmod +x 自检.sh scripts/tpl_engine.py clean-persona.py 同步dsh.sh 推dsh.sh 同步一圈.sh 同步模板.sh 安装新bot.sh 推给所有实例.sh tests/test-tpl-engine.py
+          bash 自检.sh

@@ -567,7 +567,7 @@ function 执行(a) {
     return `想跟他开口要 ${a.n} 块（还没说出口）`
   }
   if (a.act === "忍") {
-    try { execFileSync(process.execPath, [path.join(TOOLS, "激素.mjs"), "--event", "饿", "--id", 'gap:resist:' + bj()], { encoding: "utf8" }) } catch {}
+    try { execFileSync(process.execPath, [path.join(TOOLS, "激素.mjs"), "--event", "饿", "--id", 'gap:resist:' + bj()], { encoding: "utf8" }) } catch (_err) { console.error('[缺口]', _err?.message || _err) }
     return "算了，忍一忍"
   }
   return "什么也不做"
@@ -594,7 +594,7 @@ function 挂惦记(话) {
       try { const j = JSON.parse(l); return j && j.done !== true && String(j.what || '') === 话 } catch { return false }
     })
     if (!有了) 写惦记(MEM, 话, bj())
-  } catch {}
+  } catch (_err) { console.error('[缺口]', _err?.message || _err) }
 }
 
 function 记念头(a, 详情) {
@@ -624,7 +624,7 @@ function 记念头(a, 详情) {
       if (饿数 >= 60) 销账生理惦记(MEM, "有点空了，找点吃的", bj())
       fs.writeFileSync(P, JSON.stringify(水))
     }
-  } catch {}
+  } catch (_err) { console.error('[缺口]', _err?.message || _err) }
 
   // ASK_WRITE 2026-11-14（批次395）：「要」这个动作的产物是「心里搁着一件事」，不是「真去要钱」——
   // 所以它该在 --tick（只记念头）的时候就写进 想开口.json。
@@ -644,7 +644,7 @@ function 记念头(a, 详情) {
   }
 
   const 行 = { at: bj(), 想到: a.act, 建议: 详情 || "", 钱: 钱, 体力: energy, 困意, 心情: mi, 在哪: 地点 }
-  try { fs.appendFileSync(念头P, JSON.stringify(行) + "\n") } catch {}
+  try { fs.appendFileSync(念头P, JSON.stringify(行) + "\n") } catch (_err) { console.error('[缺口]', _err?.message || _err) }
   return 详情 || ""
 }
 const 详情 = args.includes("--tick")

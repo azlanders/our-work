@@ -252,7 +252,7 @@ function failureBody(text) {
       }
       const body = streams.join("\n");
       if (body.trim()) return body;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
   }
   return raw;
 }
@@ -284,7 +284,7 @@ function boundaryFailure(raw) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && typeof parsed.exitCode === "number") return parsed.exitCode !== 0;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
   }
   return false;
 }
@@ -306,7 +306,7 @@ export function exitCodeOf(text) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && typeof parsed.exitCode === "number") return parsed.exitCode;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
   }
   return null;
 }
@@ -623,7 +623,7 @@ function recordOf(value) {
     try {
       const got = value.get();
       if (got && typeof got === "object" && !Array.isArray(got)) return got;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
   }
   return Array.isArray(value) ? null : value;
 }
@@ -880,6 +880,7 @@ function expandBack(items, end, stopAt, { crossUser, chunkMax }) {
 }
 
 function balanced(items, start, end) {
+  if (!items[start] || !items[end]) return false;
   if (items[end].balancedAfter === false) return false;
   if (items[start].balancedBefore === false) return false;
   return true;

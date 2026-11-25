@@ -77,7 +77,7 @@ export function getVideoMode(env) {
     const j = JSON.parse(readFileSync(接入配置路径, 'utf8')) || {}
     const m = String(j?.看视频?.模式 || j?.videoMode || process.env.FISH_VIDEO_MODE || '').trim().toLowerCase()
     if (m === 'storyboard' || m === 'plugin') return 'storyboard'
-  } catch {}
+  } catch (_err) { console.error('[视频音频]', _err?.message || _err) }
   return 'omni'
 }
 

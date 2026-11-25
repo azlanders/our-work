@@ -96,7 +96,7 @@ function connect() {
   })()
 
   try {
-    if (socket !== null) { try { socket.close() } catch {} socket = null }
+    if (socket !== null) { try { socket.close() } catch (_err) { console.error('[onebot:ws]', _err?.message || _err) } socket = null }
     // 第二参数带 headers 只是双保险：不同 Node 版本对 undici WebSocket 的 headers
     // 支持不一致（有的当 protocols 解析会直接抛），带上查询参数最稳。
     socket = new WebSocket(target, { headers: { Authorization: `Bearer ${token}` } })

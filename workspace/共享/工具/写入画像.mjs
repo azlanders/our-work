@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { 原子写 } from './_底层.mjs'
 // 写入画像.mjs —— 批次461（2026-11-14）
 //
 // 为什么有它：雷霆体检里「读了没人写」这项静态扫不准（写路径跨行、经 写档/save 包装、中文变量），
@@ -72,7 +73,7 @@ for (const t of 表) {
   })
   const 耗时 = Date.now() - t0
   let 行们 = []
-  try { 行们 = fs.readFileSync(日志, 'utf8').trim().split('\n').filter(Boolean) } catch {}
+  try { 行们 = fs.readFileSync(日志, 'utf8').trim().split('\n').filter(Boolean) } catch (_err) { console.error('[写入画像]', _err?.message || _err) }
   const 写了 = new Set()
   for (const 行 of 行们) {
     const 部 = 行.split('\t')
@@ -134,6 +135,6 @@ for (const x of 结果) 出.push(`- ${x.名}（${x.脚本}）${x.状态}${x.耗�
 const 文本 = 出.join('\n')
 const 目录 = path.join(DIR, '共享/工作日志')
 const 名 = '写入画像-' + new Date(现 + 8 * 3600e3).toISOString().slice(0, 16).replace(/[-:T]/g, '').slice(0, 12) + '.md'
-try { fs.writeFileSync(path.join(目录, 名), 文本) } catch (e) { console.log('写报告失败：' + e.message) }
+try { 原子写(path.join(目录, 名), 文本) } catch (e) { console.log('写报告失败：' + e.message) }
 console.log('\n' + 文本)
 console.log('\n---- 报告：共享/工作日志/' + 名)

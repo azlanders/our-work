@@ -9,7 +9,7 @@ import { 写档 } from './_底层.mjs';
 // 「熟悉×0.6 + 好感×0.4 + 轮数×0.3」另算一套阈值，和 内心.mjs、voiceSlots 的
 // 三套阈值互相打架（同一个人被同时说成「熟稔 / 在意 / 跟他熟」）。
 // 现在档位只在 关系档.mjs 判一次，这里只负责把数字喂进去。
-import { 关系档 } from './关系档.mjs';
+import { 关系档 } from './判据/关系档.mjs';
 
 const read = (name, fallback) => JSON.parse(fs.readFileSync(P(name), 'utf8') ?? fallback);
 // ATOMIC_SAVE 2026-11-07（批次179）：原来这里裸 writeFileSync。这个脚本每天 04:10(UTC) 跑，
@@ -47,7 +47,7 @@ const recentChatClue = (uid) => {
           if (u !== String(uid)) continue;
           const t = String(j.text || j.raw_message || '').replace(/\[[^\]]*\]|@\S+/g, '').trim();
           if (t.length >= 3 && t.length <= 24 && !/^[0-9a-zA-Z\s]+$/.test(t)) msgs.push(t);
-        } catch {}
+        } catch (_err) { console.error('[印象更新]', _err?.message || _err) }
       }
     }
     // CLUE_QUALITY 2026-11-17（批次642）：原来取「最后一条 3~24 字的发言」，

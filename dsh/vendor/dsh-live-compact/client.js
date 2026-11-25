@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
             if (Array.isArray(value) && value.every((id) => typeof id === "string" && id.length > 0)) {
               return { kind: "set", value };
             }
-          } catch {}
+          } catch (_err) { console.error('[live-compact:client]', _err?.message || _err) }
         }
         return { kind: "set", value: raw };
       },

@@ -42,6 +42,15 @@ import {
 import { buildSendLess, decideThunder } from "./thunder.js";
 import { inCooldown, skipLiveOfficialCompaction } from "./cooldown.js";
 import { activeCompactionPeers, warnCompactionStandDown } from "./gate.js";
+// 纯轮次边界判定已拆至 ./turn-helpers.js
+import {
+  isCuttableTurnEnd,
+  latestTurnCompleted,
+  latestCompletedTurnEnd,
+  latestTurnStart,
+  turnStartForBoundary,
+} from './turn-helpers.js';
+
 
 const PI_AI_CATALOG = "@earendil-works/pi-ai/providers/all";
 const PI_AI_PACKAGE = "@earendil-works/pi-ai";
@@ -78,7 +87,7 @@ async function importCatalogFromPackage(root) {
     try {
       const normalized = normalizeCatalogModule(await import(pathToFileURL(candidate).href));
       if (normalized.length) return normalized;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
   }
   return [];
 }
@@ -94,7 +103,7 @@ function normalizeCatalogModule(loaded) {
         id: model?.id || "",
         baseURL: model?.baseUrl || model?.baseURL || "",
       })).filter((model) => model.id && model.baseURL);
-    } catch {}
+    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     return {
       id: entry?.id || "",
       baseURL: entry?.baseUrl || entry?.baseURL || "",
@@ -106,15 +115,15 @@ function normalizeCatalogModule(loaded) {
 async function loadPiAiCatalog() {
   try {
     return normalizeCatalogModule(await import(PI_AI_CATALOG));
-  } catch {}
+  } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
   try {
     const resolved = typeof import.meta.resolve === "function" ? import.meta.resolve(PI_AI_CATALOG) : null;
     if (resolved) return normalizeCatalogModule(await import(resolved));
-  } catch {}
+  } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
   const anchors = [import.meta.url];
   try {
     if (process.argv[1]) anchors.push(pathToFileURL(process.argv[1]).href);
-  } catch {}
+  } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
   for (const anchor of anchors) {
     for (const root of catalogPackageRoots(anchor)) {
       const normalized = await importCatalogFromPackage(root);
@@ -124,7 +133,7 @@ async function loadPiAiCatalog() {
       const loaded = createRequire(anchor)(PI_AI_CATALOG);
       const normalized = normalizeCatalogModule(loaded);
       if (normalized.length) return normalized;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
   }
   return [];
 }
@@ -364,61 +373,6 @@ function isCheckpoint(session, seq) {
   if (event?.type !== "user/message") return false;
   const text = eventText(session, seq).trimStart();
   return text === MARK || text.startsWith(`${MARK}\n`) || text.startsWith(`${MARK}\r\n`);
-}
-
-function isCuttableTurnEnd(event) {
-  const reason = event?.data?.reason;
-  return reason?.kind === "completed" ||
-    reason?.kind === "max-tokens" ||
-    (reason?.kind === "other" && reason.label === "max-tokens");
-}
-
-function latestTurnCompleted(events) {
-  let lastStart = -1;
-  let lastEnd = -1;
-  let completed = false;
-  for (let index = 0; index < (events || []).length; index += 1) {
-    const event = events[index];
-    if (event?.type === "turn/start") lastStart = index;
-    if (event?.type === "turn/end") {
-      lastEnd = index;
-      completed = isCuttableTurnEnd(event);
-    }
-  }
-  return lastEnd > lastStart && completed;
-}
-
-function latestCompletedTurnEnd(events) {
-  let found = null;
-  for (const event of events || []) {
-    if (event?.type === "turn/end" && isCuttableTurnEnd(event)) found = event;
-  }
-  return found;
-}
-
-function latestTurnStart(events) {
-  let found = null;
-  for (const event of events || []) {
-    if (event?.type === "turn/start") found = event;
-  }
-  return found;
-}
-
-function turnStartForBoundary(events, boundary) {
-  const list = events || [];
-  const boundaryTurn = boundary?.data?.turn;
-  const boundaryIndex = boundary?.seq == null
-    ? -1
-    : list.findIndex((event) => event?.seq === boundary.seq);
-  let found = null;
-  for (let index = 0; index < list.length; index += 1) {
-    if (boundaryIndex >= 0 && index >= boundaryIndex) break;
-    const event = list[index];
-    if (event?.type !== "turn/start") continue;
-    if (boundaryTurn !== undefined && event?.data?.turn !== boundaryTurn) continue;
-    found = event;
-  }
-  return found;
 }
 
 function maintenanceOperationSignal(agentSignal, timeoutSignal) {
@@ -910,7 +864,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     });
     if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     this.liveConfig = config;
-    try { console.error('[spine] settings ' + JSON.stringify(readSettings(config))); } catch {}
+    try { console.error('[spine] settings ' + JSON.stringify(readSettings(config))); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     try {
       ctx.effect(() => async () => {
         await Promise.allSettled([...this.pendingCuts, ...this.pendingCaptures, ...this.pendingCatchupJobs]);
@@ -922,7 +876,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
             try {
               const scrubbed = this.scrubCards(session);
               if (scrubbed > 0) console.error(`[spine] scrubbed ${scrubbed} cards at turn start`);
-            } catch {}
+            } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
           }
           this.noteEvent(session, event);
           if (event?.type === "turn/end" && isCuttableTurnEnd(event)) {
@@ -1638,7 +1592,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     try {
       const scrubbed = this.scrubCards(agent.session);
       if (scrubbed > 0) console.error(`[spine] scrubbed ${scrubbed} cards`);
-    } catch {}
+    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     const settings = readSettings(this.liveConfig);
     const state = this.stateFor(agent);
     if (state.maintenanceAbort?.signal.aborted) return false;
@@ -1869,13 +1823,13 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const message = error instanceof Error ? error.message : String(error);
       try {
         this.recordDecision(state, { phase: "maintenance-abort", reason: message.slice(0, 300) });
-      } catch {}
+      } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
       // ACTIVEWORK_RETRY_2026：QQ 连发时下一回合会紧接着起来，宿主判「already has active work」
       // 把维护踢回去。这时不能放弃：等 5 秒再来一次，最多 5 次，成功一次就把计数清零。
       if (message.includes("already has active work")) {
         state.activeWorkRetries = (state.activeWorkRetries || 0) + 1;
         if (state.activeWorkRetries <= 5) {
-          setTimeout(() => { try { this.scheduleMaintenanceRetry(agent); } catch {} }, 5000);
+          setTimeout(() => { try { this.scheduleMaintenanceRetry(agent); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) } }, 5000);
         }
       }
       this.ctx.logger?.warn?.(`spine after-turn skipped: ${message}`);
@@ -2051,7 +2005,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         const message = error instanceof Error ? error.message : String(error);
         try {
           session.append("compaction/end", replaced ? lifecycle : { ...lifecycle, error: message });
-        } catch {}
+        } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
       }
       if (!replaced) throw error;
       this.ctx.logger?.warn?.(`spine compaction persistence unknown after replacement: ${message}`);
@@ -2065,7 +2019,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const messages = agent.session.deriveMessages();
       state.lastPrefix = (messages || []).map(messageText).join("\n");
       state.lastPrefixTokens = this.ctx.tokenMeter.measure(agent.session).totalTokens;
-    } catch {}
+    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
   }
 
   async compactIfNeeded(agent, trigger, signal) {
@@ -2129,7 +2083,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       try {
         const hit = node.get(name);
         if (hit) return hit;
-      } catch {}
+      } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     }
     return undefined;
   }
@@ -2185,7 +2139,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const profile = this.hostService("profileContext");
       if (profile?.patchPath) candidates.push(profile.patchPath);
       if (profile?.dir) candidates.push(join(profile.dir, "cordis.patch.yml"));
-    } catch {}
+    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     const home = process.env.DSH_HOME;
     const flag = process.argv.indexOf("--profile");
     const name = flag >= 0 ? process.argv[flag + 1] : process.env.DSH_PROFILE;
@@ -2193,7 +2147,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     for (const path of candidates) {
       try {
         if (path && existsSync(path)) return readFileSync(path, "utf8");
-      } catch {}
+      } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     }
     return "";
   }
@@ -2503,8 +2457,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     } catch (error) {
       noteShadowWarning(this.ctx?.logger, error);
     } finally {
-      if (fd !== undefined) { try { closeSync(fd); } catch {} }
-      if (tmp) { try { unlinkSync(tmp); } catch {} }
+      if (fd !== undefined) { try { closeSync(fd); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) } }
+      if (tmp) { try { unlinkSync(tmp); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) } }
     }
   }
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updated": "2026-11-24",
+  "updated": "2026-11-25",
   "hostPatches": [
     {
       "file": "dsh-agent-loop-system-dedup.patch",
@@ -25,14 +25,6 @@
   ],
   "vendorPatches": [
     {
-      "file": "dsh-rofm-compact-desc.py",
-      "target": "dsh-rofm/lib/memory-tool.js",
-      "marker": "COMPACT_DESC 2026-11-24",
-      "status": "active",
-      "supportsDry": true,
-      "atomicWrite": true
-    },
-    {
       "file": "dsh-onebot-channel-quiet-hours.py",
       "target": "dsh-onebot-channel/lib/proactive.js",
       "marker": "QUIET_HOURS 2026-11-24",
@@ -53,6 +45,10 @@
     {
       "file": "fix_portable.py",
       "reason": "正则改写 import { a as b } 为 const { a as b } = await import(...) 会产生非法 JS 解构语法。"
+    },
+    {
+      "file": "dsh-rofm-*.py",
+      "reason": "dsh-rofm 已于 2026-11-25 归档停用，现由自研 dsh-mnemonic 替代。"
     }
   ]
 }

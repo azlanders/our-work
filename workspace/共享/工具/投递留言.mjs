@@ -124,7 +124,7 @@ const 解析戳 = (s) => {
 }
 
 const load = (p, fb) => { try { const v = JSON.parse(fs.readFileSync(p, 'utf8')); return v && typeof v === 'object' ? v : fb } catch { return fb } }
-const note = (s) => { try { fs.mkdirSync(path.dirname(LOG), { recursive: true }); fs.appendFileSync(LOG, '[' + stamp() + '] ' + s + '\n') } catch {} }
+const note = (s) => { try { fs.mkdirSync(path.dirname(LOG), { recursive: true }); fs.appendFileSync(LOG, '[' + stamp() + '] ' + s + '\n') } catch (_err) { console.error('[投递留言]', _err?.message || _err) } }
 
 // 「at」是 "YYYY-MM-DD HH:mm"（北京时间）。字符串格式统一，直接按字典序比就够，
 // 别绕去 new Date()——服务器是 UTC，那个字符串会被当本地时间解析，一进一出差 8 小时。
@@ -347,7 +347,7 @@ for (const t of todo.slice(0, MAX_PER_RUN)) {
     try {
       fs.mkdirSync(path.dirname(SAID), { recursive: true })
       fs.appendFileSync(SAID, JSON.stringify({ at: stamp(), kind: t.x.kind || '', 话: t.x.话, 送到: c.uin, msg_id: r.msgId, 来源: '留言' }) + '\n')
-    } catch {}
+    } catch (_err) { console.error('[投递留言]', _err?.message || _err) }
     await new Promise((s) => setTimeout(s, 1200))   // 别像机器一样连着蹦，隔一下
   } else if (r.fatal) {
     // 白名单 / 内容审计拦截：重试 20 次也不会变，直接标终态，别每 5 分钟刷一遍日志。

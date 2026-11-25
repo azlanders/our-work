@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 /**
  * 思考流.mjs —— 把她每一轮的 thinking 旁路记下来，给面板的「实时思考」页看。
  *
@@ -56,7 +57,7 @@ function 落一条(文, 起, 谁 = '她') {
       try {
         if (statSync(输出).size > 1024 * 1024) {
           const 全 = readFileSync(输出, 'utf8').trim().split('\n')
-          if (全.length > 保留条数) writeFileSync(输出, 全.slice(-保留条数).join('\n') + '\n')
+          if (全.length > 保留条数) 原子写(输出, 全.slice(-保留条数).join('\n') + '\n')
         }
       } catch { /* 收拾失败不影响记录 */ }
     }

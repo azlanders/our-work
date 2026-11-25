@@ -55,7 +55,7 @@ export class ProactiveReceiptStore {
       writeFileSync(temporary, JSON.stringify(entries, null, 2), 'utf8')
       renameSync(temporary, this.file)
     } catch (error) {
-      try { unlinkSync(temporary) } catch {}
+      try { unlinkSync(temporary) } catch (_err) { console.error('[onebot:receipt-transaction]', _err?.message || _err) }
       throw error
     }
     this.entries = entries

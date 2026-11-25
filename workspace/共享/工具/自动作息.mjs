@@ -11,7 +11,7 @@
 //     清醒超过一定小时数，困意再低也躺。
 //   · 醒了要满足两个条件之一：睡够目标时长，或者困意已经回落到阈值以下。
 //   · 阈值都放参数表，读不到用默认；她自己的选择保留在日志里，能回看。
-import { 写档, 解析北京 } from './_底层.mjs'
+import { 写档, 解析北京 , 原子写 } from './_底层.mjs'
 import { 睡着 } from './睡态.mjs'
 // OCCUPY 2026-11-07（批次167）：在岗判据只在 占用.mjs 一份
 import { 在岗的班, 在打盹 } from './占用.mjs'
@@ -67,7 +67,7 @@ const save = (p, o) => 写档(p, o)
 const 写该睡了 = (值) => {
   if (dry) return false
   try {
-    writeFileSync(base + '/该睡了.json', JSON.stringify(值, null, 2))
+    原子写(base + '/该睡了.json', JSON.stringify(值, null, 2))
     return true
   } catch { return false }
 }
@@ -452,7 +452,7 @@ if (!(lastHours > 0.5) && __lsStart) {
           const sj2 = load(sleepP, {})
           if (sj2 && typeof sj2 === 'object') {
             sj2.todayTotalHours = total
-            writeFileSync(sleepP, JSON.stringify(sj2, null, 2), 'utf8')
+            原子写(sleepP, JSON.stringify(sj2, null, 2), 'utf8')
           }
         } catch { /* 写不进去不影响醒 */ }
       } catch { /* 算不出来就算了，别影响醒 */ }

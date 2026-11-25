@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 // 多模型接口网关（127.0.0.1:39401）
 //
 // 核心能力：
@@ -77,7 +78,7 @@ function 请求体量(parsed) {
       })
       appendFileSync('/tmp/{{BOT_NAME}}-req.jsonl', JSON.stringify({ at: 京刻(), 量, rows }) + '\n')
       // DUMP_SYS_TOOLS 2026-11-24：只记 msgs 看不出固定开销（system + tools schema）占多少。
-      try { writeFileSync('/tmp/{{BOT_NAME}}-req-full.json', JSON.stringify({ at: 京刻(), 量, system: parsed?.system, tools: parsed?.tools, msgs })) } catch (e) { console.error('[接口网关]', e && e.message) }
+      try { 原子写('/tmp/{{BOT_NAME}}-req-full.json', JSON.stringify({ at: 京刻(), 量, system: parsed?.system, tools: parsed?.tools, msgs })) } catch (e) { console.error('[接口网关]', e && e.message) }
     } catch (e) { console.error('[接口网关]', e && e.message) }
   }
   return 量
@@ -283,7 +284,7 @@ function 读舰队() {
 function 写舰队(d) {
   mkdirSync(dirname(FLEET_PATH), { recursive: true })
   d.updatedAt = 京分()
-  writeFileSync(FLEET_PATH, JSON.stringify(d, null, 2) + '\n', { mode: 0o600 })
+  原子写(FLEET_PATH, JSON.stringify(d, null, 2) + '\n', { mode: 0o600 })
 }
 
 const 型名 = (s) => String((s && (s.别名 || s.model)) || '').trim()

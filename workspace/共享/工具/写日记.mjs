@@ -247,7 +247,7 @@ if (梦) 素材行.push('', '昨晚的梦，醒来还剩一点：' + 梦)
 try {
   const 歌m = (有(join(MEM, '手账-' + day + '.md')) || '').match(/^一起听过的歌：(.+)$/m)
   if (歌m && 歌m[1].trim()) 素材行.push('', '今天戴着云耳机跟他一起听过的歌：' + 歌m[1].trim())
-} catch {}
+} catch (_err) { console.error('[写日记]', _err?.message || _err) }
 
 const 素材 = 素材行.join('\n')
 

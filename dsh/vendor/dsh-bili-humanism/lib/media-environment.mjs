@@ -60,13 +60,21 @@ export function managedEnvironment(root) {
   }
 }
 
+function safeExecutable(candidate) {
+  const s = String(candidate || "").trim();
+  if (!s || /[\x00-\x1f;&|`$<>\r\n]/.test(s)) {
+    throw new Fault("INVALID_PYTHON_PATH", "pythonPath contains forbidden control or shell characters");
+  }
+  return s;
+}
+
 export function pythonFor(config, root) {
-  return (
+  const chosen =
     config.pythonPath ||
     process.env.BILI_HUMANISM_PYTHON ||
     managedEnvironment(root)?.python ||
-    (process.platform === "win32" ? "python" : "python3")
-  );
+    (process.platform === "win32" ? "python" : "python3");
+  return safeExecutable(chosen);
 }
 
 export function modelFor(config, root) {

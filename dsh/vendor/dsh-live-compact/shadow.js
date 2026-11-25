@@ -136,7 +136,7 @@ function publishRotationOwner(file, record) {
     renameSync(temp, file);
   } finally {
     if (fd !== undefined) closeSync(fd);
-    try { unlinkSync(temp); } catch {}
+    try { unlinkSync(temp); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
   }
 }
 
@@ -228,7 +228,7 @@ function publishRotationRecord(file, record) {
     if (fd !== undefined) closeSync(fd);
     // The temp is only an extra name. Cleanup must neither hide publication's
     // outcome nor discard the exact ownership handle of an already live lock.
-    if (created) { try { unlinkSync(temp); } catch {} }
+    if (created) { try { unlinkSync(temp); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) } }
   }
 }
 
@@ -322,7 +322,7 @@ function acquireRotationGuard(root, identity) {
       // Publication succeeded, but acquisition never returned its ownership
       // handle. Retry validation before releasing only that exact root/object/
       // record; a replacement or an unreadable guard must remain untouched.
-      try { releaseRotationGuard(root, identity, guard); } catch {}
+      try { releaseRotationGuard(root, identity, guard); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       throw error;
     }
     if (error?.code === "ESHADOWLINKUNSUPPORTED") {
@@ -339,7 +339,7 @@ function acquireRotationGuard(root, identity) {
       }
       return recoverRotationGuard(root, identity, { owned: false, record: observed });
     }
-    try { touchExclusive(join(root, ROTATION_SHARED)); } catch {}
+    try { touchExclusive(join(root, ROTATION_SHARED)); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
     if (error?.code !== "EEXIST") throw error;
   }
 
@@ -401,7 +401,7 @@ export function shadowRootForDir(dir) {
       path = join(realDirectory(dirname(resolve(dir))), basename(dir));
     }
     if (path === root || dirname(path) === root) return configured;
-  } catch {}
+  } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
   if (existsSync(join(dirname(dir), ROTATION_OWNER)) || existsSync(join(dirname(dir), ROTATION_SHARED))) return dirname(dir);
   return dir;
 }
@@ -466,7 +466,7 @@ export function withShadowRoot(dir, action) {
     const owner = join(root, ROTATION_OWNER);
     let token = "";
     let currentOwner;
-    try { currentOwner = readRotationOwner(owner); } catch {}
+    try { currentOwner = readRotationOwner(owner); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
     const ownsCurrent = currentOwner?.pid === process.pid && currentOwner?.id === rotationOwner;
     if (optedIn && !existsSync(shared) && !ownsCurrent) {
       shadowUsage = null;
@@ -476,7 +476,7 @@ export function withShadowRoot(dir, action) {
       try {
         const record = readRotationOwner(owner);
         token = record.pid === process.pid && record.id === rotationOwner ? record.id : "";
-      } catch {}
+      } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       if (token !== rotationOwner || !optedIn) touchExclusive(shared);
     }
     const exclusive = optedIn && token === rotationOwner && !existsSync(shared);
@@ -491,7 +491,7 @@ export function withShadowRoot(dir, action) {
       shadowUsage = null;
       // A transient verification failure must not strand a live owned lock.
       // Retry only with the original handle and the same verification checks.
-      if (guard.owned) { try { releaseRotationGuard(root, identity, guard); } catch {} }
+      if (guard.owned) { try { releaseRotationGuard(root, identity, guard); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) } }
       throw coordinationError(error);
     }
   }
@@ -682,7 +682,7 @@ export function appendDecision(dir, record = {}, { protectPaths = [] } = {}) {
       const cap = shadowMaxBytes();
       let knownUsage = decisionUsageBytes.get(rotationKey);
       let rootMtime = null;
-      try { rootMtime = statSync(rotationKey).mtimeMs; } catch {}
+      try { rootMtime = statSync(rotationKey).mtimeMs; } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       const knownMtime = decisionUsageMtime.get(rotationKey);
       const fastPath = rotationScope.exclusive && shadowUsage?.root === rotationKey &&
         shadowUsage?.identity === rotationScope.identity &&
@@ -700,7 +700,7 @@ export function appendDecision(dir, record = {}, { protectPaths = [] } = {}) {
         decisionRotationAt.set(rotationKey, now);
         knownUsage = rotation.used;
         decisionUsageBytes.set(rotationKey, knownUsage);
-        try { decisionUsageMtime.set(rotationKey, statSync(rotationKey).mtimeMs); } catch {}
+        try { decisionUsageMtime.set(rotationKey, statSync(rotationKey).mtimeMs); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       } else if (Number.isSafeInteger(knownUsage) && knownUsage + incomingBytes > cap) {
         return false;
       }
@@ -778,10 +778,10 @@ function acquireStatsLock(lock) {
       return fd;
     } catch (error) {
       if (fd !== undefined) {
-        try { closeSync(fd); } catch {}
+        try { closeSync(fd); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       }
       if (created) {
-        try { unlinkSync(lock); } catch {}
+        try { unlinkSync(lock); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       }
       if (error?.code !== "EEXIST") return null;
       let pid = null;
@@ -810,17 +810,17 @@ function acquireStatsLock(lock) {
           fsyncSync(recoveryFd);
         } catch (recoveryError) {
           if (recoveryFd !== undefined) {
-            try { closeSync(recoveryFd); } catch {}
-            try { unlinkSync(recovery); } catch {}
+            try { closeSync(recoveryFd); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
+            try { unlinkSync(recovery); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
           }
           if (recoveryError?.code === "EEXIST") {
             let recoveryPid = null;
             try {
               const text = readFileSync(recovery, "utf8").trim();
               recoveryPid = /^[1-9]\d*$/.test(text) ? Number(text) : null;
-            } catch {}
+            } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
             if (recoveryPid !== null && processAlive(recoveryPid) === false) {
-              try { unlinkSync(recovery); } catch {}
+              try { unlinkSync(recovery); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
               continue;
             }
           }
@@ -832,16 +832,16 @@ function acquireStatsLock(lock) {
           try {
             current = readFileSync(lock, "utf8").trim();
             currentStat = statSync(lock);
-          } catch {}
+          } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
           const unchanged = current === observedText && currentStat && observedStat &&
             currentStat.dev === observedStat.dev && currentStat.ino === observedStat.ino &&
             currentStat.size === observedStat.size && currentStat.mtimeMs === observedStat.mtimeMs;
           if (unchanged && (dead || legacyEmpty)) {
-            try { unlinkSync(lock); removed = true; } catch {}
+            try { unlinkSync(lock); removed = true; } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
           }
         } finally {
-          try { closeSync(recoveryFd); } catch {}
-          try { unlinkSync(recovery); } catch {}
+          try { closeSync(recoveryFd); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
+          try { unlinkSync(recovery); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
         }
         if (removed) continue;
       }
@@ -875,7 +875,7 @@ export function flushDrainStats(dir, notes, meta = {}) {
   if (!lines.length) return charged;
   try {
     appendFileSync(join(dir, CUTS_NAME), `${lines.join("\n")}\n`);
-  } catch {}
+  } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
   return charged;
 }
 
@@ -900,9 +900,9 @@ function recordDrainStats(dir, { cuts = 0, saved = 0, rewrite = 0 } = {}) {
       renameSync(tmp, file);
       return locked;
     } finally {
-      try { unlinkSync(tmp); } catch {}
+      try { unlinkSync(tmp); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       closeSync(fd);
-      try { unlinkSync(lock); } catch {}
+      try { unlinkSync(lock); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
     }
   } catch {
     return null;
@@ -929,9 +929,9 @@ export function recordCutStats(dir, { saved = 0, rewrite = 0 } = {}) {
       renameSync(tmp, file);
       return locked;
     } finally {
-      try { unlinkSync(tmp); } catch {}
+      try { unlinkSync(tmp); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       closeSync(fd);
-      try { unlinkSync(lock); } catch {}
+      try { unlinkSync(lock); } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
     }
   } catch {
     return null;
@@ -1318,13 +1318,13 @@ function writeShadowFileLocked(file, body, access, { exclusive, write, unlink, a
     if (fd !== null) {
       try {
         closeSync(fd);
-      } catch {}
+      } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
     }
 
     if (created) {
       // Do not unlink through a replacement directory after a failed write.
       let sameParent = false;
-      try { sameParent = !parentIdentity || directoryIdentity(dir) === parentIdentity; } catch {}
+      try { sameParent = !parentIdentity || directoryIdentity(dir) === parentIdentity; } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
       if (sameParent) discardShadowFiles([protectedPath], error, unlink);
       else shadowUsage = null;
     }
@@ -1599,7 +1599,7 @@ function rotateShadowLocked({
     if (file.name.startsWith("raw-")) {
       try {
         unlink(`${file.path}.meta.json`);
-      } catch {}
+      } catch (_err) { console.error('[live-compact:shadow]', _err?.message || _err) }
     }
   }
   const fits = used + incomingBytes <= cap;

@@ -121,7 +121,7 @@ async function enrichReplies(list) {
           qWho = qSelf ? '你自己' : String(qm.sender?.card || qm.sender?.nickname || qm.sender?.user_id || '').trim()
           qBody = textOf(Array.isArray(qm.message) ? qm.message : []).replace(/^\[回复[^\]]*\]\s*/, '').trim()
         }
-      } catch {}
+      } catch (_err) { console.error('[onebot:history]', _err?.message || _err) }
     }
     if (qBody !== '' || qWho !== '') {
       const snippet = (qBody || '[媒体消息]').slice(0, 80)

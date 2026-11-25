@@ -123,7 +123,7 @@ if (args.includes("--tick")) {
     }, { days: {} })
     for (const id of 完成) {
       const ev = id.includes("吃") ? "吃饭" : id.includes("散") ? "晒太阳" : id.includes("电影") ? "电影" : id.includes("游乐") ? "玩过山车" : "看书"
-      try { execFileSync(process.execPath, [path.join(TOOLS, "激素.mjs"), "--event", ev, "--id", 'plan:' + 今天 + ':' + id], { encoding: "utf8" }) } catch {}
+      try { execFileSync(process.execPath, [path.join(TOOLS, "激素.mjs"), "--event", ev, "--id", 'plan:' + 今天 + ':' + id], { encoding: "utf8" }) } catch (_err) { console.error('[计划]', _err?.message || _err) }
     }
     // 做成一件，情绪给一点点——不设「必须全做完」，完成一件就算赚到
     const m = st.mood || (st.mood = {})

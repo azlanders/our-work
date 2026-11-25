@@ -226,6 +226,6 @@ try {
   // 现在把非 ok 的项一起写进 log（ok 项太多不记），下次再出就能直接对上。
   const 明细 = 结果.filter((r) => r.级 !== "ok").map((r) => `  ${r.级 === "warn" ? "·" : "✗"} ${r.名}：${r.说明}`)
   fs.appendFileSync(LOG, `${bj().toISOString().slice(0, 16).replace("T", " ")} ${摘要}${明细.length ? "\n" + 明细.join("\n") : ""}\n`)
-} catch {}
+} catch (_err) { console.error('[生活体检]', _err?.message || _err) }
 process.exit(bad ? 1 : 0)
 }

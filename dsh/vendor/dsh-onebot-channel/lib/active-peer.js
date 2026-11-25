@@ -12,7 +12,7 @@ const now = () => Date.now();
 const textOf = s => String(s ?? '').trim();
 const brief = s => textOf(s).replace(/\s+/g, ' ').slice(0, 120);
 let db = { groups: {}, lastClosed: null };
-try { db = { ...db, ...JSON.parse(fs.readFileSync(FILE, 'utf8')) }; } catch {}
+try { db = { ...db, ...JSON.parse(fs.readFileSync(FILE, 'utf8')) }; } catch (_err) { console.error('[onebot:active-peer]', _err?.message || _err) }
 
 function save() {
   const tmp = `${FILE}.${process.pid}.tmp`;

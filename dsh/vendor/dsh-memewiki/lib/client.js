@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
       })
     }
     function apiGet(path) {
-      return fetch(API + path, { cache: 'no-store' }).then(readJson)
+      return fetch(API + path, { cache: 'no-store', signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined }).then(readJson)
     }
     function apiPost(path, body) {
       return fetch(API + path, {

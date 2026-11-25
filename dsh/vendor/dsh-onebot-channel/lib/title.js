@@ -87,14 +87,14 @@ export function readTitleFromLog(file) {
         try {
           const event = JSON.parse(line)
           if (event?.type === 'session/title' && typeof event.data?.title === 'string') title = event.data.title
-        } catch {}
+        } catch (_err) { console.error('[onebot:title]', _err?.message || _err) }
         continue
       }
       if (firstMessage === '' && line.includes('"user/message"')) {
         try {
           const event = JSON.parse(line)
           if (event?.type === 'user/message') firstMessage = firstTextOf(event)
-        } catch {}
+        } catch (_err) { console.error('[onebot:title]', _err?.message || _err) }
       }
     }
     if (title === '' && firstMessage !== '') {
@@ -133,7 +133,7 @@ export function scanSessionDirs(want) {
     let updatedAt = ''
     try {
       updatedAt = new Date(statSync(sessionDir).mtimeMs).toISOString()
-    } catch {}
+    } catch (_err) { console.error('[onebot:title]', _err?.message || _err) }
     out.push({
       id: entry.name,
       title: readTitleFromLog(join(sessionDir, 'session.v4.jsonl.zstd')),

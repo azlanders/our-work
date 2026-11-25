@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 // 抓消息文件.mjs —— 把群里某条消息带回来的视频/文件真弄到手（2026-11-06，主人要求）
 // 用法：node 抓消息文件.mjs <message_id> [输出目录]
 // 只下、不解、不发言；下到 {{BOT_ROOT}}/下载/<id>-<序号>.<后缀>
@@ -27,6 +28,6 @@ for (const s of 要下) {
   const 目标 = path.join(出目录, `${id}-${++n}${后缀}`)
   const res = await fetch(url)
   if (!res.ok) { console.log('下失败', res.status); continue }
-  fs.writeFileSync(目标, Buffer.from(await res.arrayBuffer()))
+  原子写(目标, Buffer.from(await res.arrayBuffer()))
   console.log('下好了 →', 目标, Math.round(fs.statSync(目标).size / 1024) + 'KB')
 }

@@ -85,17 +85,22 @@ with tempfile.TemporaryDirectory() as td:
     assert r_sync.returncode == 0, f"同步模板.sh --dry failed: {r_sync.stderr}"
     assert "would copy" in r_sync.stdout or "unchanged" in r_sync.stdout
 
-# Test 7: patches/dsh-rofm-compact-desc.py must abort cleanly if only 1 of 2 anchors exists
+# Test 7: patches/dsh-onebot-channel-quiet-hours.py aborts cleanly on missing anchor and honors --dry
 with tempfile.TemporaryDirectory() as td:
-    mt = Path(td) / "profiles/web/vendor/dsh-rofm/lib/memory-tool.js"
-    mt.parent.mkdir(parents=True)
-    mt.write_text("const OTHER = 1;\n      description: TOOL_DESCRIPTION,\n", encoding="utf-8")
-    r_rofm = subprocess.run(
-        [sys.executable, str(REPO / "patches/dsh-rofm-compact-desc.py"), "--dsh-root", td],
+    pro = Path(td) / "lib/proactive.js"
+    pro.parent.mkdir(parents=True)
+    pro.write_text("function dummy() {}\n", encoding="utf-8")
+    r_bad = subprocess.run(
+        [sys.executable, str(REPO / "patches/dsh-onebot-channel-quiet-hours.py"), td],
         capture_output=True, text=True,
     )
-    assert r_rofm.returncode == 1, f"Expected failure on missing def anchor, got {r_rofm.returncode}"
-    assert "TOOL_DESCRIPTION_SHORT" not in mt.read_text(encoding="utf-8"), "Partial replace corrupted file!"
+    assert r_bad.returncode == 1, f"Expected failure on missing anchor, got {r_bad.returncode}"
+    pro.write_text("    maintainProactiveReceipts(config, now)\n    let list = orderByStalest(candidates(config))\n", encoding="utf-8")
+    r_dry = subprocess.run(
+        [sys.executable, str(REPO / "patches/dsh-onebot-channel-quiet-hours.py"), td, "--dry"],
+        capture_output=True, text=True,
+    )
+    assert r_dry.returncode == 0 and "QUIET_HOURS" not in pro.read_text(encoding="utf-8")
 
 # Test 8: patches/patch_llm_retry.py --dry & apply idempotency
 with tempfile.TemporaryDirectory() as td:

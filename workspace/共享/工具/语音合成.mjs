@@ -1,3 +1,4 @@
+import { 原子写 } from './_底层.mjs'
 // 语音合成.mjs —— 文本转语音（本机 GPT-SoVITS v2ProPlus 真人少女声线首选 + 云端自动兜底）
 //
 // 配置放在 {{DSH_ROOT}}/fish-omni.json 的「说」段，**每次调用现读**，面板改完下一句即生效，无需重启。
@@ -206,8 +207,8 @@ function 记用量(o) {
       用时毫秒: Number(o.用时) || 0,
       结果: o.成功 ? 'ok' : String(o.原因 || '失败').slice(0, 60),
     }
-    writeFileSync(流水路径, JSON.stringify(行) + '\n', { flag: 'a' })
-  } catch {}
+    原子写(流水路径, JSON.stringify(行) + '\n', { flag: 'a' })
+  } catch (_err) { console.error('[语音合成]', _err?.message || _err) }
 }
 
 function 嗅扩展(buf) {
@@ -362,10 +363,10 @@ export function 封装Wav(pcmBuf, sampleRate = 24000) {
 }
 
 async function 存数组(出目录, buf, ms) {
-  try { mkdirSync(出目录, { recursive: true }) } catch {}
+  try { mkdirSync(出目录, { recursive: true }) } catch (_err) { console.error('[语音合成]', _err?.message || _err) }
   const 名 = 'tts-' + 时间戳(ms) + '.' + 嗅扩展(buf)
   const 路径 = join(出目录, 名)
-  writeFileSync(路径, buf)
+  原子写(路径, buf)
   return { 名, 路径, 字节: buf.length }
 }
 
@@ -469,7 +470,7 @@ async function 走Omni情感配音(话, c, fetchFn, 超时) {
       if (j.usage) usage = j.usage
       const aud = j?.choices?.[0]?.delta?.audio
       if (aud?.data) chunks.push(Buffer.from(aud.data, 'base64'))
-    } catch {}
+    } catch (_err) { console.error('[语音合成]', _err?.message || _err) }
   }
   if (!chunks.length) return { ok: false, model: c.模型, reason: apiErr || '模型未返回音频流' }
   return { ok: true, buf: 封装Wav(Buffer.concat(chunks), 24000), model: c.模型, usage }

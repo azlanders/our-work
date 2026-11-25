@@ -16,7 +16,7 @@
 //   · 上下文会压缩、会话会关，但链在硬盘上，谁也压不掉。
 //   · 断链不疼——断了你自己不知道。所以要能查账（最后写入时间、总行数）。
 import { readFileSync, appendFileSync, existsSync, writeFileSync } from 'node:fs'
-import { 写档 } from './_底层.mjs'
+import { 写档 , 原子写 } from './_底层.mjs'
 
 // QQ_CHAIN_MEM 2026-11-07（批次191）：测试指沙盒用，真实路径不变。
 const MEM = process.env.QQ_CHAIN_MEM || '{{BOT_ROOT}}/记忆'
@@ -41,7 +41,7 @@ const now = () => {
 }
 
 if (!existsSync(FILE)) {
-  writeFileSync(FILE, '# 链\n\n只追加，永不修改。断了不疼，所以要查账。\n\n', 'utf8')
+  原子写(FILE, '# 链\n\n只追加，永不修改。断了不疼，所以要查账。\n\n', 'utf8')
 }
 
 if (args.includes('--尾')) {

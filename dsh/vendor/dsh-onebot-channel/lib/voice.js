@@ -171,7 +171,7 @@ export async function sendVoice(args, options = {}) {
       try {
         const 记 = options.note ?? note
         记('tool', `语音临时目录清理失败：${error instanceof Error ? error.message : error}`)
-      } catch {}
+      } catch (_err) { console.error('[onebot:voice]', _err?.message || _err) }
     }
   }
 }

@@ -173,7 +173,7 @@ function 当前文案() {
     if (歌 && 歌.ok && 歌.name && 歌.playTime && (Date.now() - Number(歌.playTime)) <= Math.max(180e3, ((Number(歌.durationSec) || 240) * 1000) + 60e3) && (st === '待命' || 是歇着(st))) {
       return '一起听《' + String(歌.name).slice(0, 12) + '》'
     }
-  } catch {}
+  } catch (_err) { console.error('[同步QQ状态]', _err?.message || _err) }
   if (st === '待命') return '在' + 位
   // WORK_WORD 2026-11-06（批次146）：上班不写「打工」—— 那像系统标签，不像她的状态。
   // 实测同步出来是「在便利店，打工」。改成「在便利店上夜班」，带着是哪份活。
