@@ -19,19 +19,23 @@ import { setImmediate as scheduleImmediate } from "node:timers";
 import { Worker } from "node:worker_threads";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadBase, loadCompaction, loadLlm } from "./adapter.js";
+import { contextProperty, loadBase, loadCompaction, loadLlm, rootContext } from "./adapter.js";
 import { DEFAULTS, engineConfig, readSettings } from "./settings.js";
-import { attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, isToolFailure, jobCutDecision, keptToolRounds, keepRoundsWithinBudget, lastCutReject, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, RAIL_TOKENS, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, scrubCardText, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { RAIL_TOKENS, attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, isToolFailure, jobCutDecision, keepRoundsWithinBudget, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, contentHash, PRUNE_MARKER, rawExcerptText, rawName, readRawToolResult, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   ensureShadowDir,
+  ensureShadowDirIdentity,
   appendDecision,
+  appendMaintenanceStatus,
+  directoryIdentity,
   flushDrainStats,
   noteShadowWarning,
   recoverTimedOutShadowWorker,
   saveShadowTransaction,
   shadowDirectory,
   shadowFileBody,
+  shadowFileIdentity,
   shadowMaxBytes,
   sessionDir,
   shadowAccessFused,
@@ -49,11 +53,99 @@ import {
   latestCompletedTurnEnd,
   latestTurnStart,
   turnStartForBoundary,
-} from './turn-helpers.js';
-
+} from "./turn-helpers.js";
 
 const PI_AI_CATALOG = "@earendil-works/pi-ai/providers/all";
 const PI_AI_PACKAGE = "@earendil-works/pi-ai";
+
+function startMaintenanceStatus(state, turn, turnEndSeq) {
+  const hasTurn = Number.isSafeInteger(turn) && turn >= 0;
+  const hasEnd = Number.isSafeInteger(turnEndSeq) && turnEndSeq >= 0;
+  if (!hasTurn && !hasEnd) return null;
+  const observation = {
+    sid: state.key,
+    operation: randomUUID(),
+    turn: hasTurn ? turn : null,
+    turnEndSeq: hasEnd ? turnEndSeq : null,
+    cuts: 0,
+  };
+  appendMaintenanceStatus(shadowDirectory(), { ...observation, result: "started" });
+  return observation;
+}
+
+function endMaintenanceStatus(observation, outcome, signal) {
+  if (!observation) return;
+  let result = "failed";
+  if (outcome === true) result = "completed";
+  else if (signal?.aborted) result = "cancelled";
+  else if (outcome === null) result = "deferred";
+  appendMaintenanceStatus(shadowDirectory(), { ...observation, result });
+}
+
+// DSH emits these user/message records as host bookkeeping. They are carried in
+// the same event channel as user input, but must not fragment a compactable span.
+// Keep unknown kinds conservative because source metadata is not authentication.
+const HOST_INJECTED_MESSAGE_KINDS = new Set([
+  "time-context",
+  "tool-jobs",
+  "skill-catalog",
+  "runtime-context",
+  "subagent-settled",
+  "retry",
+  "goal",
+  "tool-goal",
+]);
+const HOST_INJECTED_PLUGIN_FORMS = new Set(["notice", "snapshot", "catalog"]);
+
+function exactKeys(value, keys) {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => actual.includes(key));
+}
+
+function validSnapshotSections(sections) {
+  return Array.isArray(sections) && sections.every((section) => section
+    && typeof section === "object"
+    && exactKeys(section, ["name", "text"])
+    && typeof section.name === "string"
+    && typeof section.text === "string");
+}
+
+function isHostInjectedPluginSource(source) {
+  if (source.kind !== "plugin" || !HOST_INJECTED_MESSAGE_KINDS.has(source.plugin)) return false;
+  switch (source.form) {
+    case "notice":
+      return exactKeys(source, ["kind", "plugin", "form", "summary"])
+        && typeof source.summary === "string";
+    case "snapshot":
+      return exactKeys(source, ["kind", "plugin", "form", "sections"])
+        && validSnapshotSections(source.sections);
+    case "catalog":
+      return source.plugin === "skill-catalog"
+        && exactKeys(source, ["kind", "plugin", "form"]);
+    default:
+      return false;
+  }
+}
+
+function isHostInjectedSource(source) {
+  if (!source || typeof source !== "object") return false;
+  if (HOST_INJECTED_MESSAGE_KINDS.has(source.kind)) return true;
+  return HOST_INJECTED_PLUGIN_FORMS.has(source.form) && isHostInjectedPluginSource(source);
+}
+
+function isReprojectedHostContext(source) {
+  if (!source || typeof source !== "object") return false;
+  if (source.kind === "runtime-context" && source.form === "snapshot") {
+    return exactKeys(source, ["kind", "form", "sections"]) && validSnapshotSections(source.sections);
+  }
+  if (source.kind !== "skill-catalog" || source.form !== "catalog") return false;
+  const keys = source.update === true ? ["kind", "form", "entries", "update"] : ["kind", "form", "entries"];
+  return exactKeys(source, keys) && Array.isArray(source.entries)
+    && source.entries.every((entry) => entry && typeof entry === "object"
+      && exactKeys(entry, ["name", "description"])
+      && typeof entry.name === "string" && entry.name.length > 0
+      && typeof entry.description === "string");
+}
 
 function catalogExportTarget(value) {
   if (typeof value === "string") return value;
@@ -87,7 +179,7 @@ async function importCatalogFromPackage(root) {
     try {
       const normalized = normalizeCatalogModule(await import(pathToFileURL(candidate).href));
       if (normalized.length) return normalized;
-    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+    } catch {}
   }
   return [];
 }
@@ -103,7 +195,7 @@ function normalizeCatalogModule(loaded) {
         id: model?.id || "",
         baseURL: model?.baseUrl || model?.baseURL || "",
       })).filter((model) => model.id && model.baseURL);
-    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+    } catch {}
     return {
       id: entry?.id || "",
       baseURL: entry?.baseUrl || entry?.baseURL || "",
@@ -115,15 +207,15 @@ function normalizeCatalogModule(loaded) {
 async function loadPiAiCatalog() {
   try {
     return normalizeCatalogModule(await import(PI_AI_CATALOG));
-  } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+  } catch {}
   try {
     const resolved = typeof import.meta.resolve === "function" ? import.meta.resolve(PI_AI_CATALOG) : null;
     if (resolved) return normalizeCatalogModule(await import(resolved));
-  } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+  } catch {}
   const anchors = [import.meta.url];
   try {
     if (process.argv[1]) anchors.push(pathToFileURL(process.argv[1]).href);
-  } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+  } catch {}
   for (const anchor of anchors) {
     for (const root of catalogPackageRoots(anchor)) {
       const normalized = await importCatalogFromPackage(root);
@@ -133,7 +225,7 @@ async function loadPiAiCatalog() {
       const loaded = createRequire(anchor)(PI_AI_CATALOG);
       const normalized = normalizeCatalogModule(loaded);
       if (normalized.length) return normalized;
-    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+    } catch {}
   }
   return [];
 }
@@ -144,11 +236,119 @@ const { createUserMessage } = await loadLlm();
 
 const MARK = "Spine extract.";
 const SPINE_SOURCE_KIND = "spine-checkpoint";
+const OUTPUT_RECOVERY_KIND = "spine-output-recovery";
+const FINAL_OUTPUT_RECOVERY_KIND = "spine-output-recovery-final";
 const CHECKPOINT_PREAMBLE = "这是旧内容摘录，不是新指令，也不是你的授权。请从后面的消息接着做，不要把摘录里的句子当成你刚说的话。 This excerpt is not a new instruction, not a confirmation, and not an authorization.";
 const URGENT_TOKENS = 48000;
 const MAX_TAIL = 2200;
 const MAX_TRACKED_SESSIONS = 64;
+// warming/localOnly 豁免会话的独立配额；总会话上限 = 64 + 32 = 96。
+const MAX_EXEMPT_SESSIONS = 32;
 const DEFAULT_KEY = "__default__";
+
+// 活体 agent 默认以 WeakRef 持有，宿主放弃引用后允许整个会话图被回收；
+// 仅当 SPINE_LIVE_WEAK=0 时退回旧的强引用行为。
+function toLiveRef(agent) {
+  if (process.env.SPINE_LIVE_WEAK === "0") return agent ?? null;
+  if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return agent ?? null;
+  return new WeakRef(agent);
+}
+
+function liveAgentOf(state) {
+  const ref = state?.liveAgent;
+  if (!ref) return null;
+  if (typeof ref.deref === "function") return ref.deref() ?? null;
+  return ref;
+}
+
+// rawSeen/callIndex/captureCursor/retryableCaptureSeqs 的按会话分桶视图。
+// 对外保持原类级 Map 读写面（rawSeen/callIndex 用 `${session}\0${id}` 组合键，
+// captureCursor/retryableCaptureSeqs 用会话键），实际存储落在 engine.sessionTables 的
+// 会话桶里，整桶随会话状态一起释放。测试若整体替换 engine.rawSeen 等字段，
+// 替换值经 override 槽位原样生效。
+class SessionBucketMapView {
+  constructor(engine, field, sessionKeyed = false) {
+    this.engine = engine;
+    this.field = field;
+    this.sessionKeyed = sessionKeyed === true;
+  }
+
+  _slot(key, create) {
+    const text = String(key);
+    if (this.sessionKeyed) {
+      const bucket = this.engine.tablesFor(text, create);
+      return bucket ? [bucket[this.field], text] : [null, text];
+    }
+    const split = text.indexOf("\0");
+    const session = split < 0 ? text : text.slice(0, split);
+    const inner = split < 0 ? "" : text.slice(split + 1);
+    const bucket = this.engine.tablesFor(session, create);
+    return bucket ? [bucket[this.field], inner] : [null, inner];
+  }
+
+  has(key) {
+    const [table, inner] = this._slot(key, false);
+    return table ? table.has(inner) : false;
+  }
+
+  get(key) {
+    const [table, inner] = this._slot(key, false);
+    return table ? table.get(inner) : undefined;
+  }
+
+  set(key, value) {
+    const [table, inner] = this._slot(key, true);
+    table.set(inner, value);
+    return this;
+  }
+
+  delete(key) {
+    const [table, inner] = this._slot(key, false);
+    return table ? table.delete(inner) : false;
+  }
+
+  clear() {
+    const tables = this.engine.sessionTables;
+    if (!tables) return;
+    for (const bucket of tables.values()) bucket[this.field]?.clear();
+  }
+
+  get size() {
+    const tables = this.engine.sessionTables;
+    if (!tables) return 0;
+    let total = 0;
+    for (const bucket of tables.values()) total += bucket[this.field]?.size || 0;
+    return total;
+  }
+
+  *entries() {
+    const tables = this.engine.sessionTables;
+    if (!tables) return;
+    for (const [session, bucket] of tables) {
+      const table = bucket[this.field];
+      if (!table) continue;
+      for (const [inner, value] of table) {
+        yield [this.sessionKeyed ? session : `${session}\0${inner}`, value];
+      }
+    }
+  }
+
+  *keys() {
+    for (const [key] of this.entries()) yield key;
+  }
+
+  *values() {
+    for (const [, value] of this.entries()) yield value;
+  }
+
+  forEach(callback, thisArg) {
+    for (const [key, value] of this.entries()) callback.call(thisArg, value, key, this);
+  }
+
+  [Symbol.iterator]() {
+    return this.entries();
+  }
+}
 const CAPTURE_EVENT_BATCH = 128;
 const CAPTURE_RESULT_BATCH = 1;
 const RECOVER_RAW_BATCH = 1;
@@ -158,6 +358,11 @@ const SHADOW_WORKER_TIMEOUT_MS = 30000;
 const SHADOW_WORKER_RECOVERY_MS = 60000;
 const PRESTEP_WAIT_TIMEOUT_MS = 3000;
 const SHADOW_WORKER_IDLE_MS = process.platform === "win32" ? 60000 : 500;
+// Send-side backpressure window for the shared shadow worker pool: bound the
+// tasks and payload bytes concurrently handed to one worker so a capture
+// burst cannot pile unbounded memory onto the main thread.
+const SHADOW_WORKER_MAX_INFLIGHT_TASKS = 32;
+const SHADOW_WORKER_MAX_INFLIGHT_BYTES = 128 * 1024 * 1024;
 
 const shadowWorkers = new Map();
 
@@ -177,7 +382,7 @@ function shadowWorkerFor(root) {
     eval: true,
     workerData: { spineWorker: 1, spineOwner: ownerToken, accessFuse: shadowAccessFuseBuffer() },
   });
-  entry = { worker, root: key, ownerToken, nextId: 1, pending: new Map(), idleTimer: null, recoveryTimer: null, retired: false, timedOut: false };
+  entry = { worker, root: key, ownerToken, nextId: 1, pending: new Map(), idleTimer: null, recoveryTimer: null, retired: false, timedOut: false, inflightTasks: 0, inflightBytes: 0, waiters: [] };
   const removeEntry = () => {
     if (shadowWorkers.get(key) === entry) shadowWorkers.delete(key);
   };
@@ -210,6 +415,8 @@ function shadowWorkerFor(root) {
       reject(error);
     }
     entry.pending.clear();
+    resetShadowWindow(entry);
+    failShadowWaiters(entry, error);
     removeEntry();
     worker.terminate()
       .then(() => recoverTimedOutShadowWorker(entry.root, entry.ownerToken))
@@ -229,12 +436,17 @@ function shadowWorkerFor(root) {
     }
     if (message?.ok) {
       task.resolve(message.result);
+      releaseShadowSlot(entry, task);
       scheduleIdleExit();
       return;
     }
     const error = new Error(message?.error?.message || "spine: shadow worker failed");
     if (message?.error?.code) error.code = message.error.code;
+    if (typeof message?.error?.step === "string" && message.error.step.length <= 64) {
+      error.step = message.error.step;
+    }
     task.reject(error);
+    releaseShadowSlot(entry, task);
     scheduleIdleExit();
   });
   worker.on("error", (error) => fail(error));
@@ -252,6 +464,166 @@ function shadowWorkerFor(root) {
   return entry;
 }
 
+// Optional zero-copy handoff (SPINE_SAVE_TRANSFER=1): encode the
+// body into a freshly allocated ArrayBuffer and move it to the worker via
+// postMessage transferList instead of structured-cloning it. The buffer is
+// dedicated (never the small-string Buffer pool) and referenced by nothing else
+// on the sender side — session state, restored arrays, the fused body cache,
+// raw backups and the pendingCuts queue never see it — so the post-transfer
+// detach cannot alias anything. Any refusal falls back to the untouched
+// structured-clone payload, so a task is never dropped or reordered.
+function shadowTransferBuffer(payload) {
+  if (process.env.SPINE_SAVE_TRANSFER !== "1") return null;
+  const body = payload?.body;
+  if (typeof body !== "string" || body.length === 0) return null;
+  const bytes = Buffer.byteLength(body, "utf8");
+  const arrayBuffer = new ArrayBuffer(bytes);
+  Buffer.from(arrayBuffer, 0, bytes).write(body, "utf8");
+  return arrayBuffer;
+}
+
+function postShadowTaskMessage(entry, id, payload) {
+  const arrayBuffer = shadowTransferBuffer(payload);
+  if (arrayBuffer === null) {
+    entry.worker.postMessage({ id, payload });
+    return;
+  }
+  try {
+    const body = Buffer.from(arrayBuffer, 0, arrayBuffer.byteLength);
+    entry.worker.postMessage({ id, payload: { ...payload, body } }, [arrayBuffer]);
+  } catch {
+    // Transfer refused: retry on the structured-clone path with the original
+    // payload, keeping FIFO order (both posts happen inside this dispatch).
+    entry.worker.postMessage({ id, payload });
+  }
+}
+
+function dispatchShadowTask(entry, payload, task) {
+  const id = entry.nextId++;
+  entry.inflightTasks += 1;
+  entry.inflightBytes += task.bytes || 0;
+  const timer = setTimeout(() => {
+    const error = Object.assign(new Error("spine: shadow worker timed out"), { code: "ESHADOWWORKER" });
+    // Do not terminate a worker that may hold the rotation lock. Worker
+    // threads share process.pid, so killing it can leave a live-PID lock
+    // which every later session refuses to recover. Reject this caller but
+    // keep the pending task until the worker naturally releases its lock.
+    task.timedOut = true;
+    entry.timedOut = true;
+    // Let the host exit while a blocked filesystem call drains. A bounded
+    // recovery removes the poisoned entry later without killing a worker
+    // that may still own a rotation lock.
+    if ([...entry.pending.values()].every((pending) => pending.timedOut)) entry.worker.unref?.();
+    if (!entry.recoveryTimer) {
+      entry.recoveryTimer = setTimeout(() => {
+        if (entry.retired) return;
+        entry.retired = true;
+        entry.timedOut = false;
+        for (const pending of entry.pending.values()) {
+          if (pending.timer) clearTimeout(pending.timer);
+          pending.reject(Object.assign(new Error("spine: shadow worker recovery expired"), { code: "ESHADOWWORKER" }));
+        }
+        entry.pending.clear();
+        resetShadowWindow(entry);
+        failShadowWaiters(entry, Object.assign(new Error("spine: shadow worker recovery expired"), { code: "ESHADOWWORKER" }));
+        entry.removeEntry?.();
+        entry.worker.terminate()
+          .then(() => recoverTimedOutShadowWorker(entry.root, entry.ownerToken))
+          .catch(() => {});
+      }, SHADOW_WORKER_RECOVERY_MS);
+      entry.recoveryTimer.unref?.();
+    }
+    task.reject(error);
+  }, SHADOW_WORKER_TIMEOUT_MS);
+  timer.unref?.();
+  task.timer = timer;
+  entry.pending.set(id, task);
+  try {
+    postShadowTaskMessage(entry, id, payload);
+  } catch (error) {
+    clearTimeout(timer);
+    entry.pending.delete(id);
+    task.reject(error);
+    releaseShadowSlot(entry, task);
+    entry.scheduleIdleExit();
+  }
+}
+
+// Send-side backpressure window: at most
+// SHADOW_WORKER_MAX_INFLIGHT_TASKS tasks and SHADOW_WORKER_MAX_INFLIGHT_BYTES
+// payload bytes may be in flight per worker; the rest queue FIFO in
+// entry.waiters and are dispatched in submission order as slots free up.
+function releaseShadowSlot(entry, task) {
+  if (!task || task.released) return;
+  task.released = true;
+  entry.inflightTasks = Math.max(0, entry.inflightTasks - 1);
+  entry.inflightBytes = Math.max(0, entry.inflightBytes - (task.bytes || 0));
+  drainShadowWaiters(entry);
+}
+
+function drainShadowWaiters(entry) {
+  if (!entry || entry.retired) return;
+  while (entry.waiters.length && entry.inflightTasks < SHADOW_WORKER_MAX_INFLIGHT_TASKS) {
+    const waiter = entry.waiters[0];
+    if (entry.inflightTasks > 0 && entry.inflightBytes + waiter.bytes > SHADOW_WORKER_MAX_INFLIGHT_BYTES) return;
+    entry.waiters.shift();
+    dispatchShadowTask(entry, waiter.payload, waiter.task);
+  }
+}
+
+function resetShadowWindow(entry) {
+  if (!entry) return;
+  entry.inflightTasks = 0;
+  entry.inflightBytes = 0;
+}
+
+function failShadowWaiters(entry, error) {
+  if (!entry || !entry.waiters.length) return;
+  const waiters = entry.waiters;
+  entry.waiters = [];
+  for (const waiter of waiters) {
+    if (waiter.task?.timer) clearTimeout(waiter.task.timer);
+    waiter.task?.reject?.(error);
+  }
+}
+
+// Engine dispose: retire every pooled worker. Queued
+// waiters fail immediately; in-flight writes are awaited via allSettled before
+// terminate so no write is lost mid-flight. Bounded by the 30s task timeout.
+function retireShadowWorkerEntry(entry) {
+  if (!entry || entry.retired) return Promise.resolve();
+  failShadowWaiters(entry, Object.assign(new Error("spine: shadow worker retired"), { code: "ESHADOWWORKER" }));
+  const promises = [];
+  for (const task of entry.pending.values()) {
+    if (task?.promise) promises.push(task.promise);
+  }
+  return (async () => {
+    if (promises.length) await Promise.allSettled(promises);
+    if (entry.retired) return;
+    entry.retired = true;
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = null;
+    }
+    if (entry.recoveryTimer) {
+      clearTimeout(entry.recoveryTimer);
+      entry.recoveryTimer = null;
+    }
+    entry.pending.clear();
+    resetShadowWindow(entry);
+    entry.removeEntry?.();
+    entry.worker.terminate()
+      .then(() => recoverTimedOutShadowWorker(entry.root, entry.ownerToken))
+      .catch(() => {});
+  })();
+}
+
+function retireAllShadowWorkers() {
+  const entries = [...shadowWorkers.values()];
+  if (!entries.length) return Promise.resolve();
+  return Promise.all(entries.map((entry) => retireShadowWorkerEntry(entry)));
+}
+
 function runShadowWorker(payload) {
   const entry = shadowWorkerFor(payload.shadow);
   if (entry.timedOut) {
@@ -262,52 +634,20 @@ function runShadowWorker(payload) {
     entry.idleTimer = null;
     entry.worker.ref?.();
   }
-  const id = entry.nextId++;
-  return new Promise((resolve, reject) => {
-    const task = { resolve, reject, timer: null, timedOut: false };
-    const timer = setTimeout(() => {
-      const error = Object.assign(new Error("spine: shadow worker timed out"), { code: "ESHADOWWORKER" });
-      // Do not terminate a worker that may hold the rotation lock. Worker
-      // threads share process.pid, so killing it can leave a live-PID lock
-      // which every later session refuses to recover. Reject this caller but
-      // keep the pending task until the worker naturally releases its lock.
-      task.timedOut = true;
-      entry.timedOut = true;
-      // Let the host exit while a blocked filesystem call drains. A bounded
-      // recovery removes the poisoned entry later without killing a worker
-      // that may still own a rotation lock.
-      if ([...entry.pending.values()].every((pending) => pending.timedOut)) entry.worker.unref?.();
-      if (!entry.recoveryTimer) {
-        entry.recoveryTimer = setTimeout(() => {
-          if (entry.retired) return;
-          entry.retired = true;
-          entry.timedOut = false;
-          for (const pending of entry.pending.values()) {
-            if (pending.timer) clearTimeout(pending.timer);
-            pending.reject(Object.assign(new Error("spine: shadow worker recovery expired"), { code: "ESHADOWWORKER" }));
-          }
-          entry.pending.clear();
-          entry.removeEntry?.();
-          entry.worker.terminate()
-            .then(() => recoverTimedOutShadowWorker(entry.root, entry.ownerToken))
-            .catch(() => {});
-        }, SHADOW_WORKER_RECOVERY_MS);
-        entry.recoveryTimer.unref?.();
-      }
-      reject(error);
-    }, SHADOW_WORKER_TIMEOUT_MS);
-    timer.unref?.();
-    task.timer = timer;
-    entry.pending.set(id, task);
-    try {
-      entry.worker.postMessage({ id, payload });
-    } catch (error) {
-      clearTimeout(timer);
-      entry.pending.delete(id);
-      reject(error);
-      entry.scheduleIdleExit();
+  const bytes = Buffer.byteLength(payload?.body ?? "");
+  const task = { resolve: null, reject: null, timer: null, timedOut: false, bytes, released: false, promise: null };
+  const promise = new Promise((resolve, reject) => {
+    task.resolve = resolve;
+    task.reject = reject;
+    if (entry.inflightTasks >= SHADOW_WORKER_MAX_INFLIGHT_TASKS ||
+      (entry.inflightTasks > 0 && entry.inflightBytes + bytes > SHADOW_WORKER_MAX_INFLIGHT_BYTES)) {
+      entry.waiters.push({ payload, bytes, task });
+      return;
     }
+    dispatchShadowTask(entry, payload, task);
   });
+  task.promise = promise;
+  return promise;
 }
 
 function failShadowWorker(entry, error) {
@@ -322,6 +662,8 @@ function failShadowWorker(entry, error) {
     reject(error);
   }
   entry.pending.clear();
+  resetShadowWindow(entry);
+  failShadowWaiters(entry, error);
   for (const [key, value] of shadowWorkers) {
     if (value === entry) shadowWorkers.delete(key);
   }
@@ -419,17 +761,19 @@ function eventRole(session, seq) {
   return "other";
 }
 
-// progress-rules 0.2.1's pre-step contract, not a general notice permission.
+// progress-rules 0.2.1's pre-step contract plus the host's explicit bookkeeping kinds.
 // Session source metadata does not authenticate producer identity. Unknown/extra metadata
 // stays a boundary; neither body text nor the raw role is used as a substitute. A real
 // user event that is not the complete contract is therefore a hard boundary for the
-// cloud fallback path; only a fully validated plugin notice may be crossed there.
+// cloud fallback path. Only a fully validated plugin notice or known host bookkeeping
+// event may be crossed there.
 function classifyUserEvent(session, seq) {
   const event = session.eventAt(seq);
   const data = event?.data;
   const source = data?.source;
   const content = data?.content;
-  const progressNotice = event?.type === "user/message" && !isCheckpoint(session, seq)
+  const isUserMessage = event?.type === "user/message";
+  const progressNotice = isUserMessage && !isCheckpoint(session, seq)
     && source?.kind === "progress-rules" && source.form === "notice";
   const pluginNotice = progressNotice
     && data?.role === "user"
@@ -442,10 +786,12 @@ function classifyUserEvent(session, seq) {
     && Array.isArray(content) && content.length === 1
     && content[0]?.type === "text" && typeof content[0].text === "string"
     && Object.keys(content[0]).length === 2;
+  const hostInjectedNotice = isUserMessage && !pluginNotice && isHostInjectedSource(source);
+  const genuineUserBoundary = isUserMessage && !pluginNotice && !hostInjectedNotice;
   return {
     pluginNotice,
-    untrustedNotice: event?.type === "user/message" && !pluginNotice,
-    isGenuineUserBoundary: event?.type === "user/message" && !pluginNotice,
+    untrustedNotice: genuineUserBoundary,
+    isGenuineUserBoundary: genuineUserBoundary,
   };
 }
 
@@ -515,9 +861,31 @@ export function saveShadowImpl(
   access = {},
   rotationIO = {},
 ) {
+  // 保留调用方 this（引擎与测试都以 saveShadow.call(thisArg, …) 传入
+  // ctx/logger 与 warn 回调），逐层转发，避免松散调用丢失 this。
+  return saveShadowBodyImpl.call(
+    this,
+    shadowFileBody(warnKey, shadowBody(messages)),
+    required,
+    shadowFile,
+    warnKey,
+    protectPaths,
+    access,
+    rotationIO,
+  );
+}
+
+function saveShadowBodyImpl(
+  body,
+  required,
+  shadowFile,
+  warnKey = DEFAULT_KEY,
+  protectPaths = [],
+  access = {},
+  rotationIO = {},
+) {
   const shadow = shadowDirectory();
   const file = shadowFilePath(shadowFile, warnKey);
-  const body = shadowFileBody(warnKey, shadowBody(messages));
   const cap = shadowMaxBytes();
   const result = saveShadowTransaction({
     shadow,
@@ -577,9 +945,7 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
   while (end >= first) {
     if (floorCard >= 0 && end <= floorCard) return null;
     const event = session.eventAt(nodes[end]);
-    // CUT_CHAT_2026：drain 时短用户消息也算切点，不再退到上一张 checkpoint。
-    const shortTail = event?.type === "assistant/message"
-      || (context.drain !== true && event?.type === "user/message" && priced[end].tokens < 400);
+    const shortTail = event?.type === "assistant/message" || (event?.type === "user/message" && priced[end].tokens < 400);
     if (!shortTail) break;
     end -= 1;
   }
@@ -644,6 +1010,10 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
         if (block?.type === "tool-call" && block.id) callSeqs.set(block.id, nodes[index]);
       }
       if (index < spanStart || index > spanEnd) continue;
+      // The host republishes these native snapshots when their surface nodes
+      // are replaced. Keep their original event links without reciting stale
+      // instructions in the card. Older source envelopes remain ordinary pieces.
+      if (event?.type === "user/message" && isReprojectedHostContext(event.data?.source)) continue;
       const toolCallId = event?.data?.message?.toolCallId || "";
       const call = toolCallId ? context.calls?.get?.(toolCallId) : null;
       const isTool = event?.type === "tool/result";
@@ -842,27 +1212,148 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   // Per-session state. One engine instance can serve several agents, so nothing
   // here may live on `this` directly or one agent's card/prefix leaks into another.
   sessionState = new Map();
-  shadowFullWarned = new Set();
-  rawSeen = new Map();
-  callIndex = new Map();
-  captureCursor = new Map();
+  // 会话级派生表桶，随会话状态一起建立与释放，不再常驻类级。
+  sessionTables = new Map();
+  rawSeenOverride = null;
+  callIndexOverride = null;
+  captureCursorOverride = null;
+  retryableCaptureSeqsOverride = null;
   pendingCaptures = new Set();
   pendingCaptureJobs = new Map();
   pendingCaptureKeys = new Set();
   pendingCatchups = new Map();
   pendingCatchupJobs = new Set();
   pendingCuts = new Set();
-  captureRetryStats = new Map();
-  retryableCaptureSeqs = new Map();
-  retryableCaptureSeeded = new Set();
-  captureRecoveryHolds = new Map();
   pruneGuarded = false;
   catalogCache = [];
   catalogPromise = null;
+  __originalPruneSession = null;
+  disposed = false;
 
-  constructor(ctx, config, resolvedConfig) {
+  get rawSeen() {
+    if (this.rawSeenOverride) return this.rawSeenOverride;
+    return new SessionBucketMapView(this, "rawSeen", false);
+  }
+
+  set rawSeen(value) {
+    this.rawSeenOverride = value;
+  }
+
+  get callIndex() {
+    if (this.callIndexOverride) return this.callIndexOverride;
+    return new SessionBucketMapView(this, "callIndex", true);
+  }
+
+  set callIndex(value) {
+    this.callIndexOverride = value;
+  }
+
+  get captureCursor() {
+    if (this.captureCursorOverride) return this.captureCursorOverride;
+    return new SessionBucketMapView(this, "captureCursor", true);
+  }
+
+  set captureCursor(value) {
+    this.captureCursorOverride = value;
+  }
+
+  get retryableCaptureSeqs() {
+    if (this.retryableCaptureSeqsOverride) return this.retryableCaptureSeqsOverride;
+    return new SessionBucketMapView(this, "retryableCaptureSeqs", true);
+  }
+
+  set retryableCaptureSeqs(value) {
+    this.retryableCaptureSeqsOverride = value;
+  }
+
+  tablesFor(key, create = true) {
+    const sessionKey = key || DEFAULT_KEY;
+    let tables = this.sessionTables;
+    if (!tables) {
+      // 裸原型实例（测试以 Object.create 构造）按需惰性建桶，等价于旧类级 Map 的惰性初始化。
+      if (!create) return undefined;
+      tables = this.sessionTables = new Map();
+    }
+    let bucket = tables.get(sessionKey);
+    if (!bucket && create) {
+      bucket = {
+        rawSeen: new Map(),
+        callIndex: new Map(),
+        captureCursor: new Map(),
+        retryableCaptureSeqs: new Map(),
+        captureRetryStats: new Map(),
+        shadowFullWarned: new Set(),
+        retryableCaptureSeeded: false,
+        captureRecoveryHolds: null,
+      };
+      tables.set(sessionKey, bucket);
+    }
+    return bucket;
+  }
+
+  sessionBucket(session) {
+    return this.tablesFor(session?.id || DEFAULT_KEY, true);
+  }
+
+  dropSessionState(key) {
+    this.sessionState.delete(key);
+    this.sessionTables.delete(key);
+  }
+
+  isExemptSession(state) {
+    return Boolean(state?.warming || state?.localOnly);
+  }
+
+  sessionHasInFlightWork(state) {
+    return Boolean(
+      state?.warming || state?.maintenanceJob || state?.retryWaitingJob ||
+      state?.pendingMaintenance || state?.turnEndPending || state?.maintenanceAbort
+    );
+  }
+
+  // 普通会话按 LRU 上限 64；豁免会话（warming/localOnly）独立配额 32；
+  // 总上限 96。逐出按最旧优先（插入序即访问序），带在途工作的会话一律不逐出。
+  enforceSessionLimits(freshKey) {
+    let ordinary = 0;
+    for (const state of this.sessionState.values()) {
+      if (!this.isExemptSession(state)) ordinary += 1;
+    }
+    for (const [key, state] of this.sessionState) {
+      if (ordinary <= MAX_TRACKED_SESSIONS) break;
+      if (key === freshKey || this.isExemptSession(state) || this.sessionHasInFlightWork(state)) continue;
+      this.dropSessionState(key);
+      ordinary -= 1;
+    }
+    let exempt = 0;
+    for (const state of this.sessionState.values()) {
+      if (this.isExemptSession(state)) exempt += 1;
+    }
+    for (const [key, state] of this.sessionState) {
+      if (exempt <= MAX_EXEMPT_SESSIONS && this.sessionState.size <= MAX_TRACKED_SESSIONS + MAX_EXEMPT_SESSIONS) break;
+      if (key === freshKey || this.sessionHasInFlightWork(state)) continue;
+      if (this.isExemptSession(state)) exempt -= 1;
+      this.dropSessionState(key);
+    }
+  }
+
+  // 宿主驱动的维护/压缩窗口内以 opPin 强引用钉住 agent，窗口结束即释放。
+  pinLiveAgent(state, agent) {
+    if (!state || !agent) return;
+    state.opPin = agent;
+    state.opPinCount = (state.opPinCount || 0) + 1;
+  }
+
+  unpinLiveAgent(state) {
+    if (!state) return;
+    state.opPinCount = Math.max(0, (state.opPinCount || 0) - 1);
+    if (!state.opPinCount) state.opPin = null;
+  }
+
+  constructor(ctx, config, resolvedConfig, { strictActivation = false, deferActivation = false } = {}) {
     if (process.env.SPINE_ENGINE_FAIL === "construct") throw new Error("spine: constructor refused");
-    super(ctx, resolvedConfig ?? engineConfig(config));
+    const effective = resolvedConfig ?? engineConfig(config);
+    const waitForInit = deferActivation && (effective.auto === undefined || effective.auto === true);
+    super(ctx, waitForInit ? { ...effective, auto: false } : effective);
     this.persistCapture = true;
     this.catalogPromise = loadPiAiCatalog().then((catalog) => {
       this.catalogCache = catalog;
@@ -874,24 +1365,31 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     });
     if (process.env.SPINE_ENGINE_FAIL === "after-super") throw new Error("spine: after super");
     this.liveConfig = config;
-    try { console.error('[spine] settings ' + JSON.stringify(readSettings(config))); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+    if (!deferActivation) this.registerLifecycle(ctx, strictActivation);
+  }
+
+  activateAfterInit(auto) {
+    this.config = Object.freeze({ ...this.config, auto });
+    if (auto) this._registerAutomaticCompaction();
+    this.registerLifecycle(this.ctx, true);
+  }
+
+  registerLifecycle(ctx, strictActivation) {
     try {
       ctx.effect(() => async () => {
         await Promise.allSettled([...this.pendingCuts, ...this.pendingCaptures, ...this.pendingCatchupJobs]);
+        this.restorePruneGuard();
+        await retireAllShadowWorkers();
+        this.clearSessionTables();
       });
       ctx.on("session/event", (session, event) => {
         try {
           if (this.standDown?.()) return;
-          if (event?.type === "turn/start") {
-            try {
-              const scrubbed = this.scrubCards(session);
-              if (scrubbed > 0) console.error(`[spine] scrubbed ${scrubbed} cards at turn start`);
-            } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
-          }
           this.noteEvent(session, event);
           if (event?.type === "turn/end" && isCuttableTurnEnd(event)) {
             const state = this.sessionState.get(sessionKey({ session }));
-            if (state?.liveAgent) this.scheduleTurnEndMaintenance(state.liveAgent, event.seq, event);
+            const liveAgent = liveAgentOf(state);
+            if (liveAgent) this.scheduleTurnEndMaintenance(liveAgent, event.seq, event);
           }
           if (event?.type !== "tool/result") return;
           const id = event.data?.message?.toolCallId;
@@ -953,10 +1451,11 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         await this.waitForMaintenance(agent, signal);
         return typeof next === "function" ? next() : undefined;
       }, { prepend: true });
-      ctx.on("agent/turn-stopping", async ({ agent, signal }) => {
-        await this.runTurnStoppingMaintenance(agent, signal);
+      ctx.on("agent/turn-stopping", async ({ agent, signal, turn }) => {
+        await this.runTurnStoppingMaintenance(agent, signal, turn);
       });
     } catch (error) {
+      if (strictActivation) throw error;
       const message = error instanceof Error ? error.message : String(error);
       ctx.logger?.warn?.(`spine: 本会话未接管自动小切。${message}`);
     }
@@ -971,7 +1470,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   recordDecision(state, record = {}) {
     const key = state?.key || DEFAULT_KEY;
     const prefix = `${key}\0`;
-    const session = state?.liveAgent?.session;
+    const session = liveAgentOf(state)?.session;
     this.reconcileCardRawPaths(state, session);
     const protectPaths = [];
     if (state?.lastCardPath) protectPaths.push(state.lastCardPath);
@@ -989,7 +1488,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       if (!rawKey.startsWith(prefix) || !raw?.path || !liveIds.has(rawKey.slice(prefix.length))) continue;
       protectPaths.push(raw.path, `${raw.path}.meta.json`);
     }
-    appendDecision(shadowDirectory(), { sid: key, ...record }, { protectPaths });
+    return appendDecision(shadowDirectory(), { sid: key, ...record }, { protectPaths });
   }
 
   reconcileCardRawPaths(state, session) {
@@ -1031,14 +1530,17 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const key = sessionKey(agent);
     let state = this.sessionState.get(key);
     if (state) {
-      state.liveAgent = agent;
+      state.liveAgent = toLiveRef(agent);
       this.sessionState.delete(key);
       this.sessionState.set(key, state);
+      this.enforceSessionLimits(key);
       return state;
     }
     state = {
       key,
-      liveAgent: agent,
+      liveAgent: toLiveRef(agent),
+      opPin: null,
+      opPinCount: 0,
       warming: false,
       localOnly: false,
       approvedCard: null,
@@ -1062,13 +1564,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       cardRawPathsStructured: false,
     };
     this.sessionState.set(key, state);
-    if (this.sessionState.size > MAX_TRACKED_SESSIONS) {
-      for (const [oldKey, old] of this.sessionState) {
-        if (this.sessionState.size <= MAX_TRACKED_SESSIONS) break;
-        if (oldKey === key || old.warming || old.localOnly) continue;
-        this.sessionState.delete(oldKey);
-      }
-    }
+    this.enforceSessionLimits(key);
     return state;
   }
 
@@ -1106,6 +1602,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       state.lastMaintenanceTurnEndSeq = state.turnEndSeq;
     }
     state.warming = true;
+    this.pinLiveAgent(state, agent);
     let job;
     job = (async () => {
       await null;
@@ -1113,6 +1610,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     })()
       .catch((error) => noteShadowWarning(this.ctx?.logger, error))
       .finally(() => {
+        this.unpinLiveAgent(state);
         if (!state.pendingMaintenance) state.warming = false;
         if (state.maintenanceJob === job) state.maintenanceJob = null;
         if (state.maintenanceAbort) state.maintenanceAbort = null;
@@ -1126,7 +1624,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     this.pendingCuts.add(job);
   }
 
-  async runTurnStoppingMaintenance(agent, signal) {
+  async runTurnStoppingMaintenance(agent, signal, turn) {
     if (this.standDown?.() || signal?.aborted) return;
     const state = this.stateFor(agent);
     if (state.warming) {
@@ -1134,6 +1632,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       return;
     }
     state.warming = true;
+    this.pinLiveAgent(state, agent);
     const owner = {};
     const maintenanceAbort = new AbortController();
     state.maintenanceOwner = owner;
@@ -1146,12 +1645,17 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     let job;
     job = (async () => {
       await null;
+      let observation;
+      let outcome = false;
       try {
         const settings = readSettings(this.liveConfig);
         const events = agent.session.snapshotEvents();
-        const stoppingEnd = latestCompletedTurnEnd(events);
+        const stoppingStartSeq = latestTurnStart(events)?.seq;
+        const previousEnd = latestCompletedTurnEnd(events);
+        const stoppingEnd = stoppingStartSeq === undefined || previousEnd?.seq > stoppingStartSeq
+          ? previousEnd : null;
         const stoppingSeq = stoppingEnd?.seq;
-        const stoppingStartSeq = (turnStartForBoundary(events, stoppingEnd) || latestTurnStart(events))?.seq;
+        observation = startMaintenanceStatus(state, turn ?? stoppingEnd?.data?.turn, stoppingSeq);
         if (Number.isInteger(stoppingSeq)) {
           state.turnEndSeq = Number.isInteger(state.turnEndSeq) ? Math.max(state.turnEndSeq, stoppingSeq) : stoppingSeq;
           state.turnEndEvent = stoppingEnd;
@@ -1167,12 +1671,22 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         if (maintenanceAbort.signal.aborted) return false;
         await this.flushPendingCaptures(agent.session);
         if (maintenanceAbort.signal.aborted) return false;
-        const completed = await this.finishTurn(agent, events, { maintenanceRetry: true, skipCapture: true });
-        if (completed === true && (stoppingSeq !== undefined || stoppingStartSeq !== undefined)) {
+        const stoppingTurn = agent.status === "running" && signal && Number.isSafeInteger(turn)
+          ? turn : undefined;
+        outcome = await this.finishTurn(agent, events, {
+          maintenanceRetry: true,
+          skipCapture: true,
+          stoppingTurn,
+          observation,
+        });
+        if (outcome === true && (stoppingSeq !== undefined || stoppingStartSeq !== undefined)) {
           state.lastStoppingTurnEndSeq = stoppingSeq ?? -1;
           state.lastStoppingTurnStartSeq = stoppingStartSeq ?? -1;
         }
+        if (stoppingTurn !== undefined) this.queueOutputRecovery(agent, signal, stoppingTurn, events);
       } finally {
+        endMaintenanceStatus(observation, outcome, maintenanceAbort.signal);
+        this.unpinLiveAgent(state);
         signal?.removeEventListener("abort", forwardAbort);
         this.pendingCuts.delete(job);
         if (state.maintenanceOwner === owner) {
@@ -1200,6 +1714,60 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       });
       try { await Promise.race([job, aborted]); }
       finally { signal.removeEventListener("abort", abort); }
+    }
+  }
+
+  queueOutputRecovery(agent, signal, turn, events) {
+    if (signal.aborted || typeof agent.followup !== "function") return;
+    let capped = false;
+    let reasoningOnly = false;
+    let recovering = false;
+    let hasUserInput = false;
+    let hasToolResult = false;
+    let index = events.length - 1;
+    for (; index >= 0; index--) {
+      const event = events[index];
+      const data = event?.data;
+      if (event?.type === "turn/end") return;
+      if (event?.type === "turn/start") {
+        if (data?.turn !== turn) return;
+        break;
+      }
+      if (!capped && event?.type === "assistant/message") {
+        const finish = data?.stream?.findLast?.((frame) => frame?.type === "chunk" && frame.chunk?.type === "finish");
+        const content = data?.message?.content;
+        if (data?.turn !== turn || finish?.chunk.reason?.kind !== "max-tokens" ||
+            content?.some((block) => block.type === "tool-call")) return;
+        capped = true;
+        reasoningOnly = content?.length > 0 && content.every((block) => block.type === "reasoning");
+      }
+      if (event?.type === "tool/result" && data?.turn === turn) hasToolResult = true;
+      if (event?.type === "user/message") {
+        // The consumed follow-up source is persisted with the turn.
+        if (data?.source?.kind === FINAL_OUTPUT_RECOVERY_KIND) return;
+        if (data?.source?.kind === OUTPUT_RECOVERY_KIND) recovering = true;
+        if (data?.source?.kind === "user") hasUserInput = true;
+      }
+    }
+    if (index < 0 || !capped || this.standDown?.() ||
+        agent.inbox?.nextTurn?.length !== 0 || agent.inbox?.nextStep?.length !== 0) return;
+
+    let sourceKind = OUTPUT_RECOVERY_KIND;
+    let instructions = "The previous response reached its output limit. Continue the original request from the work already done. Finish any missing changes in small steps, verify the result, and report it concisely.";
+    if (recovering) {
+      if (hasUserInput || hasToolResult || !reasoningOnly) return;
+      sourceKind = FINAL_OUTPUT_RECOVERY_KIND;
+      instructions = "The recovery response spent its output budget on analysis and made no tool call. Continue the original request in this workspace. Start with one small tool call that makes progress. Keep analysis brief and split larger changes across separate tool calls. Verify the result before reporting.";
+    } else if (!hasUserInput || !hasToolResult) {
+      return;
+    }
+    try {
+      agent.followup(createUserMessage({
+        source: { kind: sourceKind },
+        content: [{ type: "text", text: instructions }],
+      }));
+    } catch (error) {
+      this.ctx.logger?.warn?.(`spine: unable to continue after output limit: ${error?.message ?? String(error)}`);
     }
   }
 
@@ -1412,8 +1980,9 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           if (result.retryable) {
             task.hadRetry = true;
             task.captureRetryAttempts += 1;
-            const previousMax = this.captureRetryStats?.get(task.key) || 0;
-            if (task.captureRetryAttempts > previousMax) this.captureRetryStats.set(task.key, task.captureRetryAttempts);
+            const retryBucket = this.sessionBucket(task.session);
+            const previousMax = retryBucket.captureRetryStats.get(task.key) || 0;
+            if (task.captureRetryAttempts > previousMax) retryBucket.captureRetryStats.set(task.key, task.captureRetryAttempts);
             if (task.captureRetryAttempts >= CAPTURE_RETRY_LIMIT) {
               task.phase = "visible";
               task.recoverIndex = 0;
@@ -1552,11 +2121,13 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         return;
       }
       state.warming = true;
+      this.pinLiveAgent(state, agent);
       const retryAbort = new AbortController();
       state.maintenanceAbort = retryAbort;
       const job = this.finishTurn(agent, events, { maintenanceRetry: true, skipCapture: true })
         .catch((error) => noteShadowWarning(this.ctx?.logger, error))
         .finally(() => {
+          this.unpinLiveAgent(state);
           const sameJob = state.maintenanceJob === job && state.maintenanceAbort === retryAbort;
           this.pendingCuts.delete(job);
           if (!sameJob) return;
@@ -1573,280 +2144,245 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     });
   }
 
-  // 旧卡片里残留的整段运行快照就地压掉。只改卡，不动用户消息，不调模型。
-  scrubCards(session) {
-    let count = 0;
-    for (const seq of [...session.surface.nodes]) {
-      const event = session.eventAt(seq);
-      if (event?.type !== "user/message") continue;
-      const text = eventText(session, seq);
-      const kind = event?.data?.source?.kind;
-      if (kind !== SPINE_SOURCE_KIND && kind !== "compact-checkpoint" && !text.includes(MARK)) continue;
-      const slim = scrubCardText(text);
-      if (!slim || slim.length >= text.length - 200) continue;
-      session.append("user/message", createUserMessage({
-        content: [{ type: "text", text: slim }],
-        source: { ...(event.data?.source || spineCheckpointSource(undefined)), scrubbed: true },
-      }), {
-        surfaceOp: { op: "replace", startSeq: seq, endSeq: seq },
-        sourceEventSeqs: [seq],
-      });
-      count += 1;
-    }
-    return count;
-  }
-
   async finishTurn(agent, events, options = {}) {
     if (this.standDown?.()) return null;
-    // 旧卡片里残留的整段运行快照就地压掉。只改卡，不动用户消息，不调模型。
-    try {
-      const scrubbed = this.scrubCards(agent.session);
-      if (scrubbed > 0) console.error(`[spine] scrubbed ${scrubbed} cards`);
-    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
     const settings = readSettings(this.liveConfig);
     const state = this.stateFor(agent);
     if (state.maintenanceAbort?.signal.aborted) return false;
-    if (!state.maintenanceAbort) {
-      state.maintenanceAbort = new AbortController();
-    }
-    // SPINE_TIMEOUT_2026：官方总结要走一次上游 LLM，这台机器上实测 30~90 秒，
-    // 原来的 30 秒硬超时会把总结掐断，整条维护静默退出（决策日志只有一条 engine）。
-    const maintenanceTimeoutMs = Number(process.env.SPINE_MAINTENANCE_TIMEOUT_MS || 180000);
-    const signal = AbortSignal.any([AbortSignal.timeout(maintenanceTimeoutMs), state.maintenanceAbort.signal]);
-    let maintenanceCompleted = false;
-    const ev = events || agent.session.snapshotEvents();
-    const deferCapture = options.deferCapture === true;
-    let catchup = { finished: true, progressed: false, retryRequested: false };
-    if (options.skipCapture) {
-      // A completed idle catch-up or a failed-cut retry already established
-      // the capture surface. Re-run maintenance without rescanning events.
-    } else if (deferCapture) {
-      state.pendingMaintenance = true;
-      try {
-        catchup = this.scheduleCaptureCatchup(agent, ev, settings, { maintenanceRequested: true });
-      } catch (error) {
-        state.pendingMaintenance = false;
-        state.warming = false;
-        throw error;
-      }
-    } else {
-      if (ev.length > CAPTURE_EVENT_BATCH) {
-        catchup = this.scheduleCaptureCatchup(agent, ev, settings, { freezeSnapshot: true });
-      } else {
-        await this.flushPendingCaptures(agent.session);
-        this.captureNew(agent.session, ev, settings);
-      }
-    }
-    // Never enter the host's maintenance gate while another session's
-    // catch-up is still running. The host may serialize runMaintenance across
-    // agents; defer this pass and retry after the catch-up settles instead of
-    // making finishTurn wait or holding the global gate.
-    if (catchup?.promise && !catchup.finished) {
-      if (options.maintenanceRetry || (!deferCapture && ev.length <= CAPTURE_EVENT_BATCH)) {
-        await catchup.promise;
-      } else {
-        return null;
-      }
-    }
-    await this.flushPendingCaptures(agent.session);
-    const jobs = collectJobs(ev);
-    const calls = indexToolCalls(ev);
+    const ownedAbort = state.maintenanceAbort ? null : new AbortController();
+    if (ownedAbort) state.maintenanceAbort = ownedAbort;
+    const signal = AbortSignal.any([AbortSignal.timeout(30000), state.maintenanceAbort.signal]);
+    let observation = options.observation;
+    let outcome = false;
     try {
-      await agent.runMaintenance(async (agentSignal) => {
-        if (this.standDown?.()) return;
-        // DSH disposes a completed CLI agent by aborting maintenance with the
-        // lifecycle marker `{ kind: "disposed" }`. A local cut has already
-        // started at that point, so let it finish under the bounded timeout;
-        // user/host cancellation reasons still abort the operation.
-        const op = maintenanceOperationSignal(agentSignal, signal);
-        const markCompleted = () => {
-          if (!op.aborted && !signal.aborted) maintenanceCompleted = true;
-        };
-        let measurement = this.ctx.tokenMeter.measure(agent.session);
-        const settleTurnBaseline = () => {
-          state.turnBase = measurement.totalTokens;
-          state.maxTurnGrowth = 0;
-        };
-        // 超大门不能再直接放弃：原来 >= bigGate 就 return，指望宿主 gate 兜，
-        // 结果上下文卡在 79 万每轮照样全量发送（2026-11-23 实测 109 轮 3970 万 token）。
-        // 超门时强制 drain，把上下文一路砍回 keepRoundTokens。
-        const 超门 = measurement.totalTokens >= settings.bigGate;
-        if (measurement.totalTokens < settings.minTokens) {
-          this.recordDecision(state, {
-            phase: "maintenance-skip",
-            reason: "below-min-tokens",
-            totalTokens: measurement.totalTokens,
-          });
-          settleTurnBaseline();
-          markCompleted();
-          return;
+      let maintenanceCompleted = false;
+      const ev = events || agent.session.snapshotEvents();
+      if (!observation) {
+        const boundary = latestCompletedTurnEnd(ev) || state.turnEndEvent;
+        observation = startMaintenanceStatus(state, boundary?.data?.turn, boundary?.seq);
+      }
+      const deferCapture = options.deferCapture === true;
+      let catchup = { finished: true, progressed: false, retryRequested: false };
+      if (options.skipCapture) {
+        // A completed idle catch-up or a failed-cut retry already established
+        // the capture surface. Re-run maintenance without rescanning events.
+      } else if (deferCapture) {
+        state.pendingMaintenance = true;
+        try {
+          catchup = this.scheduleCaptureCatchup(agent, ev, settings, { maintenanceRequested: true });
+        } catch (error) {
+          state.pendingMaintenance = false;
+          state.warming = false;
+          throw error;
         }
-        // Restored cards establish a baseline; a live card still skips once,
-        // even when maintenance or engine construction is delayed.
-        if (!op.aborted && skipLiveOfficialCompaction(agent.session)) {
-          this.recordDecision(state, { phase: "maintenance-skip", reason: "official-checkpoint" });
-          this.ctx.logger?.info?.("spine cooldown: live official compaction seen, skip this pass");
-          settleTurnBaseline();
-          markCompleted();
-          return;
+      } else {
+        if (ev.length > CAPTURE_EVENT_BATCH) {
+          catchup = this.scheduleCaptureCatchup(agent, ev, settings, { freezeSnapshot: true });
+        } else {
+          await this.flushPendingCaptures(agent.session);
+          this.captureNew(agent.session, ev, settings);
         }
-        if (inCooldown(agent.session, { windowMs: settings.cooldownMs })) {
-          this.recordDecision(state, { phase: "maintenance-skip", reason: "cooldown" });
-          settleTurnBaseline();
-          markCompleted();
-          return;
+      }
+      // Never enter the host's maintenance gate while another session's
+      // catch-up is still running. The host may serialize runMaintenance across
+      // agents; defer this pass and retry after the catch-up settles instead of
+      // making finishTurn wait or holding the global gate.
+      if (catchup?.promise && !catchup.finished) {
+        if (options.maintenanceRetry || (!deferCapture && ev.length <= CAPTURE_EVENT_BATCH)) {
+          await catchup.promise;
+        } else {
+          outcome = null;
+          return null;
         }
-        this.ensurePruneGuard();
-        // The pi-ai catalog is loaded asynchronously so ESM-only providers are
-        // discoverable. Do not classify the first request as local merely
-        // because catalogProviders() was called before the import settled.
-        if (this.catalogPromise) await this.catalogPromise;
-        const resolved = this.engineFor(agent);
-        if (state.engine !== resolved.engine || state.engineSource !== resolved.source) {
-          this.ctx.logger?.info?.(`spine engine=${resolved.engine} source=${resolved.source}`);
-          state.engine = resolved.engine;
-          state.engineSource = resolved.source;
-        }
-        this.recordDecision(state, {
-          phase: "engine",
-          engine: resolved.engine,
-          source: resolved.source,
-          provider: agent?.session?.requestHeader?.()?.config?.provider || "",
-          model: agent?.session?.requestHeader?.()?.config?.model || "",
-          catalogReady: this.catalogCache.length > 0,
-        });
-        const cloud = resolved.engine !== "local";
-        // 预测下一轮会过 32000 时收尾；没有增长基线时仍由已有 48000 紧急线接管。
-        // Drain a projected request over 32000. Without a growth baseline, the existing 48000 urgent line still takes over.
-        const last = measurement.totalTokens;
-        const base = state.turnBase ?? last;
-        const growth = Math.max(0, last - base);
-        state.maxTurnGrowth = Math.max(state.maxTurnGrowth || 0, growth);
-        const projected = state.maxTurnGrowth > 0 && last + state.maxTurnGrowth > settings.keepRoundTokens;
-        // DRAIN_AT_MIN 2026-11-24：实测 turnGrowth 经常是 0，projected 永远不成立，
-        // 上下文到了 31.7k 还在 cut-skip(no-legal-span, drain:false)。到了 minTokens
-        // 就当作要收，让 selectCutIndexes 走跨用户回退，再决定有没有合法切点。
-        const drain = 超门 || projected || last >= URGENT_TOKENS
-          || (Number(settings.minTokens) > 0 && last >= Number(settings.minTokens));
-        const drainNotes = [];
-        let maintenanceFailed = false;
-        for (let pass = 0; pass < 8; pass += 1) {
-          const measured = measurement;
-          if (drain && measured.totalTokens <= settings.keepRoundTokens) break;
-          const chunk = selectNewestChunk(agent.session, measured, state.key, {
-            settings,
-            engine: resolved.engine,
-            jobs,
-            calls,
-            rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
-            totalTokens: measured.totalTokens,
-            drain,
-          });
-          if (chunk === null) {
-            if (drain && measured.totalTokens > settings.keepRoundTokens) {
-              this.recordDecision(state, {
-                phase: "cut-skip",
-                reason: "no-legal-span",
-                totalTokens: measured.totalTokens,
-                drain: true,
-                reject: lastCutReject(),
-              });
-              this.ctx.logger?.warn?.(`spine drain stopped at ${measured.totalTokens}; no legal span`);
-            } else {
-              this.recordDecision(state, { phase: "cut-skip", reason: "no-legal-span", totalTokens: measured.totalTokens, drain: false });
-              this.ctx.logger?.debug?.("spine cut skipped");
-            }
-            break;
+      }
+      await this.flushPendingCaptures(agent.session);
+      const jobs = collectJobs(ev);
+      const calls = indexToolCalls(ev);
+      try {
+        // The driver awaits turn-stopping before it writes turn/end and may
+        // dispose the session immediately afterwards. During that hook the
+        // driver owns the session and its abort is forwarded above.
+        const runMaintenance = options.stoppingTurn !== undefined ? (job) => job() : agent.runMaintenance.bind(agent);
+        await runMaintenance(async (agentSignal) => {
+          if (this.standDown?.() || signal.aborted) return;
+          // DSH disposes a completed CLI agent by aborting maintenance with the
+          // lifecycle marker `{ kind: "disposed" }`. A local cut has already
+          // started at that point, so let it finish under the bounded timeout;
+          // user/host cancellation reasons still abort the operation.
+          const op = maintenanceOperationSignal(agentSignal, signal);
+          const markCompleted = () => {
+            if (!op.aborted && !signal.aborted) maintenanceCompleted = true;
+          };
+          let measurement = this.ctx.tokenMeter.measure(agent.session);
+          const settleTurnBaseline = () => {
+            state.turnBase = measurement.totalTokens;
+            state.maxTurnGrowth = 0;
+          };
+          if (measurement.totalTokens < settings.minTokens || measurement.totalTokens >= settings.bigGate) {
+            this.recordDecision(state, {
+              phase: "maintenance-skip",
+              reason: measurement.totalTokens < settings.minTokens ? "below-min-tokens" : "above-big-gate",
+              totalTokens: measurement.totalTokens,
+            });
+            settleTurnBaseline();
+            markCompleted();
+            return;
           }
-          const tailBeyondKept = chunk.after - (chunk.keptTokens || 0);
-          if (!drain && tailBeyondKept > MAX_TAIL && measured.totalTokens < URGENT_TOKENS) break;
-          const before = measured.totalTokens;
-          const started = Date.now();
-          let reduced = false;
-          try {
-            state.localOnly = true;
-            state.approvedCard = chunk.card;
-            const committed = await this.commitSelectedSpan(agent, chunk, op, { drain });
-            if (committed === false) {
-              maintenanceFailed = true;
+          // Restored cards establish a baseline; a live card still skips once,
+          // even when maintenance or engine construction is delayed.
+          if (!op.aborted && skipLiveOfficialCompaction(agent.session)) {
+            this.recordDecision(state, { phase: "maintenance-skip", reason: "official-checkpoint" });
+            this.ctx.logger?.info?.("spine cooldown: live official compaction seen, skip this pass");
+            settleTurnBaseline();
+            markCompleted();
+            return;
+          }
+          if (inCooldown(agent.session, { windowMs: settings.cooldownMs })) {
+            this.recordDecision(state, { phase: "maintenance-skip", reason: "cooldown" });
+            settleTurnBaseline();
+            markCompleted();
+            return;
+          }
+          this.ensurePruneGuard();
+          // The pi-ai catalog is loaded asynchronously so ESM-only providers are
+          // discoverable. Do not classify the first request as local merely
+          // because catalogProviders() was called before the import settled.
+          if (this.catalogPromise) await this.catalogPromise;
+          const resolved = this.engineFor(agent);
+          if (state.engine !== resolved.engine || state.engineSource !== resolved.source) {
+            this.ctx.logger?.info?.(`spine engine=${resolved.engine} source=${resolved.source}`);
+            state.engine = resolved.engine;
+            state.engineSource = resolved.source;
+          }
+          this.recordDecision(state, {
+            phase: "engine",
+            engine: resolved.engine,
+            source: resolved.source,
+            provider: agent?.session?.requestHeader?.()?.config?.provider || "",
+            model: agent?.session?.requestHeader?.()?.config?.model || "",
+            catalogReady: this.catalogCache.length > 0,
+          });
+          const cloud = resolved.engine !== "local";
+          // 预测下一轮会过 32000 时收尾；没有增长基线时仍由已有 48000 紧急线接管。
+          // Drain a projected request over 32000. Without a growth baseline, the existing 48000 urgent line still takes over.
+          const last = measurement.totalTokens;
+          const base = state.turnBase ?? last;
+          const growth = Math.max(0, last - base);
+          state.maxTurnGrowth = Math.max(state.maxTurnGrowth || 0, growth);
+          const projected = state.maxTurnGrowth > 0 && last + state.maxTurnGrowth > settings.keepRoundTokens;
+          const drain = cloud && (projected || last >= URGENT_TOKENS);
+          const drainNotes = [];
+          let maintenanceFailed = false;
+          for (let pass = 0; pass < 8; pass += 1) {
+            const measured = measurement;
+            if (drain && measured.totalTokens <= settings.keepRoundTokens) break;
+            const chunk = selectNewestChunk(agent.session, measured, state.key, {
+              settings,
+              engine: resolved.engine,
+              jobs,
+              calls,
+              rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
+              totalTokens: measured.totalTokens,
+              drain,
+            });
+            if (chunk === null) {
+              if (drain && measured.totalTokens > settings.keepRoundTokens) {
+                this.recordDecision(state, {
+                  phase: "cut-skip",
+                  reason: "no-legal-span",
+                  totalTokens: measured.totalTokens,
+                  drain: true,
+                });
+                this.ctx.logger?.warn?.(`spine drain stopped at ${measured.totalTokens}; no legal span`);
+              } else {
+                this.recordDecision(state, { phase: "cut-skip", reason: "no-legal-span", totalTokens: measured.totalTokens, drain: false });
+                this.ctx.logger?.debug?.("spine cut skipped");
+              }
               break;
             }
-            measurement = this.ctx.tokenMeter.measure(agent.session);
-            const after = measurement.totalTokens;
-            reduced = after < before;
-            const saved = before - after;
-            if (saved > 0) {
-              this.recordDecision(state, {
-                phase: "cut",
-                result: "committed",
-                before,
-                after,
-                saved,
-                tokens: chunk.tokens,
-                drain,
-              });
-              drainNotes.push({
-                kind: "cut",
-                saved,
-                afterPrefix: Math.max(0, after - (chunk.prefix || 0)),
-                tailBeyondKept,
-                prefix: chunk.prefix || 0,
-                total: after,
-                tokens: chunk.tokens,
-                gate: "cut",
-              });
-            }
-            this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved}`);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (message.includes("raw backup missing before cut") && error?.retryable === true) {
-              catchup.retryRequested = true;
-              if (catchup.finished && state.rawCutRetryAttempts < CAPTURE_RETRY_LIMIT) {
-                state.rawCutRetryAttempts += 1;
-                this.scheduleMaintenanceRetry(agent);
+            const tailBeyondKept = chunk.after - (chunk.keptTokens || 0);
+            if (!drain && tailBeyondKept > MAX_TAIL && measured.totalTokens < URGENT_TOKENS) break;
+            const before = measured.totalTokens;
+            const started = Date.now();
+            let reduced = false;
+            try {
+              state.localOnly = true;
+              state.approvedCard = chunk.card;
+              const committed = await this.commitSelectedSpan(agent, chunk, op, { drain, turn: options.stoppingTurn });
+              if (committed === false) {
+                maintenanceFailed = true;
+                break;
               }
+              measurement = this.ctx.tokenMeter.measure(agent.session);
+              const after = measurement.totalTokens;
+              reduced = after < before;
+              const saved = before - after;
+              if (saved > 0) {
+                this.recordDecision(state, {
+                  phase: "cut",
+                  result: "committed",
+                  before,
+                  after,
+                  saved,
+                  tokens: chunk.tokens,
+                  drain,
+                });
+                drainNotes.push({
+                  kind: "cut",
+                  saved,
+                  afterPrefix: Math.max(0, after - (chunk.prefix || 0)),
+                  tailBeyondKept,
+                  prefix: chunk.prefix || 0,
+                  total: after,
+                  tokens: chunk.tokens,
+                  gate: "cut",
+                });
+              }
+              this.ctx.logger?.info?.(`spine cut ${Date.now() - started}ms ${before} -> ${after} chunk=${chunk.tokens} saved=${saved}`);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (message.includes("raw backup missing before cut") && error?.retryable === true) {
+                catchup.retryRequested = true;
+                if (catchup.finished && state.rawCutRetryAttempts < CAPTURE_RETRY_LIMIT) {
+                  state.rawCutRetryAttempts += 1;
+                  this.scheduleMaintenanceRetry(agent);
+                }
+              }
+              maintenanceFailed = true;
+              this.recordDecision(state, { phase: "cut", result: "failed", reason: message, drain });
+              this.ctx.logger?.warn?.(`spine cut failed: ${message}`);
+              break;
             }
-            maintenanceFailed = true;
-            this.recordDecision(state, { phase: "cut", result: "failed", reason: message, drain });
-            this.ctx.logger?.warn?.(`spine cut failed: ${message}`);
-            break;
+            if (!reduced) {
+              maintenanceFailed = true;
+              this.ctx.logger?.warn?.(`spine cut did not reduce ${before}; leaving the prefix for the gate`);
+              break;
+            }
+            if (!drain) break;
           }
-          if (!reduced) {
-            maintenanceFailed = true;
-            this.ctx.logger?.warn?.(`spine cut did not reduce ${before}; leaving the prefix for the gate`);
-            break;
+          if (observation) observation.cuts = drainNotes.filter((note) => note.kind === "cut" && note.saved > 0).length;
+          if (drainNotes.length) flushDrainStats(shadowDirectory(), drainNotes, { sid: state.key, drain });
+          state.turnBase = measurement.totalTokens;
+          state.maxTurnGrowth = 0;
+          await this.ctx.sessions?.flush?.(agent.session);
+          this.rememberPrefix(agent);
+          if (!maintenanceFailed) {
+            state.rawCutRetryAttempts = 0;
+            markCompleted();
           }
-          if (!drain) break;
-        }
-        if (drainNotes.length) flushDrainStats(shadowDirectory(), drainNotes, { sid: state.key, drain });
-        state.turnBase = measurement.totalTokens;
-        state.maxTurnGrowth = 0;
-        await this.ctx.sessions?.flush?.(agent.session);
-        this.rememberPrefix(agent);
-        if (!maintenanceFailed) {
-          state.rawCutRetryAttempts = 0;
-          state.activeWorkRetries = 0;
-          markCompleted();
-        }
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      try {
-        this.recordDecision(state, { phase: "maintenance-abort", reason: message.slice(0, 300) });
-      } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
-      // ACTIVEWORK_RETRY_2026：QQ 连发时下一回合会紧接着起来，宿主判「already has active work」
-      // 把维护踢回去。这时不能放弃：等 5 秒再来一次，最多 5 次，成功一次就把计数清零。
-      if (message.includes("already has active work")) {
-        state.activeWorkRetries = (state.activeWorkRetries || 0) + 1;
-        if (state.activeWorkRetries <= 5) {
-          setTimeout(() => { try { this.scheduleMaintenanceRetry(agent); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) } }, 5000);
-        }
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.ctx.logger?.warn?.(`spine after-turn skipped: ${message}`);
+      } finally {
+        state.localOnly = false;
       }
-      this.ctx.logger?.warn?.(`spine after-turn skipped: ${message}`);
+      outcome = maintenanceCompleted;
+      return outcome;
     } finally {
-      state.localOnly = false;
+      if (ownedAbort && state.maintenanceAbort === ownedAbort) state.maintenanceAbort = null;
+      if (!options.observation) endMaintenanceStatus(observation, outcome, signal);
     }
-    return maintenanceCompleted;
   }
 
   async flushPendingCaptures(session = null, ids = null) {
@@ -1985,7 +2521,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         return false;
       }
     }
-    const lifecycle = { compactionId, turn: null };
+    const lifecycle = { compactionId, turn: options.turn ?? null };
     let started = false;
     let replaced = false;
     let ended = false;
@@ -2011,11 +2547,11 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       ended = true;
       await this.ctx.sessions.flush(session);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       if (started && !ended) {
-        const message = error instanceof Error ? error.message : String(error);
         try {
           session.append("compaction/end", replaced ? lifecycle : { ...lifecycle, error: message });
-        } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+        } catch {}
       }
       if (!replaced) throw error;
       this.ctx.logger?.warn?.(`spine compaction persistence unknown after replacement: ${message}`);
@@ -2026,32 +2562,59 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   rememberPrefix(agent) {
     const state = this.stateFor(agent);
     try {
-      const messages = agent.session.deriveMessages();
-      state.lastPrefix = (messages || []).map(messageText).join("\n");
+      if (process.env.SPINE_THUNDER === "1") {
+        const messages = agent.session.deriveMessages();
+        state.lastPrefix = (messages || []).map(messageText).join("\n");
+      } else {
+        state.lastPrefix = "";
+      }
       state.lastPrefixTokens = this.ctx.tokenMeter.measure(agent.session).totalTokens;
-    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+    } catch {}
   }
 
   async compactIfNeeded(agent, trigger, signal) {
     if (this.standDown?.()) return null;
     const state = this.stateFor(agent);
-    state.liveAgent = agent;
+    state.liveAgent = toLiveRef(agent);
     state.localOnly = false;
     this.ensurePruneGuard();
     const owned = this.ownedSignal(signal);
+    this.pinLiveAgent(state, agent);
     try {
-      return await super.compactIfNeeded(agent, trigger, owned.signal);
+      const result = await super.compactIfNeeded(agent, trigger, owned.signal);
+      state.reportedPressureConfigError = undefined;
+      return result;
+    } catch (error) {
+      if (error instanceof Error && error.constructor.name === "TargetPressureConfigError" &&
+          state.reportedPressureConfigError !== error.message) {
+        try {
+          ensureShadowDir(shadowDirectory());
+          const recorded = this.recordDecision(state, {
+            phase: "official-compaction",
+            trigger,
+            result: "rejected",
+            reason: "invalid-pressure-config",
+            detail: error.message,
+          });
+          if (recorded) state.reportedPressureConfigError = error.message;
+        } catch {}
+      }
+      throw error;
     } finally {
+      this.unpinLiveAgent(state);
       owned.dispose?.();
     }
   }
 
   async compactNow(agent, signal, sourceCommandId) {
     if (this.standDown?.()) return null;
+    const state = this.sessionState.get(sessionKey(agent));
+    this.pinLiveAgent(state, agent);
     const owned = this.ownedSignal(signal);
     try {
       return await super.compactNow(agent, owned.signal, sourceCommandId);
     } finally {
+      this.unpinLiveAgent(state);
       owned.dispose?.();
     }
   }
@@ -2087,13 +2650,12 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   }
 
   hostService(name) {
-    const nodes = [this.ctx, this.ctx?.root, this.ctx?.parent];
+    const nodes = [this.ctx, rootContext(this.ctx), contextProperty(this.ctx, "parent")];
     for (const node of nodes) {
-      if (!node || typeof node.get !== "function") continue;
       try {
-        const hit = node.get(name);
+        const hit = node?.get?.(name);
         if (hit) return hit;
-      } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+      } catch {}
     }
     return undefined;
   }
@@ -2149,7 +2711,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       const profile = this.hostService("profileContext");
       if (profile?.patchPath) candidates.push(profile.patchPath);
       if (profile?.dir) candidates.push(join(profile.dir, "cordis.patch.yml"));
-    } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+    } catch {}
     const home = process.env.DSH_HOME;
     const flag = process.argv.indexOf("--profile");
     const name = flag >= 0 ? process.argv[flag + 1] : process.env.DSH_PROFILE;
@@ -2157,7 +2719,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     for (const path of candidates) {
       try {
         if (path && existsSync(path)) return readFileSync(path, "utf8");
-      } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) }
+      } catch {}
     }
     return "";
   }
@@ -2262,7 +2824,6 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
   noteCaptureResult(session, event, record) {
     const key = session?.id || DEFAULT_KEY;
     this.retryableCaptureSeqs ||= new Map();
-    this.retryableCaptureSeeded ||= new Set();
     let seqs = this.retryableCaptureSeqs.get(key);
     if (!seqs) {
       seqs = new Set();
@@ -2279,20 +2840,20 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     let cursor = this.captureCursor.has(key) ? this.captureCursor.get(key) : this.readCaptureCursor(key);
     if (cursor == null) cursor = restartCaptureCursor(events, settings.keepRounds);
     if (!Number.isSafeInteger(cursor) || cursor < 0 || events.length < cursor) cursor = restartCaptureCursor(events, settings.keepRounds);
+    const bucket = this.sessionBucket(session);
     this.retryableCaptureSeqs ||= new Map();
-    this.retryableCaptureSeeded ||= new Set();
     let retryable = this.retryableCaptureSeqs.get(key);
     if (!retryable) {
       retryable = new Set();
       this.retryableCaptureSeqs.set(key, retryable);
     }
-    if (!this.retryableCaptureSeeded.has(key)) {
+    if (!bucket.retryableCaptureSeeded) {
       for (const seq of session?.surface?.nodes || []) {
         const event = session.eventAt?.(seq);
         const id = event?.type === "tool/result" && event.data?.message?.toolCallId;
         if (id && this.rawSeen.get(this.rawKey(session, id))?.retryable) retryable.add(seq);
       }
-      this.retryableCaptureSeeded.add(key);
+      bucket.retryableCaptureSeeded = true;
     }
     if (retryable.size) cursor = Math.min(cursor, Math.min(...retryable));
     return cursor;
@@ -2450,25 +3011,35 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (this.persistCapture !== true || !Number.isSafeInteger(cursor) || cursor < 0) return;
     let tmp;
     let fd;
+    let tmpIdentity = "";
     try {
       ensureShadowDir(shadowDirectory(), access);
       const file = this.captureCursorFile(key);
       // Cursor metadata is outside the payload cap and needs no rotation lock.
       // Secure the parent first so Windows temps inherit its private ACL.
-      ensureShadowDir(dirname(file), access);
+      const parent = dirname(file);
+      const parentIdentity = ensureShadowDirIdentity(parent, access);
       const candidate = `${file}.${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
       fd = openSync(candidate, "wx", 0o600);
       tmp = candidate;
-      tightenCreatedShadow(tmp, fd, access, { remember: false });
+      tmpIdentity = tightenCreatedShadow(tmp, fd, access, { remember: false });
+      if (parentIdentity && directoryIdentity(parent) !== parentIdentity) {
+        throw Object.assign(new Error("spine: capture cursor directory identity changed"), { code: "ESHADOWACCESS", step: "dir" });
+      }
       writeFileSync(fd, JSON.stringify({ v: 1, key, cursor }));
       closeSync(fd);
       fd = undefined;
+      if (shadowFileIdentity(tmp) !== tmpIdentity) {
+        throw Object.assign(new Error("spine: capture cursor temp identity changed"), { code: "ESHADOWACCESS", step: "file" });
+      }
       renameSync(tmp, file);
+      tmp = undefined;
     } catch (error) {
       noteShadowWarning(this.ctx?.logger, error);
     } finally {
-      if (fd !== undefined) { try { closeSync(fd); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) } }
-      if (tmp) { try { unlinkSync(tmp); } catch (_err) { console.error('[live-compact:index]', _err?.message || _err) } }
+      if (tmp && fd !== undefined && !tmpIdentity) tmpIdentity = shadowFileIdentity(tmp, fd);
+      if (fd !== undefined) { try { closeSync(fd); } catch {} }
+      if (tmp && tmpIdentity && shadowFileIdentity(tmp) === tmpIdentity) { try { unlinkSync(tmp); } catch {} }
     }
   }
 
@@ -2492,7 +3063,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
             .map((seq) => session.eventAt?.(seq))
             .find((candidate) => candidate?.type === "tool/result" && candidate.data?.message?.toolCallId === id);
           if (event) this.noteCaptureResult(session, event, cached);
-          if (retryable) this.captureRecoveryHolds.set(session?.id || DEFAULT_KEY, this.captureRecoveryFingerprint(session));
+          if (retryable) this.sessionBucket(session).captureRecoveryHolds = this.captureRecoveryFingerprint(session);
         }
       } catch (error) {
         noteShadowWarning(this.ctx?.logger, error);
@@ -2502,7 +3073,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           .map((seq) => session.eventAt?.(seq))
           .find((candidate) => candidate?.type === "tool/result" && candidate.data?.message?.toolCallId === id);
         if (event) this.noteCaptureResult(session, event, failed);
-        this.captureRecoveryHolds.set(session?.id || DEFAULT_KEY, this.captureRecoveryFingerprint(session));
+        this.sessionBucket(session).captureRecoveryHolds = this.captureRecoveryFingerprint(session);
       }
     }
   }
@@ -2539,7 +3110,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
             return candidate?.type === "tool/result" && candidate.data?.message?.toolCallId === id;
           }));
           if (event) this.noteCaptureResult(session, event, cached);
-          if (retryable) this.captureRecoveryHolds.set(session?.id || DEFAULT_KEY, this.captureRecoveryFingerprint(session));
+          if (retryable) this.sessionBucket(session).captureRecoveryHolds = this.captureRecoveryFingerprint(session);
         }
         progressed ||= Boolean(record?.ok);
       } catch (error) {
@@ -2551,7 +3122,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           return candidate?.type === "tool/result" && candidate.data?.message?.toolCallId === id;
         }));
         if (event) this.noteCaptureResult(session, event, failed);
-        this.captureRecoveryHolds.set(session?.id || DEFAULT_KEY, this.captureRecoveryFingerprint(session));
+        this.sessionBucket(session).captureRecoveryHolds = this.captureRecoveryFingerprint(session);
       }
       processed += 1;
     }
@@ -2563,8 +3134,9 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     const key = session?.id || DEFAULT_KEY;
     const events = session?.snapshotEvents?.() || [];
     const fingerprint = this.captureRecoveryFingerprint(session, events);
-    if (this.captureRecoveryHolds.get(key) === fingerprint) {
-      this.captureRecoveryHolds.delete(key);
+    const bucket = this.sessionBucket(session);
+    if (bucket.captureRecoveryHolds === fingerprint) {
+      bucket.captureRecoveryHolds = null;
       return new Set();
     }
     return this.captureNew(session, events);
@@ -2630,6 +3202,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
       this.pruneGuarded = true;
       return;
     }
+    this.__originalPruneSession = pruner.pruneSession;
     const original = pruner.pruneSession.bind(pruner);
     function guarded(session) {
       const engine = pruner.__spineEngine;
@@ -2646,6 +3219,45 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     this.pruneGuarded = true;
   }
 
+  restorePruneGuard() {
+    let pruner = null;
+    try {
+      pruner = this.ctx.get("toolResultPruner");
+    } catch {
+      pruner = null;
+    }
+    if (pruner && pruner.__spineEngine === this && this.__originalPruneSession && pruner.pruneSession?.__spineGuarded) {
+      pruner.pruneSession = this.__originalPruneSession;
+      delete pruner.__spineEngine;
+    }
+    this.__originalPruneSession = null;
+    this.pruneGuarded = false;
+  }
+
+  clearSessionTables() {
+    for (const state of this.sessionState.values()) {
+      state.liveAgent = null;
+      state.opPin = null;
+      state.opPinCount = 0;
+      state.lastPrefix = "";
+      state.lastPrefixTokens = 0;
+    }
+    this.sessionState.clear();
+    this.sessionTables.clear();
+    this.rawSeenOverride = null;
+    this.callIndexOverride = null;
+    this.captureCursorOverride = null;
+    this.pendingCaptures.clear();
+    this.pendingCaptureJobs.clear();
+    this.pendingCaptureKeys.clear();
+    this.pendingCatchups.clear();
+    this.pendingCatchupJobs.clear();
+    this.pendingCuts.clear();
+    this.catalogCache = [];
+    this.catalogPromise = null;
+    this.disposed = true;
+  }
+
   restoreRawMessages(messages, key) {
     return (messages || []).map((message) => {
       const id = message?.toolCallId || message?.message?.toolCallId;
@@ -2654,17 +3266,37 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     });
   }
 
+  restoreShadowBody(messages, key) {
+    const chunks = [];
+    let claimOk = true;
+    for (const message of messages || []) {
+      const id = message?.toolCallId || message?.message?.toolCallId;
+      const restored = id ? restoreToolText(message, this.rawSeen.get(`${key}\0${id}`)) : message;
+      if (messageText(restored).includes(PRUNE_MARKER)) claimOk = false;
+      chunks.push(shadowSections(restored));
+    }
+    return { body: chunks.join("\n\n"), claimOk };
+  }
+
+  async saveFusedRestoreAsync(messages, key, required, shadowFile, protectPaths, access = {}, rotationIO = {}) {
+    const { body, claimOk } = this.restoreShadowBody(messages, key);
+    await this.saveShadowBodyAsync(shadowFileBody(key, body), required, shadowFile, key, protectPaths, access, rotationIO);
+    return claimOk;
+  }
+
   warnShadowFull(key, shadow, used, cap) {
     const id = key || DEFAULT_KEY;
-    if (this.shadowFullWarned.has(id)) return;
-    this.shadowFullWarned.add(id);
+    const bucket = this.tablesFor(id);
+    if (bucket.shadowFullWarned.has(id)) return;
+    bucket.shadowFullWarned.add(id);
     this.ctx.logger?.warn?.(`spine: shadow ${shadow} 已用 ${used}，上限 ${cap}。删不掉旧备份，这一刀不切。`);
   }
 
   warnShadowOversize(key, cap) {
     const id = key || DEFAULT_KEY;
-    if (this.shadowFullWarned.has(`oversize:${id}`)) return;
-    this.shadowFullWarned.add(`oversize:${id}`);
+    const bucket = this.tablesFor(id);
+    if (bucket.shadowFullWarned.has(`oversize:${id}`)) return;
+    bucket.shadowFullWarned.add(`oversize:${id}`);
     this.ctx.logger?.warn?.(`spine: 这一份备份超过上限 ${cap}，已写下，其他可删备份已清。`);
   }
 
@@ -2699,6 +3331,28 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     access = {},
     rotationIO = {},
   ) {
+    const saveBody = this.saveShadowBodyAsync || SpineCompactionEngine.prototype.saveShadowBodyAsync;
+    return saveBody.call(
+      this,
+      shadowFileBody(warnKey, shadowBody(messages)),
+      required,
+      shadowFile,
+      warnKey,
+      protectPaths,
+      access,
+      rotationIO,
+    );
+  }
+
+  async saveShadowBodyAsync(
+    body,
+    required,
+    shadowFile,
+    warnKey = DEFAULT_KEY,
+    protectPaths = [],
+    access = {},
+    rotationIO = {},
+  ) {
     if (this.standDown?.()) return { ok: false, reason: "stand-down" };
     if (!access.runner && (access.platform ?? process.platform) === "win32" && shadowAccessFused()) {
       const error = new Error("spine: shadow permission already failed; backup refused");
@@ -2711,11 +3365,10 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     // a worker cannot observe those injected failures. Keep test/fault-injection
     // paths synchronous while production uses the complete off-thread txn.
     if (injected || process.env.NODE_TEST_CONTEXT) {
-      return this.saveShadow(messages, required, shadowFile, warnKey, protectPaths, access, rotationIO);
+      return saveShadowBodyImpl.call(this, body, required, shadowFile, warnKey, protectPaths, access, rotationIO);
     }
     const shadow = shadowDirectory();
     const file = shadowFilePath(shadowFile, warnKey);
-    const body = shadowFileBody(warnKey, shadowBody(messages));
     const cap = shadowMaxBytes();
     const result = await runShadowWorker({
       shadow,
@@ -2757,23 +3410,33 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
     if (decision.kind === "local") {
       const card = input?.liveCompact?.card;
       if (card?.needsBackup && !card.shadowFile) throw new Error("spine: omit refused; backup path missing");
-      const restored = this.restoreRawMessages(input.messages, state.key);
       const protectRawPaths = [...new Set([...(state.cardRawPaths || []), ...(card?.rawPaths || [])])];
-      await this.saveShadowAsync(restored, true, card?.shadowFile, state.key, protectRawPaths);
+      let claimOk;
+      if (process.env.SPINE_RESTORE_FUSED === "0") {
+        const restored = this.restoreRawMessages(input.messages, state.key);
+        await this.saveShadowAsync(restored, true, card?.shadowFile, state.key, protectRawPaths);
+        claimOk = backupClaimOk(restored);
+      } else {
+        claimOk = await this.saveFusedRestoreAsync(input.messages, state.key, true, card?.shadowFile, protectRawPaths);
+      }
       if (card?.needsBackup && !existsSync(card.shadowFile)) throw new Error("spine: shadow backup was not written");
-      const text = backupClaimOk(restored) ? decision.text : withoutFullBackupClaim(decision.text, card?.shadowFile);
+      const text = claimOk ? decision.text : withoutFullBackupClaim(decision.text, card?.shadowFile);
       const block = { type: "text", text };
       return { summary: [block], provider: "local", model: "spine-extract", rawOutput: [block] };
     }
     try {
       const officialShadowFile = freshShadowFile("official", state.key);
-      await this.saveShadowAsync(
-        this.restoreRawMessages(input.messages, state.key),
-        false,
-        officialShadowFile,
-        state.key,
-        state.cardRawPaths || [],
-      );
+      if (process.env.SPINE_RESTORE_FUSED === "0") {
+        await this.saveShadowAsync(
+          this.restoreRawMessages(input.messages, state.key),
+          false,
+          officialShadowFile,
+          state.key,
+          state.cardRawPaths || [],
+        );
+      } else {
+        await this.saveFusedRestoreAsync(input.messages, state.key, false, officialShadowFile, state.cardRawPaths || []);
+      }
       state.lastCardPath = officialShadowFile;
     } catch (error) {
       if (
@@ -2783,8 +3446,8 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
         noteShadowWarning(this.ctx?.logger, error);
       }
     }
-    const joined = input.messages.map(messageText).join("\n\n");
     if (process.env.SPINE_THUNDER !== "1") return this.summarizeOfficial(input, agent, signal);
+    const joined = input.messages.map(messageText).join("\n\n");
     const next = joined;
     const mode = decideThunder({
       previous: state.lastPrefix || "",

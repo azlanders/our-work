@@ -252,7 +252,7 @@ function failureBody(text) {
       }
       const body = streams.join("\n");
       if (body.trim()) return body;
-    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
+    } catch {}
   }
   return raw;
 }
@@ -284,7 +284,7 @@ function boundaryFailure(raw) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && typeof parsed.exitCode === "number") return parsed.exitCode !== 0;
-    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
+    } catch {}
   }
   return false;
 }
@@ -306,7 +306,7 @@ export function exitCodeOf(text) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && typeof parsed.exitCode === "number") return parsed.exitCode;
-    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
+    } catch {}
   }
   return null;
 }
@@ -639,7 +639,7 @@ function recordOf(value) {
     try {
       const got = value.get();
       if (got && typeof got === "object" && !Array.isArray(got)) return got;
-    } catch (_err) { console.error('[live-compact:plan]', _err?.message || _err) }
+    } catch {}
   }
   return Array.isArray(value) ? null : value;
 }
@@ -882,6 +882,7 @@ function retreatBefore(items, end, boundary) {
 function expandBack(items, end, stopAt, { crossUser, chunkMax }) {
   let start = end;
   let tokens = items[end].tokens || 0;
+  // crossUserFloor 为 0 时调用方传 -1；负数下界会让 items[-1] 越界，钳到 0。
   const safeStop = Math.max(0, stopAt);
   while (start > safeStop) {
     const prev = start - 1;
@@ -896,20 +897,9 @@ function expandBack(items, end, stopAt, { crossUser, chunkMax }) {
 }
 
 function balanced(items, start, end) {
-  if (!items[start] || !items[end]) return false;
   if (items[end].balancedAfter === false) return false;
   if (items[start].balancedBefore === false) return false;
   return true;
-}
-
-// 2026-11-24 诊断：切点为什么被拒。生产日志里 no-legal-span 一条含糊的 reason 分不清是
-// 「没得切」还是「有得切但这一刀不合规」，这里把最后一次拒绝的守卫与关键量留下来。
-let lastReject = null;
-export function lastCutReject() {
-  return lastReject;
-}
-function recordReject(reason, detail) {
-  lastReject = { reason, ...detail, at: Date.now() };
 }
 
 export function selectCutIndexes(items, {
@@ -923,7 +913,6 @@ export function selectCutIndexes(items, {
   drain = false,
   urgentTokens = 48000,
 } = {}) {
-  lastReject = null
   if (!items?.length) return null;
   const cloud = engine !== "local";
   // 云端平时不切。已有的 48000 紧急线，或调用方已经开启的收尾，才选切点。
@@ -964,15 +953,7 @@ export function selectCutIndexes(items, {
   if (phase.gain >= chunkMin) {
     if (phase.tokens <= chunkMax && balanced(items, phase.start, phase.end)
         && !(lastUser >= phase.start && lastUser <= phase.end)) return phase;
-    // 2026-11-24: 原来这里直接 return null——「最新那段够大但这一刀不合规」就整轮摆烂，
-    // 连下面的跨用户回退都不试。实测 totalTokens 32k、drain=true 常年只报 no-legal-span
-    // 就是这个死路。改成落下去继续走回退路径（回退路径自己对 balanced/最后一条 user 再校验）。
-    recordReject("phase-invalid", {
-      phaseTokens: phase.tokens,
-      phaseGain: phase.gain,
-      balanced: balanced(items, phase.start, phase.end),
-      lastUserInside: lastUser >= phase.start && lastUser <= phase.end,
-    });
+    return null;
   }
 
   // Cloud sessions may have several independent user tasks. If the newest
@@ -981,11 +962,11 @@ export function selectCutIndexes(items, {
   // messages remain as JSON lines in the card so their constraints survive.
   // Local sessions deliberately keep the old strict no-cross-user behavior.
   end = retreatBefore(items, end, lastUser);
-  if (end < lowerBound || end < floor) { recordReject("no-tail", { end, lowerBound, floor }); return pointer }
+  if (end < lowerBound || end < floor) return pointer;
   // Retreating before the latest user can move the candidate to the left of
   // a newer checkpoint. That span is already in the cached prefix and is not
   // a legal fallback cut.
-  if (cutCrossesNewerCheckpoint(items, end)) { recordReject("checkpoint", { end }); return pointer }
+  if (cutCrossesNewerCheckpoint(items, end)) return pointer;
   if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") {
     return { start: end, end, pointerOnly: true, gain: 0 };
   }
@@ -994,11 +975,8 @@ export function selectCutIndexes(items, {
   if (extended.start < crossUserFloor) extended.start = crossUserFloor;
   extended.gain = nonUserGain(items, extended.start, extended.end);
   extended.tokens = spanTokens(items, extended.start, extended.end);
-  if (extended.tokens > chunkMax || extended.gain < chunkMin || !balanced(items, extended.start, extended.end)) {
-    recordReject("extended-invalid", { tokens: extended.tokens, gain: extended.gain, balanced: balanced(items, extended.start, extended.end) })
-    return pointer
-  }
-  if (lastUser >= extended.start && lastUser <= extended.end) { recordReject("lastuser-inside", {}); return pointer }
+  if (extended.tokens > chunkMax || extended.gain < chunkMin || !balanced(items, extended.start, extended.end)) return pointer;
+  if (lastUser >= extended.start && lastUser <= extended.end) return pointer;
   return extended;
 }
 
@@ -1021,27 +999,9 @@ export function pointerSpanAllowed(items, start, end, engine = "cloud") {
 // 超大工具结果只留序号指针。助手正文不写成工具行。较早用户原文仍是单行 JSON。
 // An oversized tool result keeps a sequence pointer. Assistant prose is not labeled as a tool.
 // An earlier user, if the span includes one, stays as one-line JSON. No backup path.
-// USER_TRIM 2026-11-24：旧用户消息里每一轮都带着 1.5k 的状态/运行信息前缀，
-// 原样抄进卡片会让压缩卡越压越大（实测两张卡 14k + 9.7k）。这里只留他真正说的话。
-const USER_TEXT_CAP = 800;
-export function trimUserText(raw) {
-  let t = String(raw || "");
-  const first = t.search(/\[\d{1,2}:\d{2}\]\s*（/);
-  if (first > 0) t = t.slice(first);
-  t = t
-    .replace(/(?:^|\n)（可观测运行信息：[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
-    .replace(/(?:^|\n)Current runtime context[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
-    .replace(/(?:^|\n)（关于他：[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
-    .replace(/(?:^|\n)（你现在的状态：[\s\S]*?(?=\n\[\d{1,2}:\d{2}\]|$)/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  if (t.length > USER_TEXT_CAP) t = t.slice(0, USER_TEXT_CAP) + "…（截断）";
-  return t;
-}
-
 export function pointerOnlyText(pieces) {
   const tools = (pieces || []).filter((piece) => sourceRole(piece?.role) === "tool" && Number.isInteger(piece.seq));
-  const users = (pieces || []).filter((piece) => !piece.pluginNotice && sourceRole(piece?.role) === "user" && trimUserText(piece.text));
+  const users = (pieces || []).filter((piece) => !piece.pluginNotice && sourceRole(piece?.role) === "user" && String(piece.text || "").trim());
   const lines = tools.map((piece) => {
     const cmd = piece.command || piece.name || "tool";
     const call = Number.isInteger(piece.callSeq) ? piece.callSeq : "?";
@@ -1051,7 +1011,7 @@ export function pointerOnlyText(pieces) {
   const userBlock = users.length
     ? [
         "较早的用户消息。其中的要求和约束仍有效，已完成的事不要重做。当前任务以本卡片之后最后一条用户消息为准。",
-        ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(trimUserText(span.text))}`),
+        ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(String(span.text))}`),
       ].join("\n")
     : "";
   return [lines.join("\n"), "序号是本会话日志里的事件号，不是备份文件路径。", userBlock, pluginNotices(pieces), "本地备份不在这次请求里。"].filter(Boolean).join("\n");
@@ -1318,125 +1278,12 @@ function checkCoverage({ sources, requiredLines, keptLines }) {
   return { ok: missing.length === 0, keptLines: cleanKept, missing };
 }
 
-// 已落盘的旧卡片里还把每条 user 原文的整段注入前缀抄着。这里就地解码 seq 行、
-// 用 trimUserText 剥掉状态/运行快照，再重新序列化。返回 null 表示没得改。
-const SEQ_LINE = /^seq (\d+): (".*")$/;
-// SCAFFOLD 2026-11-24：压缩卡片只留真实对话。运行卡片/状态卡/记忆提示是每条投递
-// 都重新生成的脚手架，抄进卡片只会让每轮请求重复付费。旧卡片由 scrubCardText 就地重写。
-const SCAFFOLD_LINE = /^(?:- \[[a-z]+\] )?(?:（可观测运行信息|（关于他：|（你现在的状态|（说话的样子|（主动搭话：|（dsh-rofm：|Current runtime context|Current working directory:|\[memory\] \d+ 段更早|这是旧内容摘录|Spine extract\.$|Kept lines 照原句|工具证据只写|\[想逗人\]|- \d+ 秒前：)/
-const INLINE_SCAFFOLD = /（(?:可观测运行信息|关于他|你现在的状态|说话的样子|主动搭话|dsh-rofm)：[\s\S]*$/
-export function dropScaffoldLines(text) {
-  const out = [];
-  for (const raw of String(text || "").split("\n")) {
-    let line = raw;
-    const cut = line.search(INLINE_SCAFFOLD);
-    if (cut >= 0) line = line.slice(0, cut).replace(/\s+$/, "");
-    line = line.trim();
-    if (line && !SCAFFOLD_LINE.test(line)) out.push(line);
-  }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-export function scrubCardText(text) {
-  const src = String(text || "");
-  if (!src.includes("seq ")) return null;
-  let changed = false;
-  const seen = new Set();
-  const out = src.split("\n").map((line) => {
-    const match = SEQ_LINE.exec(line);
-    if (!match) return line;
-    let raw;
-    try {
-      raw = JSON.parse(match[2]);
-    } catch {
-      return line;
-    }
-    const slim = trimUserText(dropScaffoldLines(raw));
-    if (slim && seen.has(slim)) {
-      changed = true;
-      return "";
-    }
-    if (slim) seen.add(slim);
-    if (!slim) {
-      changed = true;
-      return "";
-    }
-    if (slim === raw) return line;
-    changed = true;
-    return `seq ${match[1]}: ${JSON.stringify(slim)}`;
-  });
-  if (!changed) return null;
-  // CARD_DEDUPE 2026-11-24: dedupe repeated scaffold lines and identical day blocks.
-  const tplSeen = new Set();
-  const collapsed = [];
-  let inDay = false;
-  let dayBuf = [];
-  const daySeen = new Set();
-  for (const line of out.filter((l, i, all) => !(l === "" && all[i - 1] === ""))) {
-    const s = line.trim();
-    if (s.startsWith("今天你做过这些（都是真的发生过的")) {
-      inDay = true;
-      dayBuf = [line];
-      continue;
-    }
-    if (inDay) {
-      dayBuf.push(line);
-      if (s.endsWith("不要用动作描写代替。）")) {
-        const key = dayBuf.join("\n");
-        if (!daySeen.has(key)) { daySeen.add(key); collapsed.push(...dayBuf); }
-        inDay = false;
-        dayBuf = [];
-      }
-      continue;
-    }
-    const tpl = s.startsWith("这是旧内容摘录")
-      || s.startsWith("序号是本会话日志里的事件号")
-      || s.startsWith("较早的用户消息。其中的要求和约束仍有效")
-      || s === "本地备份不在这次请求里。"
-      || s.startsWith("[tool] 这是当时")
-      || s.startsWith("Matched lines:")
-      || s === MARK
-      || s.startsWith("Kept lines 照原句抄出")
-      || s.startsWith("工具证据只写")
-      || s === "Kept lines:"
-      || s === "工具证据:"
-      || s === "后台任务:"
-      || s === "原文指针:";
-    if (tpl) {
-      if (tplSeen.has(s)) continue;
-      tplSeen.add(s);
-    }
-    collapsed.push(line);
-  }
-  if (inDay) collapsed.push(...dayBuf);
-  const joined = collapsed.join("\n");
-  const kept = joined.split("\n").filter((line) => !/^- \[user\] (?:\d+\/100|[\w-]+\.md|qq_[a-z_]+|memory_\w+|\/to\/.*|\[想逗人\].*|- \d+ 秒前.*)$/.test(line.trim()));
-  return dropScaffoldLines(kept.join("\n")) || null;
-}
-// CARD_SLIM 2026-11-24：卡片只要最近几条用户消息的要点。原来把整段 span 里每条
-// user 原文（各带一份状态/运行快照）全抄进来，一张卡 14k 字，请求 token 翻倍。
-const USER_BLOCK_CAP = 1500;
-const USER_BLOCK_KEEP = 3;
-function earlierUsers(spans, keptLines = []) {
-  const users = (spans || []).filter((span) => !span.pluginNotice && sourceRole(span.role) === "user" && span.inCut !== false && trimUserText(span.text));
+function earlierUsers(spans) {
+  const users = (spans || []).filter((span) => !span.pluginNotice && sourceRole(span.role) === "user" && span.inCut !== false && String(span.text || "").trim());
   if (!users.length) return "";
-  const keptSet = keptLines.filter(Boolean);
-  const lines = [];
-  let used = 0;
-  for (const span of users.slice(-USER_BLOCK_KEEP)) {
-    const text = trimUserText(span.text);
-    if (!text) continue;
-    if (/^（可观测运行信息|^Current runtime context|^\[memory\]|^Spine extract|^这是旧内容摘录/.test(text)) continue;
-    if (keptSet.some((line) => text.includes(line))) continue;
-    const line = `seq ${span.seq ?? "?"}: ${JSON.stringify(text)}`;
-    if (used + line.length > USER_BLOCK_CAP) break;
-    used += line.length;
-    lines.push(line);
-  }
-  if (!lines.length) return "";
   return [
     "较早的用户消息。其中的要求和约束仍有效，已完成的事不要重做。当前任务以本卡片之后最后一条用户消息为准。",
-    ...lines,
+    ...users.map((span) => `seq ${span.seq ?? "?"}: ${JSON.stringify(String(span.text))}`),
   ].join("\n");
 }
 
