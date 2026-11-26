@@ -528,7 +528,11 @@ test('relative dates resolve against the record time, ambiguous weekdays stay un
   assert.deepEqual(resolveRelativeDates('前天我把迷迭香搬到窗边', at('2026-05-27T21:00:00+08:00')).map((h) => h.ymd), ['2026-05-25'])
   assert.deepEqual(resolveRelativeDates('我姐生日是上周五', at('2026-06-10T09:00:00+08:00')).map((h) => h.ymd), ['2026-06-05'])
   assert.deepEqual(resolveRelativeDates('跟阿婆说定的下周二下午', at('2026-06-18T15:20:00+08:00')).map((h) => h.ymd), ['2026-06-23'])
-  assert.deepEqual(resolveRelativeDates('周五下班去半坡', at('2026-06-10T09:00:00+08:00')), [], '不带周次的周五有歧义，不换算')
+  // 裸周X 取最近一次：周六说「周一把合影送过去」是两天后的周一，周四说「周一先交稿」是三天前的周一。
+  assert.deepEqual(resolveRelativeDates('我妈让我周一把旧合影给琴姨送过去', at('2026-05-02T15:00:00+08:00')).map((h) => h.ymd), ['2026-05-04'])
+  assert.deepEqual(resolveRelativeDates('周一我先把广告短句交给陈编辑', at('2026-07-23T20:00:00+08:00')).map((h) => h.ymd), ['2026-07-20'])
+  assert.deepEqual(resolveRelativeDates('周一我先把广告短句交给陈编辑', at('2026-07-23T20:00:00+08:00'), undefined, { bare: false }), [], '关掉裸周X 后不换算')
+  assert.deepEqual(resolveRelativeDates('上周借了隔壁书店的折叠凳，答应周五打烊后送回去', at('2026-05-02T15:00:00+08:00')).map((h) => h.ymd), ['2026-05-01'])
   assert.equal(dateHints('跟阿婆说定的下周二下午', at('2026-06-18T15:20:00+08:00')), '（下周二=2026-06-23）')
   assert.equal(dateHints('抄手不要葱', at('2026-06-18T15:20:00+08:00')), '')
 })

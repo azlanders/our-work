@@ -36,9 +36,9 @@ function mondayStart(ts, tzOffsetMs) {
 
 /**
  * 从原文里找出可确定的相对日期，返回 `{term, ymd}`，按出现顺序、同词只留第一个。
- * 只认「昨天/前天/今天/明天/后天/大前天」与带周次的「上周三/这周五/下周二」。
+ * 认「昨天/前天/今天/明天/后天/大前天」、带周次的「上周三/这周五/下周二」，以及裸「周一/星期天」。
  */
-export function resolveRelativeDates(text, atMs, tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
+export function resolveRelativeDates(text, atMs, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, { bare = true } = {}) {
   const s = String(text || '')
   if (!s || !Number.isFinite(Number(atMs))) return []
   const out = []
@@ -58,12 +58,33 @@ export function resolveRelativeDates(text, atMs, tzOffsetMs = DEFAULT_TZ_OFFSET_
     const shift = m[1] === '上' ? -7 : m[1] === '下' ? 7 : 0
     out.push({ term, ymd: ymdOf(monday + (shift + WEEK_INDEX[m[2]]) * DAY, tzOffsetMs) })
   }
+  // 裸「周一」没有上/下/这修饰，只能按说话时刻取最近的那一次同星期日期。
+  // 两个真实对照都成立：周六说「周一把合影送去」= 两天后的周一；周四说「周一先交了稿」= 三天前的周一。
+  // 前后天数之和恒为 7，不可能等距，所以不需要平局规则。
+  if (bare) {
+    const bareRe = /(?<![上这本下])(?:周|星期)([一二三四五六日天])/g
+    const day = localDayStart(atMs, tzOffsetMs)
+    const cur = (new Date(day + tzOffsetMs).getUTCDay() + 6) % 7
+    const known = new Set(out.map((h) => h.ymd))
+    while ((m = bareRe.exec(s))) {
+      if (seen.has(m[0])) continue
+      seen.add(m[0])
+      const diff = WEEK_INDEX[m[1]] - cur
+      const fwd = diff >= 0 ? diff : diff + 7
+      const back = 7 - fwd
+      const ymd = ymdOf(day + (fwd <= back ? fwd : -back) * DAY, tzOffsetMs)
+      // 「今天周六」这种已经由今天/昨天算过的同一天不重复标注，免得注解占字数又没新信息。
+      if (known.has(ymd)) continue
+      known.add(ymd)
+      out.push({ term: m[0], ymd })
+    }
+  }
   return out
 }
 
 /** 注入用的一行短注解，最多两条，超过就不加（宁可少一条也不让回忆块被日期撑爆）。 */
-export function dateHints(text, atMs, tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
-  const hits = resolveRelativeDates(text, atMs, tzOffsetMs).slice(0, 2)
+export function dateHints(text, atMs, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, opts) {
+  const hits = resolveRelativeDates(text, atMs, tzOffsetMs, opts).slice(0, 2)
   if (!hits.length) return ''
   return `（${hits.map((h) => `${h.term}=${h.ymd}`).join('，')}）`
 }
