@@ -864,6 +864,19 @@ function walkOffTail(items, end, draining = false) {
   return end;
 }
 
+/**
+ * 定位可压缩区的右边界（index.js 的 selectNewestChunk 用）。
+ *
+ * 旧写法把「assistant 消息」和「短 user 消息」都当成未完成的尾巴一路往回退。
+ * 纯聊天会话里每轮都是 user→assistant，于是会一直退到开头，visible 变空、
+ * 永远选不出切点（生产上表现为 30 次 cut-skip/no-legal-span 对 1 次 cut）。
+ * 真正未完成的残尾只可能是末尾那一条 assistant——它的回复还没被下一问接上。
+ */
+export function retreatIncompleteTail(end, first, typeOf) {
+  if (!Number.isInteger(end) || end < first) return end
+  return typeOf?.(end) === "assistant" ? end - 1 : end
+}
+
 export function cutCrossesNewerCheckpoint(items, end) {
   if (!Array.isArray(items) || !Number.isInteger(end)) return false;
   for (let index = end + 1; index < items.length; index += 1) {

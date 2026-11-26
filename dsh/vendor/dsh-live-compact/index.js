@@ -21,7 +21,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { contextProperty, loadBase, loadCompaction, loadLlm, rootContext } from "./adapter.js";
 import { DEFAULTS, engineConfig, readSettings } from "./settings.js";
-import { RAIL_TOKENS, attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, isToolFailure, jobCutDecision, keepRoundsWithinBudget, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, roundHasLongRead, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
+import { RAIL_TOKENS, attachBackupHint, backgroundJobId, backupClaimOk, buildCard, collectJobs, cutLongReadRound, finishedToolRounds, indexToolCalls, isToolFailure, jobCutDecision, keepRoundsWithinBudget, keptToolRounds, messageText, planMessages, pointerOnlyText, pointerSpanAllowed, readResultLabel, reservedCutEnd, resolveEngine, resolveProviderBaseURL, retreatIncompleteTail, roundHasLongRead, selectCutIndexes, shadowSections, takeLocalCut, withoutFullBackupClaim } from "./plan.js";
 import { captureOwnedToolResult, contentHash, PRUNE_MARKER, rawExcerptText, rawName, readRawToolResult, restoreToolText, runPruneAfterCapture, verifiedRaw } from "./raw.js";
 import {
   ensureShadowDir,
@@ -942,13 +942,8 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
   for (let index = first; index <= end; index += 1) {
     if (isCheckpoint(session, nodes[index])) floorCard = index;
   }
-  while (end >= first) {
-    if (floorCard >= 0 && end <= floorCard) return null;
-    const event = session.eventAt(nodes[end]);
-    const shortTail = event?.type === "assistant/message" || (event?.type === "user/message" && priced[end].tokens < 400);
-    if (!shortTail) break;
-    end -= 1;
-  }
+  end = retreatIncompleteTail(end, first, (index) =>
+    session.eventAt(nodes[index])?.type === "assistant/message" ? "assistant" : "other");
   if (floorCard >= 0 && end <= floorCard) return null;
   while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
   const visible = [];

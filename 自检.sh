@@ -164,6 +164,11 @@ if command -v node >/dev/null 2>&1 && [ -f "$HERE/tests/t-cut-drain.mjs" ]; then
   else
     bad "压缩切点回归失败（跑 tests/t-cut-drain.mjs 看原因）"
   fi
+  if [ -f "$HERE/tests/t-cut-chat-session.mjs" ] && node "$HERE/tests/t-cut-chat-session.mjs" "$HERE/dsh/vendor/dsh-live-compact/plan.js" >/dev/null 2>&1; then
+    ok "纯聊天会话的尾巴回退不再退到开头"
+  else
+    bad "纯聊天会话切点回归失败（跑 tests/t-cut-chat-session.mjs 看原因）"
+  fi
 else
   bad "缺少 node 或 tests/t-cut-drain.mjs，无法执行压缩切点回归"
 fi

@@ -2,7 +2,7 @@
 
 一段对话做久了，读过的日志、跑过的命令和工具输出会越积越多。Live Compact 会在每轮结束时检查，能安全收短的长输出就整理一下。这一步在本机做，无需再请求模型。只替换选中的一段，切点前面的内容保持原样。整理前会备份原文，备份失败就保留原来的内容。
 
-版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前稳定版 [v1.1.14](https://github.com/Tranquillitatis-Lab/dsh-live-compact/releases/tag/v1.1.14)。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 测评实证
 
@@ -16,7 +16,7 @@
 
 ![OpenCode Aider / Web-Bench 对照](docs/benchmarks-opencode-2026-11-09.png)
 
-![1.1.7 GLM-5.3 Flash Web-Bench React 20 对照](docs/benchmark-1.1.7-webbench-react20.png)
+![1.1.12 GLM-5.3 Flash：DSH 原版、DSH Billion 与 Live Compact 三方对照](docs/benchmark-dsh-three-way-glm53-1.1.12-2026-11-17.png)
 
 
 ## 云端和本地怎么用
@@ -26,18 +26,20 @@
 
 默认到 2 万 token，插件才开始检查有没有合适的内容可以压缩。实际会不会压缩，还要看这轮读进了什么、下一轮可能有多长。上下文接近窗口上限时，DSH 仍可调用模型做一次大摘要。
 
+已执行工具的任务触及单步输出上限时，1.1.13 会在同一会话中续接，沿用原任务、已有改动和原输出上限。若首次续接仍在纯思考阶段触顶，插件会最后续接一次，提示模型从一个小的工具调用开始。自动续接会避让待处理输入、已取消的任务和含未执行工具调用的响应。
+
 平常用默认设置就够了。`SPINE_THUNDER` 是实验性的模型摘要模式，默认关闭。需要试用时才设为 `1`。本机或内网模型建议保持关闭。
 
 headless：
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.12
+dsh plugin --profile headless add dsh-live-compact@1.1.14
 ```
 
 网页端：
 
 ```sh
-dsh plugin --profile web add dsh-live-compact@1.1.12
+dsh plugin --profile web add dsh-live-compact@1.1.14
 ```
 
 想先装到本机看版本：
@@ -118,7 +120,7 @@ Issue #19 里下一轮输入回到 21 万到 24 万、前缀被打掉的那一�
 - 预设不再硬等 gate。gate 加载失败时，网页预设不会卡在等待。换包前先试加载，失败就保留原版名字。
 - 换上之后带上 0.8、65536、8192。预设里已有的配置优先。
 - 预设 id 写在外层或内层都能换。standard、ptc、cordis、minimal 在 0.2.1-rc.5 上都会换。TUI 仍不碰。
-- 外壳先加载。引擎装不上时，这一会话不挂起。能改用原版就用原版，并记下「本会话未接管」。原版也装不上时，`/compact` 马上返回错误。
+- 原版压缩已启用时，Live Compact 初始化完成后才接管。激活失败会保留原版，并记下「本会话未接管」。如果旧的 profile 用户补丁另外关闭了 `compaction-basic`，可在宿主的插件管理中重新启用它。两种引擎都装不上时，外壳会报告失败原因。
 - headless 的宿主包自己关掉了原版压缩。插件不能把那一行重新打开。网页预设不注入 gate，漏换这一轮就继续用原版。
 
 ## Windows 备份权限
@@ -127,7 +129,7 @@ Windows 会重新设置备份访问权限，失败时停止写备份并保留原
 
 双用户实测（Actions run `42367713007`，Windows 11 Enterprise ARM / Server 2022 x64）确认：`/inheritance:r /grant:r` 会留下其他主体的显式 ACE，第二个普通用户仍能读取备份。Windows 备份完整替换 DACL。慢存储、超大历史和共享目录压力仍属于后续观察范围。
 
-权限写入改为固定的 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`（Windows PowerShell 5.1 / .NET Framework），使用 `-NoProfile -NonInteractive -EncodedCommand`。脚本固定内嵌在已打包的 `shadow.js`，路径、SID、文件类型通过子进程环境传递，不拼进脚本。当前用户 SID 仍由固定 System32 `whoami.exe` 在各权限执行上下文获取并缓存，worker 重建后重新获取，脚本再对照自身 Windows 身份。新建受保护的 DACL，只允许当前用户、SYSTEM、Administrators 完全控制；目录 ACE 带 OI/CI，直接修正的文件 ACE 不带继承标志。只修改 DACL，不提权，不改 owner、group 或 SACL，不使用临时宽松 ACL。写后读取实际 DACL，核验保护位、完整 ACE 数量、SID、Allow、权限及继承标志，收到确认才缓存。工具失败、超时、SID 非法或读回不符都会熔断本进程后续备份，不回退到 chmod。
+权限写入改为固定的 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`（Windows PowerShell 5.1 / .NET Framework），使用 `-NoProfile -NonInteractive -Command`。脚本固定内嵌在已打包的 `shadow.js`，路径、SID、文件类型通过子进程环境传递，不拼进脚本。当前用户 SID 仍由固定 System32 `whoami.exe` 在各权限执行上下文获取并缓存，worker 重建后重新获取，脚本再对照自身 Windows 身份。新建受保护的 DACL，只允许当前用户、SYSTEM、Administrators 完全控制；目录 ACE 带 OI/CI，直接修正的文件 ACE 不带继承标志。只修改 DACL，不提权，不改 owner、group 或 SACL，不使用临时宽松 ACL。写后读取实际 DACL，核验保护位、完整 ACE 数量、SID、Allow、权限及继承标志，收到确认才缓存。工具失败、超时、SID 非法或读回不符都会熔断本进程后续备份，不回退到 chmod。
 
 目录缓存核对规范路径、设备/文件编号及创建时间；替换目录或改指向的已知别名会拒绝后续备份。经确认目录内以 `wx` 新建的空文件，核对已打开句柄与路径指向同一文件后，使用继承的 allowlist，不逐文件启动子进程，写入正文前完成检查。既有文件不能只凭父目录缓存获得信任：仅在本进程已确认同一文件身份时复用缓存，否则对被请求的文件单独替换 DACL。拒绝文件符号链接、非普通文件及多硬链接文件。不扫描或批量修复历史备份。重启恢复只读校验已有 raw/meta，不逐个收紧它们的权限；cursor 读取仍执行原有单文件 ACL 校验。raw 真正用于修剪或切片前，再重新授权目标文件，并与首次确认的字节数和 SHA256 比较。重新授权不能把已变化的内容当成原始备份。未触及的旧文件（包括直接外部读取或 shadow-search 读取的旧文件）不保证已修复，也无法撤回此前泄露的数据。不要把 shadow 指向混有其他文件的目录。
 
@@ -189,8 +191,8 @@ Windows 会重新设置备份访问权限，失败时停止写备份并保留原
 从 npm 装。headless 和网页是两个 profile，要各装一次。桌面端是另一个 profile，普通 `dsh plugin --profile desktop` 会被拒绝。
 
 ```sh
-dsh plugin --profile headless add dsh-live-compact@1.1.12
-dsh plugin --profile web add dsh-live-compact@1.1.12
+dsh plugin --profile headless add dsh-live-compact@1.1.14
+dsh plugin --profile web add dsh-live-compact@1.1.14
 ```
 
 想先装到本机看版本：
@@ -200,7 +202,7 @@ npm install -g dsh-live-compact
 dsh-live-compact --version
 ```
 
-上不了 npm 时的镜像安装命令：
+以下是 1.1.12 的历史镜像。
 
 ```sh
 dsh plugin --profile headless add https://download.merkyorlynn.com/downloads/plugins/dsh-live-compact-1.1.12.tgz
@@ -215,7 +217,11 @@ DSH-TUI 先不要装。本包已补预设压缩隔离组的接管；TUI 仍需�
 
 被切掉的原文会写到 `~/.dsh/compaction-spine/shadow`。Unix 权限为目录 0700 / 文件 0600；Windows 新建/修正后的备份允许当前用户、SYSTEM、Administrators，历史文件及缓存限制见上面的 ACL 说明。上限 256MB。快满时删最老的备份。卡片里的序号是会话日志的事件号。要在当前会话的备份里找一行，用 `import { searchShadow } from "dsh-live-compact/shadow-search"`。插件自己不会去搜。
 
-`dsh-live-compact stats` 的 `saved` 是切完当下少掉的 token，`rewrite` 是同一次收尾实际要重写的尾巴，只记一次。同一步连切不会按刀数把尾巴乘上去。这两个数口径不同，比值不是盈亏。桌面端没有终端，`rg "spine cut"` 只在终端输出里找得到。逐刀明细在 shadow 目录的 `spine-cuts.jsonl`。
+`spine-maintenance.jsonl` 在已有 shadow 目录记录轮末维护状态。同一个 `operation` 对应一次尝试，`deferred` 表示补抓未结束，`completed` 的 `cuts` 是该次提交的小切数。宿主拒绝模型压力预算时，配置原因会写入 `spine-decisions.jsonl`。
+
+`dsh-live-compact stats` 的 `saved` 是切完当下少掉的 token，`rewrite` 是同一次收尾实际要重写的尾巴，只记一次。同一步连切不会按刀数把尾巴乘上去。这两个数口径不同，比值不是盈亏。桌面端没有终端，`rg "spine cut"` 只在终端输出里找得到。每个 shadow 根的 `spine-cuts.jsonl` 最多保留 1 MiB 最近的完整逐刀明细，累计计数记录在 `spine-stats.json`。
+
+POSIX 备份目录所在的文件系统须实际强制 0700/0600 权限。插件会读回目录及文件的权限，并在写正文前拒绝权限不符的备份。
 
 改上限：
 

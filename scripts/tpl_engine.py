@@ -145,6 +145,10 @@ def is_safe_reverse_pair(key: str, val: str) -> bool:
     return True
 
 
+# vendor 里的共享包名在所有 bot 上都叫这个名字，不能跟着实例身份一起被反向替换。
+FIXED_VENDOR_LITERALS = ("dsh-fish-tone", "fishtalk")
+
+
 def deinst_text(text: str, vals: dict[str, str], extra_subs: dict[str, str] | None = None) -> str:
     """Safely convert instance-specific values back into template tokens."""
     mapping: dict[str, str] = {}
@@ -154,7 +158,17 @@ def deinst_text(text: str, vals: dict[str, str], extra_subs: dict[str, str] | No
             mapping.setdefault(v, f"{{{{{k}}}}}")
     if extra_subs:
         mapping.update(extra_subs)
-    return multi_replace(text, mapping)
+    sentinels = {}
+    masked = text
+    for i, lit in enumerate(FIXED_VENDOR_LITERALS):
+        token = f"\x00FIXED{i}\x00"
+        if lit in masked:
+            sentinels[token] = lit
+            masked = masked.replace(lit, token)
+    out = multi_replace(masked, mapping)
+    for token, lit in sentinels.items():
+        out = out.replace(token, lit)
+    return out
 
 
 def atomic_write_text(path: Path, text: str) -> None:
