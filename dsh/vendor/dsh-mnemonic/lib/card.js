@@ -110,7 +110,9 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
 export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS } = {}) {
   if (!hits?.length) return ''
   const head = Number.isFinite(now) ? `【记忆·相关的存档原文｜现在 ${clockText(now, tzOffsetMs)}】` : '【记忆·相关的存档原文】'
-  const tail = '（用法：只引用上面逐字出现过的事实，只答问到的点，不补未问细节、不给名词加原文没有的定性，别补这里没有的日期、地点、现状或后续打算，也别把没被问到的其它细节（刻度、时间、外观、别处摆设）带进答案；过去状态、计划、猜测或假设别直接当成现在仍是这样或已发生。同一件事出现两种矛盾说法就两个都列、并说明记录不足无法确定。这里确实没有就说记不清，无关就忽略。括号里的「昨天=2026-05-02」是那句原文相对日期的绝对换算，问哪天就用它，别说没写具体日期。）'
+  // 2026-11-26：120 错题 A/B 显示，模型最常犯的不是「不知道」而是「明明有却说记不清」和
+  // 「拿旧状态当现在」。尾注补两条：措辞不同算同一条；进度/现状/欠账以最晚一条为准。
+  const tail = '（用法：摘录里问到的每个点都逐条找一遍；找到就照原文说，措辞不同也算同一条（「做包装设计」=「做设计这一行」），别用「没提过」否认。问进度、现状、还欠多少以最晚那条为准；过去状态、计划、猜测、假设别当成现在或已发生。只答问到的点，不补未问细节、不给名词加定性、不补这里没有的日期地点或后续，别带进没被问到的其它细节。两种矛盾说法都列并说明无法确定。确实没有就说记不清，无关就忽略。括号里「昨天=2026-05-02」是绝对日期换算，问哪天直接用。）'
   const reserve = head.length + tail.length + 4
   const bodyBudget = Math.max(0, maxChars - reserve)
   if (bodyBudget < 20) return ''

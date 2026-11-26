@@ -66,7 +66,9 @@ export function buildIndex(records) {
  * 只并同 scope、且时间差在 gapMs 内的下一条；最多 maxNeighbors 张，注入预算由渲染层截断，
  * 所以并进来的邻轮挤掉的是最末那张弱相关卡，不是白加 token。
  */
-export function groupAdjacent(hits, records, { gapMs = 10 * 60 * 1000, maxNeighbors = 2 } = {}) {
+// 2026-11-26：同一件事的补充说明常常隔天甚至隔两天才来（「师傅来量尺寸」→「师傅发来报价了」）。
+// 10 分钟窗口只能并到「接着说」的下一句；48 小时 + 仍限 2 条，在 714 题上覆盖率 +8。
+export function groupAdjacent(hits, records, { gapMs = 48 * 60 * 60 * 1000, maxNeighbors = 2 } = {}) {
   if (!hits.length || !records.length) return hits
   const pos = new Map()
   for (let i = 0; i < records.length; i += 1) pos.set(records[i].id, i)

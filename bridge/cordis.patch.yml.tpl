@@ -76,12 +76,13 @@
     chunkMin: 1000
 
 # 2026-11-24：回忆块对齐基准测试配置（4 条 / 每条 200 字 / 整块 900 字）。
-# 生产默认 3/120/600 偏紧，时间题和多方线索题容易缺上下文。
+# 2026-11-26 全卷 A/B：1200/200/5 比 900/200/4 多覆盖时间题/多要点题，纠错题不掉；
+# 再放大到 1500/200/6 会把旧说法一起塞进去，纠错题 44→36，所以停在这里。
 - id: dsh-mnemonic
   config:
-    injectChars: 900
+    injectChars: 1200
     itemChars: 200
-    limit: 4
+    limit: 5
 
 # 2026-11-25：剪工具结果的活交给官方 pruner。
 # dsh-context-trim 的 tools/post-execute 参数用错了（waterfall 签名是 exec,result,next，

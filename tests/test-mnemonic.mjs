@@ -12,19 +12,25 @@ import { docExpand, expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
 import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
 
-test('groupAdjacent 只并同会话的下一轮，跨会话/超时差都不并', () => {
+test('groupAdjacent 只并同会话的下一轮，隔天算补充、超过 48 小时不并', () => {
   const base = 1_700_000_000_000
   const records = [
     { id: 'a', text: '问冰袋咋存', scope: 'p1', createdAt: base },
     { id: 'b', text: '多备两个轮着冻', scope: 'p1', createdAt: base + 60_000 },
     { id: 'c', text: '别的会话', scope: 'p2', createdAt: base + 120_000 },
-    { id: 'd', text: '隔了一小时', scope: 'p1', createdAt: base + 3_600_000 },
+    { id: 'd', text: '隔天补充', scope: 'p1', createdAt: base + 3_600_000 },
+    { id: 'e', text: '隔了两天多', scope: 'p1', createdAt: base + 52 * 3_600_000 },
   ]
   assert.deepEqual(groupAdjacent([{ rec: records[0], score: 3 }], records).map((h) => h.rec.id), ['a', 'b'])
   // 下一条跨了会话 id：不并
   assert.deepEqual(groupAdjacent([{ rec: { ...records[0], id: 'a2' } }, { rec: records[1], score: 1 }], [{ ...records[0], id: 'a2' }, records[1], records[2]]).map((h) => h.rec.id), ['a2', 'b'])
-  // 下一条隔了一小时：不并
+  // 跨会话不并
   assert.deepEqual(groupAdjacent([{ rec: records[2], score: 3 }], records).map((h) => h.rec.id), ['c'])
+  // 同一会话隔天（1 小时）算补充说明：并
+  const a3 = { ...records[0], id: 'a3' }
+  assert.deepEqual(groupAdjacent([{ rec: a3, score: 3 }], [a3, records[3]]).map((h) => h.rec.id), ['a3', 'd'])
+  // 同一会话超过 48 小时：不并
+  assert.deepEqual(groupAdjacent([{ rec: records[3], score: 3 }], [records[3], records[4]]).map((h) => h.rec.id), ['d'])
   // 上限 2：三张命中卡至多并进两张邻轮
   const many = [
     { id: 'm1', text: '1', scope: 's', createdAt: base },
@@ -133,7 +139,7 @@ test('renderRecallBlock preserves full date, head/tail discipline, and avoids aw
   ]
   const block = renderRecallBlock(hits, { maxChars: 340, itemChars: 180, now })
   assert.ok(block.includes('2026-06-15'), 'must include full YYYY-MM-DD date')
-  assert.ok(block.includes('别补这里没有的日期'), 'tail discipline must never be truncated')
+  assert.ok(block.includes('确实没有就说记不清'), 'tail discipline must never be truncated')
   assert.ok(!block.includes('第三条补充信息'), 'overflow items should stop cleanly once budget fills')
 })
 
@@ -162,6 +168,7 @@ test('Store merges duplicate metadata and writes atomically without fixed .tmp f
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
 
 test('apply integration deduplicates tool-loop pre-steps, wires diversify limit, and ignores runtime-context', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mnemonic-plugin-'))
