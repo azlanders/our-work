@@ -429,7 +429,10 @@ test('self-echo prevention: current turn archived message is excluded from same-
       const msgs = [{ id: 'u-echo-1', role: 'user', content: '你记得我去半坡酒馆喝桂花乌龙的事吗？' }]
       const res = await preStep({}, async () => ({ kind: 'enter', messages: msgs }))
       assert.equal(res.messages.length, 2, 'should inject recall block')
-      const block = res.messages[1].content[0].text
+      // 回忆块插在提问之前：模型先读记忆、再读问题。
+      const recallIndex = res.messages.findIndex((m) => m.source?.kind === 'plugin:dsh-mnemonic')
+      assert.equal(recallIndex, 0, '回忆块应在提问之前')
+      const block = res.messages[recallIndex].content[0].text
       assert.match(block, /老板娘送了小点心/, 'should recall historical memory')
       assert.doesNotMatch(block, /你记得我去半坡酒馆喝桂花乌龙的事吗/, 'must NOT echo current turn user question')
     } finally {

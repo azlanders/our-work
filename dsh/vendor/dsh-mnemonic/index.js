@@ -421,7 +421,7 @@ export function apply(ctx, config = {}) {
       if (messages.slice(lastUserIndex + 1).some((m) => roleOf(m) === 'assistant')) return decision
       const query = messageText(messages[lastUserIndex])
       const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex, scope) : null
-      if (isMnemonicRecallMessage(messages[lastUserIndex + 1])) return decision
+      if (isMnemonicRecallMessage(messages[lastUserIndex - 1])) return decision
       const qTrim = query.trim()
       if (qTrim.length < 3 || isLowValueOrInjection(qTrim, { minLen: 3 })) return decision
       const ts = Date.now()
@@ -449,7 +449,10 @@ export function apply(ctx, config = {}) {
       if (!block) return decision
       const message = await memoryMessage(block)
       if (!message) return decision
-      messages.splice(lastUserIndex + 1, 0, message)
+      // 2026-11-27：插在提问**之后**时模型要先读完问题再看记忆，最后一屏是记忆而不是问题。
+      // 120 题配对实测（块尾纪律、同预算、同模型）：提问后 94/118，提问前 99/119（system 角色 101/119），
+      // 位置本身值 4-5pp。插在提问前等于「先看记忆再读问题」，和常识的 RAG 顺序一致。
+      messages.splice(lastUserIndex, 0, message)
       if (lastInjectByScope.size >= 256 && !lastInjectByScope.has(scopeKey)) {
         const oldest = lastInjectByScope.keys().next().value
         if (oldest !== undefined) lastInjectByScope.delete(oldest)
