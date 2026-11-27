@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
-import { RECALL_RULES, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
+import { RECALL_RULES, RECALL_TAIL, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
 import { docExpand, expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
@@ -153,6 +153,17 @@ test('a legacy tail arm still renders and stays inside budget', () => {
   assert.ok(withTail.length <= 400, `tail arm must respect maxChars: ${withTail.length}`)
 })
 
+test('default tail is the short one and can be switched off', () => {
+  const now = Date.parse('2026-06-20T10:00:00+08:00')
+  const hits = [{ rec: { id: 'x', text: '约好下周二（2026-06-23）下午三点去复查牙齿。', eventAt: now - 86400000 } }]
+  const dflt = renderRecallBlock(hits, { maxChars: 400, itemChars: 200, now })
+  assert.ok(dflt.endsWith(RECALL_TAIL), '默认带短尾注')
+  assert.ok(!dflt.includes('【记忆纪律】'), '完整纪律不重复进块')
+  const bare = renderRecallBlock(hits, { maxChars: 400, itemChars: 200, now, tail: '' })
+  assert.ok(!bare.includes('记不清'), bare)
+  assert.ok(bare.length < dflt.length)
+})
+
 test('recall block anchors relative dates at spokenAt, not eventAt', () => {
   const now = Date.parse('2026-11-25T12:00:00+08:00')
   const eventAt = Date.parse('2026-11-23T10:00:00+08:00')
@@ -179,7 +190,8 @@ test('recall block reports a small number of dropped hits', () => {
     },
   }))
   // 块内不再留尾注空间，同样 459 字能多放两条；收到 250 才回到「漏掉 3 条以上就静默」的判据。
-  const maxChars = 200
+  // 短尾注（约 70 字）会占掉一条正文的额度，260 才是「3 条 + 另有 2 条」的档位。
+  const maxChars = 260
   const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
   assert.ok(block.includes('另有 2 条相关记录未显示'), block)
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
@@ -255,10 +267,10 @@ test('recall block trades the last line for a notice only when it fits', () => {
     rec: { id: `pop-${i}`, text: `第${i + 1}条：${'丙'.repeat(40)}`, eventAt: now - i * 86400000 },
   }))
   // 纪律搬到常驻段后，块内没有尾注占位，同一预算能多装两条；这里把预算收到只放得下 1 条。
-  const block = renderRecallBlock(hits, { maxChars: 140, itemChars: 80, now })
+  const block = renderRecallBlock(hits, { maxChars: 180, itemChars: 80, now })
   assert.equal((block.match(/^\d+\. /gm) || []).length, 1, block)
   assert.ok(block.includes('另有 2 条相关记录未显示'), block)
-  assert.ok(block.length <= 140, `${block.length} > 140`)
+  assert.ok(block.length <= 180, `${block.length} > 180`)
 })
 
 test('Store does not backfill spokenAt on legacy records', () => {

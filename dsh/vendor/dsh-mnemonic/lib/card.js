@@ -134,11 +134,17 @@ export const RECALL_RULES = `【记忆纪律】读到记忆摘录时按这些规
 6. 摘录确实没有相关内容的，直说记不清，不猜不补。`
 
 /**
+ * 短尾注：回忆块插在用户提问之后，模型最后读到的是块本身，所以末位放一句最短的约束。
+ * 完整纪律在 system 常驻段（RECALL_RULES），这里只做位置提示，控制在 80 字内。
+ */
+export const RECALL_TAIL = '（只答问到的点，一句结论；不补摘录里没有的数字、日期、人名，自己算出来的日期也不写；没有就说记不清。）'
+
+/**
  * 回忆块：只放过去存档原文。
- * `tail` 保留给实验臂与旧版对比；生产留空，纪律走 RECALL_RULES 常驻段。
+ * `tail` 默认是短尾注，传 '' 可完全留空（实验臂用）。
  * 先按整条预算装入，尽量不在句中腰斩。
  */
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = '' } = {}) {
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL } = {}) {
   if (!hits?.length) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
   // 重复行占满预算却不多给一条证据，先按正文去重，预算留给真正的新内容。
