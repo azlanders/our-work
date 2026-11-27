@@ -281,7 +281,7 @@ export function apply(ctx, config = {}) {
     archivedMsgIds.add(msgKey)
 
     const msgTs = parseEventTimestamp(asstMsg?.createdAt ?? asstMsg?.timestamp ?? userMsg?.createdAt ?? userMsg?.timestamp) || Date.now()
-    const rec = store.add({ text, keywords: attributeKeywords(text), tags: [], importance: 0.35, eventAt: msgTs, source: { kind: 'auto' }, scope })
+    const rec = store.add({ text, keywords: attributeKeywords(text), tags: [], importance: 0.35, eventAt: msgTs, spokenAt: msgTs, source: { kind: 'auto' }, scope })
     return rec?.id || null
   }
 
@@ -329,6 +329,7 @@ export function apply(ctx, config = {}) {
             tags: args?.tags || [],
             importance: args?.importance ?? 0.5,
             eventAt: args?.eventAt ?? null,
+            spokenAt: Date.now(),
             source: { kind: 'tool' },
             scope: sessionScope(exec?.agent),
           })

@@ -65,11 +65,12 @@ export class Store {
    * 同一段正文只存一次（按 scope + 正文精确匹配 + 防哈希碰撞）；
    * 返回匹配记录（已合并元数据）或新插入记录。
    */
-  add({ text, keywords = [], tags = [], importance = 0.5, eventAt = null, source = null, scope = '' }) {
+  add({ text, keywords = [], tags = [], importance = 0.5, eventAt = null, spokenAt = null, source = null, scope = '' }) {
     const clean = sanitizeMemoryText(text)
     if (!clean) return null
     const nextImp = Math.min(1, Math.max(0.05, Number(importance) || 0.5))
     const parsedEventAt = parseEventTimestamp(eventAt)
+    const parsedSpokenAt = parseEventTimestamp(spokenAt)
 
     // 先按 scope + 正文精确查找，彻底杜绝跨会话吞记录与哈希碰撞误合并
     const existing = this.byText.get(textKey(clean, scope))
@@ -97,6 +98,10 @@ export class Store {
       }
       if (parsedEventAt && !existing.eventAt) {
         existing.eventAt = parsedEventAt
+        metaChanged = true
+      }
+      if (parsedSpokenAt && !existing.spokenAt) {
+        existing.spokenAt = parsedSpokenAt
         metaChanged = true
       }
       if (source?.kind === 'tool' && existing.source?.kind !== 'tool') {
@@ -129,6 +134,7 @@ export class Store {
       importance: nextImp,
       createdAt: nowTs,
       eventAt: parsedEventAt,
+      ...(parsedSpokenAt ? { spokenAt: parsedSpokenAt } : {}),
       uses: 1,
       lastUsed: nowTs,
       source: source || null,

@@ -143,6 +143,52 @@ test('renderRecallBlock preserves full date, head/tail discipline, and avoids aw
   assert.ok(!block.includes('第三条补充信息'), 'overflow items should stop cleanly once budget fills')
 })
 
+test('recall block anchors relative dates at spokenAt, not eventAt', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const eventAt = Date.parse('2026-11-23T10:00:00+08:00')
+  const spokenAt = Date.parse('2026-11-24T10:00:00+08:00')
+  const block = renderRecallBlock([
+    { rec: { id: 'spoken', text: '昨天把旧照片送到江北。', eventAt, spokenAt } },
+  ], { maxChars: 900, itemChars: 200, now })
+  assert.ok(block.includes('1. (2026-11-23)'), 'line label still uses eventAt')
+  assert.ok(block.includes('昨天(2026-11-23)'), block)
+
+  const legacy = renderRecallBlock([
+    { rec: { id: 'legacy', text: '昨天把旧照片送到江北。', eventAt } },
+  ], { maxChars: 900, itemChars: 200, now })
+  assert.ok(legacy.includes('昨天(2026-11-22)'), legacy)
+})
+
+test('recall block reports a small number of dropped hits', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const hits = Array.from({ length: 5 }, (_, index) => ({
+    rec: {
+      id: `budget-${index}`,
+      text: `第${index + 1}条相关记录：今天聊到海边和旧照片。`,
+      eventAt: now - index * 86400000,
+    },
+  }))
+  const maxChars = 459
+  const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
+  assert.ok(block.includes('另有 2 条相关记录未显示'), block)
+  assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
+})
+
+test('recall block stays quiet when many hits are dropped', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const hits = Array.from({ length: 10 }, (_, index) => ({
+    rec: {
+      id: `budget-${index}`,
+      text: `第${index + 1}条相关记录：今天聊到海边和旧照片。`,
+      eventAt: now - index * 86400000,
+    },
+  }))
+  const maxChars = 459
+  const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
+  assert.ok(!block.includes('另有'), block)
+  assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
+})
+
 test('Store merges duplicate metadata and writes atomically without fixed .tmp file', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mnemonic-store-'))
   try {
@@ -544,9 +590,10 @@ test('recall block carries resolved dates for relative-date evidence and keeps i
     { rec: { id: 'b', text: '抄手不要葱。', createdAt: Date.parse('2026-05-28T09:00:00+08:00'), eventAt: Date.parse('2026-05-28T09:00:00+08:00') } },
   ]
   const block = renderRecallBlock(hits, { maxChars: 900, itemChars: 200, now: at })
-  assert.ok(block.includes('前天=2026-05-25'), block)
+  // 就地标注：换算日期紧贴「前天」这个词，比行尾括号更不容易被模型跳过。
+  assert.ok(block.includes('前天(2026-05-25)'), block)
   const plain = block.split('\n').find((l) => l.includes('抄手不要葱')) || ''
-  assert.ok(plain && !plain.includes('='), plain)
+  assert.ok(plain && plain.endsWith('抄手不要葱。'), plain)
   assert.ok(block.length <= 900)
 })
 
