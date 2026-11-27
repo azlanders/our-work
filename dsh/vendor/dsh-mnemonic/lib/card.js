@@ -145,7 +145,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   const list = []
   const seenText = new Set()
   for (const h of hits) {
-    const key = String(h?.rec?.text ?? '').replace(/\s+/g, '').slice(0, 120)
+    const key = String(h?.rec?.text ?? '').replace(/\s+/g, '')
     if (key && seenText.has(key)) continue
     if (key) seenText.add(key)
     list.push(h)
