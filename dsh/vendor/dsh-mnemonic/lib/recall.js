@@ -1,5 +1,6 @@
 // 检索：倒排索引（支持 O(1) 增量写入）+ BM25 + 关键词/标签 + 时间窗加权 + 重要度/新鲜度。
 import { docExpand, expandLocal, extractTimeWindow, queryGrams } from './text.js'
+import { NEG_REMENTION_MS } from './tone.js'
 
 const K1 = 1.2
 const B = 0.75
@@ -66,9 +67,10 @@ export function buildIndex(records) {
  * 只并同 scope、且时间差在 gapMs 内的下一条；最多 maxNeighbors 张，注入预算由渲染层截断，
  * 所以并进来的邻轮挤掉的是最末那张弱相关卡，不是白加 token。
  */
-// 2026-11-26：同一件事的补充说明常常隔天甚至隔两天才来（「师傅来量尺寸」→「师傅发来报价了」）。
-// 10 分钟窗口只能并到「接着说」的下一句；48 小时 + 仍限 2 条，在 714 题上覆盖率 +8。
-export function groupAdjacent(hits, records, { gapMs = 48 * 60 * 60 * 1000, maxNeighbors = 2 } = {}) {
+// 2026-11-26：基准库里同一件事的补充常常隔天才来，48 小时窗口 + 仍限 2 条，覆盖率 +8。
+// 但那是做题口径：真实聊天里跨天硬扩会把不相干的话题粘上来，所以默认只并「接着说」的下一句（30 分钟）。
+// 需要跑基准时由调用方显式传 gapMs，别把环境差异写死在默认值里。
+export function groupAdjacent(hits, records, { gapMs = 30 * 60 * 1000, maxNeighbors = 2, skipIds = null } = {}) {
   if (!hits.length || !records.length) return hits
   const pos = new Map()
   for (let i = 0; i < records.length; i += 1) pos.set(records[i].id, i)
@@ -81,10 +83,15 @@ export function groupAdjacent(hits, records, { gapMs = 48 * 60 * 60 * 1000, maxN
     const i = pos.get(h.rec.id)
     if (i === undefined) continue
     const next = records[i + 1]
-    if (!next || taken.has(next.id)) continue
+    if (!next || taken.has(next.id) || skipIds?.has(next.id)) continue
     if ((next.scope || '') !== (h.rec.scope || '')) continue
-    if (!next.createdAt || !h.rec.createdAt) continue
-    if (Math.abs(next.createdAt - h.rec.createdAt) > gapMs) continue
+    // 邻轮扩展也要看作废标记，否则被取代的旧值能借「下一条」的身份绕回块里。
+    if (next.supersededBy) continue
+    // 用「这句话什么时候说的」算间隔：导入/回填的记录 createdAt 是写库时间，会把几年前的事排成相邻。
+    const nextAt = next.spokenAt || next.eventAt || next.createdAt
+    const curAt = h.rec.spokenAt || h.rec.eventAt || h.rec.createdAt
+    if (!nextAt || !curAt) continue
+    if (Math.abs(nextAt - curAt) > gapMs) continue
     taken.add(next.id)
     added += 1
     out.push({ rec: next, score: h.score, hits: 0, why: ['adjacent'] })
@@ -114,6 +121,11 @@ export function search(
     excludeIds = null,
     scope = '',
     now = Date.now(),
+    // 问「我以前叫什么」时才把被取代的旧值放回来：平时旧值不该和现值抢位置，但历史不能彻底消失。
+    allowSuperseded = false,
+    // 同一件事刚讲过就隔一天再提；对方明确追问（记得/上次/那天）时不受这条限制。
+    repeatWindowMs = 24 * 60 * 60 * 1000,
+    allowRepeat = false,
   } = {},
 ) {
   const baseQ = queryGrams(query)
@@ -181,6 +193,17 @@ export function search(
   for (const idx of candidates) {
     const rec = records[idx]
     if (!rec || (excludeIds && excludeIds.has(rec.id))) continue
+    // 被同一槽位的新说法取代过的记录不再召回：库里同时给新旧两个值，模型最容易说错（TASK 实测 53%）。
+    // 原文仍在库里，画像层也按最新的走，只是不参与检索。
+    if (rec.supersededBy && !allowSuperseded) continue
+    // 静音是硬过滤：降权在强相关查询上压不住，而真正会触发这条的恰恰是强相关。
+    if (rec.muted) continue
+    // 「刚讲过」是按会话算的：同一个 bot 有私聊和好几个群，私聊刚提过的事不该在群里也哑火。
+    // 老记录没有 lastInjectedScope，按同会话处理（宁可少复读，也别在两个群里各念一遍）。
+    const sameConversation = !rec.lastInjectedScope || rec.lastInjectedScope === (scope || '')
+    // 难受的事 48 小时内不主动重提第二次：第一次是「记得」，第二次就是揭伤疤。
+    if (rec.tone === 'neg' && sameConversation && rec.lastInjectedAt && now - rec.lastInjectedAt < NEG_REMENTION_MS) continue
+    if (!allowRepeat && sameConversation && rec.lastInjectedAt && now - rec.lastInjectedAt < repeatWindowMs) continue
     // 作用域隔离：带 scope 的记录只在本会话召回；旧记录没有 scope 时才全局可见。
     if (scope && rec.scope && rec.scope !== scope) continue
     const g = index.grams.get(rec.id)
@@ -227,10 +250,14 @@ export function search(
 
     if (hits < minHits) continue
     const importance = Number(rec.importance) || 0.5
-    const age = Math.max(0, now - recTs) / DAY
+    // 新鲜度按「这句话是什么时候说的」算，时间窗仍按「事情发生的那天」算。
+    // 不用 lastUsed：注入时会 touch，所有被提过的记录都会变「今天」，新鲜度就没有区分度了。
+    const freshTs = rec.spokenAt || recTs
+    const age = Math.max(0, now - freshTs) / DAY
     const fresh = age <= 1 ? 1.12 : age <= 7 ? 1.06 : age <= 30 ? 1.0 : age <= 180 ? 0.94 : 0.88
     const used = 1 + Math.min(0.12, (rec.uses || 1) * 0.01)
-    const final = score * (0.85 + 0.3 * importance) * fresh * used
+    // 置顶的记忆优先想起来，但不该挤掉当前问题更相关的证据，所以只给有限加成。
+    const final = score * (0.85 + 0.3 * importance) * fresh * used * (rec.pinned ? 1.15 : 1)
     if (final < minScore) continue
     out.push({ rec, score: Math.round(final * 100) / 100, hits, why })
   }

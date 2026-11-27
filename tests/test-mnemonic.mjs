@@ -26,11 +26,13 @@ test('groupAdjacent 只并同会话的下一轮，隔天算补充、超过 48 �
   assert.deepEqual(groupAdjacent([{ rec: { ...records[0], id: 'a2' } }, { rec: records[1], score: 1 }], [{ ...records[0], id: 'a2' }, records[1], records[2]]).map((h) => h.rec.id), ['a2', 'b'])
   // 跨会话不并
   assert.deepEqual(groupAdjacent([{ rec: records[2], score: 3 }], records).map((h) => h.rec.id), ['c'])
-  // 同一会话隔天（1 小时）算补充说明：并
+  // 默认只并「接着说」的下一句：真实聊天里隔一小时往往已经换话题了
   const a3 = { ...records[0], id: 'a3' }
-  assert.deepEqual(groupAdjacent([{ rec: a3, score: 3 }], [a3, records[3]]).map((h) => h.rec.id), ['a3', 'd'])
-  // 同一会话超过 48 小时：不并
-  assert.deepEqual(groupAdjacent([{ rec: records[3], score: 3 }], [records[3], records[4]]).map((h) => h.rec.id), ['d'])
+  assert.deepEqual(groupAdjacent([{ rec: a3, score: 3 }], [a3, records[3]]).map((h) => h.rec.id), ['a3'])
+  // 跑基准时由调用方显式放宽窗口：1 小时算补充，超过 48 小时不并
+  const wide = { gapMs: 48 * 3_600_000 }
+  assert.deepEqual(groupAdjacent([{ rec: a3, score: 3 }], [a3, records[3]], wide).map((h) => h.rec.id), ['a3', 'd'])
+  assert.deepEqual(groupAdjacent([{ rec: records[3], score: 3 }], [records[3], records[4]], wide).map((h) => h.rec.id), ['d'])
   // 上限 2：三张命中卡至多并进两张邻轮
   const many = [
     { id: 'm1', text: '1', scope: 's', createdAt: base },
@@ -118,12 +120,16 @@ test('renderCard 只收像事实的条目：提问、招呼、纯英文不进卡
     { id: 'e1', text: 'Want me to check my account settings', importance: 0.5, createdAt: now - 500e3 },
     { id: 'g1', text: '早呀老大！今天也来啦', importance: 0.5, createdAt: now - 400e3 },
     { id: 'r1', text: '昨天聊到她想去海边住一阵。', importance: 0.5, createdAt: now - 300e3 },
+    { id: 's1', text: '主人住在浦东世纪大道。', importance: 0.9, createdAt: now - 200e3, source: { kind: 'tool' }, supersededBy: 'f1' },
+    { id: 'm1', text: '主人养过一只叫团子的猫。', importance: 0.9, createdAt: now - 100e3, source: { kind: 'tool' }, muted: true },
   ]
   const card = renderCard(records, { maxChars: 900, now })
   assert.ok(card.includes('香菜'), '显式存下的事实要进卡')
   assert.ok(!card.includes('neon'), '提问不进卡')
   assert.ok(!card.includes('Want me'), '纯英文不进卡')
   assert.ok(!card.includes('早呀'), '招呼不进卡')
+  assert.ok(!card.includes('浦东世纪大道'), '被取代的旧值不能挂成现状')
+  assert.ok(!card.includes('团子'), '被静音的事不能进常驻卡')
   assert.ok(card.length <= 900)
 
   const tiny = renderCard(records, { maxChars: 40, now })
@@ -138,7 +144,9 @@ test('renderRecallBlock keeps full dates, spends the whole budget on evidence, a
     { rec: { text: '第三条补充信息', eventAt: Date.parse('2026-06-17T10:00:00+08:00') } },
   ]
   const block = renderRecallBlock(hits, { maxChars: 260, itemChars: 180, now })
-  assert.ok(block.includes('2026-06-15'), 'must include full YYYY-MM-DD date')
+  // 块头给绝对「现在」，行首给相对日期：模型要换算有锚点，又不用自己从 ISO 字符串里读。
+  assert.ok(block.includes('2026-06-20'), 'block head carries the absolute now-date')
+  assert.ok(/^\d+\. 周[一二三四五六日]/m.test(block), block)
   // 纪律已搬到常驻 system 段（RECALL_RULES），块内不再预留尾注空间。
   assert.ok(!block.includes('记忆纪律'), 'rules must not be duplicated inside the block')
   assert.ok(RECALL_RULES.includes('记不清'), 'rules text keeps the abstention clause')
@@ -150,7 +158,7 @@ test('a legacy tail arm still renders and stays inside budget', () => {
   const hits = [{ rec: { text: '约好下周二（2026-06-23）下午三点去复查牙齿。', eventAt: now - 5 * 86400000 } }]
   // 完整纪律约 340 字，400 字预算扣掉头和尾就没有正文空间了；这里按真实生产预算给 800。
   const withTail = renderRecallBlock(hits, { maxChars: 800, itemChars: 200, now, tail: RECALL_RULES })
-  assert.ok(withTail.includes('记忆纪律'), withTail)
+  assert.ok(withTail.includes('别像查档案'), withTail)
   assert.ok(withTail.length <= 800, `tail arm must respect maxChars: ${withTail.length}`)
 })
 
@@ -172,13 +180,19 @@ test('recall block anchors relative dates at spokenAt, not eventAt', () => {
   const block = renderRecallBlock([
     { rec: { id: 'spoken', text: '昨天把旧照片送到江北。', eventAt, spokenAt } },
   ], { maxChars: 900, itemChars: 200, now })
-  assert.ok(block.includes('1. (2026-11-23)'), 'line label still uses eventAt')
+  assert.ok(block.includes('1. 前天'), 'line label uses spoken words, not ISO dates')
   assert.ok(block.includes('昨天(2026-11-23)'), block)
 
   const legacy = renderRecallBlock([
     { rec: { id: 'legacy', text: '昨天把旧照片送到江北。', eventAt } },
   ], { maxChars: 900, itemChars: 200, now })
   assert.ok(legacy.includes('昨天(2026-11-22)'), legacy)
+
+  // 超过一周的条目把天数也算好：Test of Time 实测模型自己减天数只有 ~15% 正确率。
+  const older = renderRecallBlock([
+    { rec: { id: 'older', text: '把旧照片送到江北。', eventAt: now - 8 * 86400000 } },
+  ], { maxChars: 900, itemChars: 200, now })
+  assert.ok(older.includes('（8天前）'), older)
 })
 
 test('recall block reports a small number of dropped hits', () => {
@@ -194,7 +208,12 @@ test('recall block reports a small number of dropped hits', () => {
   // 短尾注（约 70 字）会占掉一条正文的额度，260 才是「3 条 + 另有 2 条」的档位。
   const maxChars = 260
   const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
-  assert.ok(block.includes('另有 2 条相关记录未显示'), block)
+  // 装得下多少就放多少，剩下的条数必须如实报出来（1-3 条才提示，多了是噪音）。
+  const shown = (block.match(/^\d+\. /gm) || []).length
+  assert.ok(shown >= 3, block)
+  const dropped = 5 - shown
+  assert.ok(dropped >= 1 && dropped <= 3, block)
+  assert.ok(block.includes(`还有 ${dropped} 件相关的事`), block)
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
 })
 
@@ -210,7 +229,7 @@ test('recall block stays quiet when many hits are dropped', () => {
   // 块内不再留尾注空间，459 字能多放四条；收到 250 才回到「漏掉 3 条以上就静默」的判据。
   const maxChars = 250
   const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
-  assert.ok(!block.includes('另有'), block)
+  assert.ok(!block.includes('还有'), block)
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
 })
 
@@ -223,7 +242,7 @@ test('recall block counts a duplicate id once instead of reporting it as hidden'
     { maxChars: 250, itemChars: 80, now },
   )
   assert.ok(block.includes('乙：'), block)
-  assert.ok(!block.includes('另有'), block)
+  assert.ok(!block.includes('还有'), block)
   assert.ok(block.length <= 250, `${block.length} > 250`)
 })
 
@@ -237,8 +256,9 @@ test('recall block keeps the same sentence told on different days', () => {
   const block = renderRecallBlock(hits, { maxChars: 900, itemChars: 200, now })
   // 「周三」会被就地换算成「周三(2026-11-18)」，所以按整句前缀计数。
   assert.equal((block.match(/那家店周三/g) || []).length, 2, block)
-  assert.ok(block.includes('11-20'), block)
-  assert.ok(block.includes('11-23'), block)
+  // 行首是相对日期：两条各自的说法必须能区分开（周五 / 前天），不能并成一条。
+  assert.ok(block.includes('周五'), block)
+  assert.ok(block.includes('前天'), block)
 })
 
 test('recall block dedupes identical text so the budget goes to new evidence', () => {
@@ -252,7 +272,19 @@ test('recall block dedupes identical text so the budget goes to new evidence', (
   const block = renderRecallBlock(hits, { maxChars: 900, itemChars: 200, now })
   assert.equal((block.match(/陶瓷碗/g) || []).length, 1, block)
   assert.ok(block.includes('折叠水碗'), '被重复行挤掉的真实证据要能进来')
-  assert.ok(!block.includes('另有'), '重复不算遗漏')
+  assert.ok(!block.includes('还有'), '重复不算遗漏')
+})
+
+test('firstItemChars 只放宽第一条，总预算仍然守住', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const hits = [
+    { rec: { id: 'a', text: '甲'.repeat(600), eventAt: now } },
+    { rec: { id: 'b', text: '乙'.repeat(600), eventAt: now } },
+  ]
+  const flat = renderRecallBlock(hits, { maxChars: 500, itemChars: 100, now })
+  const wide = renderRecallBlock(hits, { maxChars: 500, itemChars: 100, firstItemChars: 300, now })
+  assert.ok(wide.length <= 500, `${wide.length} > 500`)
+  assert.ok(wide.length > flat.length, `第一条放宽后应更长：${wide.length} vs ${flat.length}`)
 })
 
 test('recall block never cuts a relative date term in half', () => {
@@ -263,7 +295,8 @@ test('recall block never cuts a relative date term in half', () => {
   assert.ok(!block.includes('…昨'), block)
   assert.ok(!block.includes('昨…'), block)
   const body = block.split('\n').filter((l) => /^\d+\. /.test(l)).join('\n')
-  assert.ok(!body.includes('昨'), `term is dropped whole rather than half-cut: ${body}`)
+  // 头尾都留的裁法会把整个「昨天」留在尾巴上；留下就必须带上完整日期，不能是半截。
+  if (body.includes('昨')) assert.ok(body.includes('昨天(2026-05-02)'), body)
 })
 
 test('stub line never leaves a half-cut date bracket', () => {
@@ -280,15 +313,15 @@ test('stub line never leaves a half-cut date bracket', () => {
   assert.ok(block.length <= 460, `${block.length} > 460`)
 })
 
-test('recall block trades the last line for a notice only when it fits', () => {
+test('recall block never trades a complete evidence line for a notice', () => {
   const now = Date.parse('2026-11-25T12:00:00+08:00')
   const hits = Array.from({ length: 3 }, (_, i) => ({
     rec: { id: `pop-${i}`, text: `第${i + 1}条：${'丙'.repeat(40)}`, eventAt: now - i * 86400000 },
   }))
-  // 纪律搬到常驻段后，块内没有尾注占位，同一预算能多装两条；这里把预算收到只放得下 1 条。
   const block = renderRecallBlock(hits, { maxChars: 180, itemChars: 80, now })
-  assert.equal((block.match(/^\d+\. /gm) || []).length, 1, block)
-  assert.ok(block.includes('另有 2 条相关记录未显示'), block)
+  const shown = (block.match(/^\d+\. /gm) || []).length
+  assert.ok(shown >= 2, block)
+  assert.ok(!block.includes('还有'), '两条完整原话装得下时不该换成「还有 N 件」')
   assert.ok(block.length <= 180, `${block.length} > 180`)
 })
 
@@ -610,7 +643,7 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
       try {
         const messages = [{ id: 'u1', role: 'user', content: question }]
         const out = await preStep({}, async () => ({ kind: 'enter', messages }))
-        const hit = out.messages.find((m) => JSON.stringify(m).includes('相关的存档原文'))
+        const hit = out.messages.find((m) => JSON.stringify(m).includes('以前聊过的'))
         const content = hit?.content
         if (Array.isArray(content)) return content.map((part) => part?.text ?? '').join('\n')
         return String(content ?? '')
@@ -623,7 +656,7 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
     const lean = { limit: 2, injectChars: 900, itemChars: 60, multiLimit: 6, multiInjectChars: 1800, multiItemChars: 120 }
     const plain = await injected('还箱子的事还记得吗', lean)
     const multi = await injected('我们约定过的还箱子的事都有哪些', lean)
-    const count = (block) => block.split(/\\n|\n/).filter((l) => /^\d+\. \(/.test(l.trim())).length
+    const count = (block) => block.split(/\\n|\n/).filter((l) => /^\d+\. /.test(l.trim())).length
     assert.ok(count(plain) >= 1, 'plain question still recalls a couple of items')
     // 邻轮分组会往命中卡后面补一张（同一件事的下一轮），所以条目数上限是 limit+2；
     // 真正的预算约束是字数，纪律尾注约 215 字，留 300 字余量。
@@ -829,11 +862,12 @@ test('capability: mem_save supports eventAt ISO date and supersedes outdated mem
         supersedes: r1.id,
       })
       assert.equal(r2.ok, true)
-      assert.equal(r2.total, 1, 'old memory should be replaced')
+      assert.equal(r2.total, 2, 'old memory is kept as a superseded pointer')
       const rec = await registered.mem_recall.execute({ query: '住址' })
       assert.match(rec.text, /徐汇区衡山路/)
       assert.match(rec.text, /\(2026-11-20\)/)
-      assert.doesNotMatch(rec.text, /浦东世纪大道/)
+      assert.match(rec.text, /浦东世纪大道/, '旧值仍可翻到')
+      assert.match(rec.text, /（旧说法）/, '旧值必须自己说明是旧的')
     } finally {
       dispose()
     }
@@ -1115,7 +1149,12 @@ test('P0 scope isolation end-to-end: apply wires scope into recall, pre-step, an
         { agent: { session: { id: 'group:100' } } },
         async () => ({ kind: 'enter', messages: [{ id: 'g-u1', role: 'user', content: '门禁密码是多少来着' }] }),
       )
-      assert.equal(dGroup.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 0)
+      // 可以只剩一句「没翻到原话」的系统提示，但绝不能带出私聊内容。
+      const groupInjected = dGroup.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic')
+      assert.ok(groupInjected.length <= 1, groupInjected.length)
+      for (const m of groupInjected) {
+        assert.doesNotMatch(JSON.stringify(m), /7391|门禁密码是/, 'group recall must not leak private scope')
+      }
 
       // 常驻卡绝不能包含带 scope 的私聊事实，只能放全局无 scope 记录
       const cardText = cardProvider()
@@ -1253,7 +1292,7 @@ test('P0 clock stability, abort signal on timeout, and mem_save empty-text super
       assert.equal(badReplace.total, 1, 'old record must survive empty replacement text')
 
       // 3. rewriteQueryTerms 超时必须 abort signal
-      await preStep({}, async () => ({ kind: 'enter', messages: [{ id: 'u-ab', role: 'user', content: '查一下端口配置是多少' }] }))
+      await preStep({}, async () => ({ kind: 'enter', messages: [{ id: 'u-ab', role: 'user', content: '之前那个端口配置是多少' }] }))
       assert.ok(sawSignal && sawSignal.aborted === true, 'timeout must abort upstream llm.stream signal')
     } finally {
       dispose()

@@ -100,6 +100,8 @@ export class Store {
         existing.eventAt = parsedEventAt
         metaChanged = true
       }
+      // 合并时不改写 spokenAt：「昨天去了医院」里的「昨天」锚的是第一次说出口的时间，
+      // 后来同一句话再被导入一次就把锚挪到今天，相对日期会算到错误的那天。
       if (source?.kind === 'tool' && existing.source?.kind !== 'tool') {
         existing.source = source
         metaChanged = true
@@ -141,7 +143,10 @@ export class Store {
     this.byText.set(textKey(clean, rec.scope), rec)
     this.appendLine(rec)
 
-    if (this.maxRecords > 0 && this.records.length > this.maxRecords) {
+    // 压一次就回到上限，下一条又要压；留一点余量把全量重写摊薄。
+    // 余量必须随上限缩放：固定 200 条时 maxRecords=5 的小库永远触发不了压实。
+    const slack = Math.min(200, Math.floor(this.maxRecords * 0.04))
+    if (this.maxRecords > 0 && this.records.length > this.maxRecords + slack) {
       this.compact({ maxRecords: this.maxRecords })
     }
     return rec
@@ -153,11 +158,15 @@ export class Store {
   compact({ maxRecords = this.maxRecords, now = Date.now() } = {}) {
     if (!maxRecords || this.records.length <= maxRecords) return 0
     const scoreOf = (r) => {
+      // pin 是用户明确要求「一直记得」的，优先级高于一切自动归档；被取代的旧值也要留一条活口，
+      // 否则「我以前叫什么」问起来时原文早被容量压实吃掉了。
       const isTool = r.source?.kind === 'tool' ? 5.0 : 0
+      const pinned = r.pinned ? 6.0 : 0
+      const kept = r.supersededBy ? 1.0 : 0
       const imp = (Number(r.importance) || 0.5) * 2.0
       const useBoost = Math.log1p(r.uses || 1) * 0.25
       const ageDays = Math.max(0, now - (r.lastUsed || r.eventAt || r.createdAt || now)) / DAY
-      return isTool + imp + useBoost - ageDays * 0.005
+      return isTool + pinned + kept + imp + useBoost - ageDays * 0.005
     }
     const ranked = this.records
       .map((r, idx) => ({ r, idx, s: scoreOf(r) }))
@@ -175,8 +184,8 @@ export class Store {
     if (evicted > 0) {
       this.dirty = true
       this.generation += 1
-      this.touched = false
       this.persist()
+      this.touched = false
     }
     return evicted
   }
@@ -229,8 +238,8 @@ export class Store {
     if (mergedCount > 0) {
       this.dirty = true
       this.generation += 1
-      this.touched = false
       this.persist()
+      this.touched = false
     }
     return mergedCount
   }
@@ -252,10 +261,29 @@ export class Store {
     return true
   }
 
+  /**
+   * 显式替换：只标「被谁取代」，原文留在库里。
+   * 以前这里走 remove()，等于工具一句 supersedes 就把旧话物理删了，和自动作废的 validTo 语义相反；
+   * 用户问「我以前那个名字」时就再也查不到。
+   */
+  supersede(id, by) {
+    const old = this.byId.get(id)
+    if (!old || !by || old === by || old.supersededBy === by.id) return false
+    old.supersededBy = by.id
+    if (!old.validTo) old.validTo = by.eventAt || by.createdAt || Date.now()
+    old.basis = 'tool'
+    this.touched = true
+    // 作废只改字段，不动 keywords/tags；检索直接读 rec.supersededBy 过滤，
+    // 让它 bump generation 等于每次改名都白重建一遍全库 bigram 索引。
+    this.appendLine(old)
+    return true
+  }
+
   touch(id, count = 1) {
     const rec = this.byId.get(id)
     if (!rec) return
-    rec.uses = (rec.uses || 0) + count
+    // uses 记「这件事被陈述过几次」，是重要度信号；注入次数单独记，否则提得越多越容易被再提，形成复读正反馈。
+    rec.injected = (rec.injected || 0) + count
     rec.lastUsed = Date.now()
     this.touched = true
   }
@@ -267,8 +295,9 @@ export class Store {
 
   flush() {
     if (!this.touched) return
-    this.touched = false
+    // 先写盘再清标志：写失败时下一轮还能重试，不能让 muted/supersededBy/pinned 停在内存里。
     this.persist()
+    this.touched = false
   }
 
   persist() {
