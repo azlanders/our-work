@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
-import { renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
+import { RECALL_RULES, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
 import { docExpand, expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
@@ -130,17 +130,27 @@ test('renderCard 只收像事实的条目：提问、招呼、纯英文不进卡
   assert.ok(tiny.length <= 40, '卡必须守住预算')
 })
 
-test('renderRecallBlock preserves full date, head/tail discipline, and avoids awkward micro-truncation', () => {
+test('renderRecallBlock keeps full dates, spends the whole budget on evidence, and avoids micro-truncation', () => {
   const now = Date.parse('2026-06-20T10:00:00+08:00')
   const hits = [
     { rec: { text: '约好下周二（2026-06-23）下午三点去复查牙齿。', eventAt: Date.parse('2026-06-15T10:00:00+08:00') } },
     { rec: { text: '第二条很长的背景补充'.repeat(20), eventAt: Date.parse('2026-06-16T10:00:00+08:00') } },
     { rec: { text: '第三条补充信息', eventAt: Date.parse('2026-06-17T10:00:00+08:00') } },
   ]
-  const block = renderRecallBlock(hits, { maxChars: 340, itemChars: 180, now })
+  const block = renderRecallBlock(hits, { maxChars: 260, itemChars: 180, now })
   assert.ok(block.includes('2026-06-15'), 'must include full YYYY-MM-DD date')
-  assert.ok(block.includes('确实没有就说记不清'), 'tail discipline must never be truncated')
+  // 纪律已搬到常驻 system 段（RECALL_RULES），块内不再预留尾注空间。
+  assert.ok(!block.includes('记忆纪律'), 'rules must not be duplicated inside the block')
+  assert.ok(RECALL_RULES.includes('记不清'), 'rules text keeps the abstention clause')
   assert.ok(!block.includes('第三条补充信息'), 'overflow items should stop cleanly once budget fills')
+})
+
+test('a legacy tail arm still renders and stays inside budget', () => {
+  const now = Date.parse('2026-06-20T10:00:00+08:00')
+  const hits = [{ rec: { text: '约好下周二（2026-06-23）下午三点去复查牙齿。', eventAt: now - 5 * 86400000 } }]
+  const withTail = renderRecallBlock(hits, { maxChars: 400, itemChars: 200, now, tail: RECALL_RULES })
+  assert.ok(withTail.includes('记忆纪律'), withTail)
+  assert.ok(withTail.length <= 400, `tail arm must respect maxChars: ${withTail.length}`)
 })
 
 test('recall block anchors relative dates at spokenAt, not eventAt', () => {
@@ -168,7 +178,8 @@ test('recall block reports a small number of dropped hits', () => {
       eventAt: now - index * 86400000,
     },
   }))
-  const maxChars = 459
+  // 块内不再留尾注空间，同样 459 字能多放两条；收到 250 才回到「漏掉 3 条以上就静默」的判据。
+  const maxChars = 200
   const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
   assert.ok(block.includes('另有 2 条相关记录未显示'), block)
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
@@ -183,7 +194,8 @@ test('recall block stays quiet when many hits are dropped', () => {
       eventAt: now - index * 86400000,
     },
   }))
-  const maxChars = 459
+  // 块内不再留尾注空间，459 字能多放四条；收到 250 才回到「漏掉 3 条以上就静默」的判据。
+  const maxChars = 250
   const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
   assert.ok(!block.includes('另有'), block)
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
@@ -198,12 +210,29 @@ test('recall block does not drop a shown hit to report duplicate ids', () => {
   assert.ok(block.length <= 500, `${block.length} > 500`)
 })
 
+test('recall block dedupes identical text so the budget goes to new evidence', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const same = '你：平时在家就用它常用的陶瓷碗，折叠的收在外出包里。'
+  const hits = [
+    { rec: { id: 'a1', text: same, eventAt: now } },
+    { rec: { id: 'a2', text: same, eventAt: now - 3600000 } },
+    { rec: { id: 'b1', text: '你：带豆包出门看诊那天我会多带一个折叠水碗。', eventAt: now - 7200000 } },
+  ]
+  const block = renderRecallBlock(hits, { maxChars: 900, itemChars: 200, now })
+  assert.equal((block.match(/陶瓷碗/g) || []).length, 1, block)
+  assert.ok(block.includes('折叠水碗'), '被重复行挤掉的真实证据要能进来')
+  assert.ok(!block.includes('另有'), '重复不算遗漏')
+})
+
 test('recall block never cuts a relative date term in half', () => {
   const now = Date.parse('2026-06-30T12:00:00+08:00')
   const at = Date.parse('2026-05-03T10:00:00+08:00')
   const text = '甲'.repeat(198) + '昨天' + '乙'.repeat(40)
   const block = renderRecallBlock([{ rec: { id: 'cut', text, eventAt: at } }], { maxChars: 900, itemChars: 200, now })
   assert.ok(!block.includes('…昨'), block)
+  assert.ok(!block.includes('昨…'), block)
+  const body = block.split('\n').filter((l) => /^\d+\. /.test(l)).join('\n')
+  assert.ok(!body.includes('昨'), `term is dropped whole rather than half-cut: ${body}`)
 })
 
 test('stub line never leaves a half-cut date bracket', () => {
@@ -214,9 +243,22 @@ test('stub line never leaves a half-cut date bracket', () => {
     { rec: { id: 'b', text: '甲'.repeat(28) + '昨天' + '乙'.repeat(80), eventAt: at } },
     ...Array.from({ length: 4 }, (_, i) => ({ rec: { id: `c${i}`, text: '短记录。', eventAt: at } })),
   ]
-  const block = renderRecallBlock(hits, { maxChars: 378, itemChars: 200, now })
+  const block = renderRecallBlock(hits, { maxChars: 460, itemChars: 200, now })
+  assert.ok(block.includes('昨天(2026-05-02)'), block)
   assert.ok(!/\(20\d\d-\d\d-?…/.test(block), block)
-  assert.ok(block.length <= 378, `${block.length} > 378`)
+  assert.ok(block.length <= 460, `${block.length} > 460`)
+})
+
+test('recall block trades the last line for a notice only when it fits', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const hits = Array.from({ length: 3 }, (_, i) => ({
+    rec: { id: `pop-${i}`, text: `第${i + 1}条：${'丙'.repeat(40)}`, eventAt: now - i * 86400000 },
+  }))
+  // 纪律搬到常驻段后，块内没有尾注占位，同一预算能多装两条；这里把预算收到只放得下 1 条。
+  const block = renderRecallBlock(hits, { maxChars: 140, itemChars: 80, now })
+  assert.equal((block.match(/^\d+\. /gm) || []).length, 1, block)
+  assert.ok(block.includes('另有 2 条相关记录未显示'), block)
+  assert.ok(block.length <= 140, `${block.length} > 140`)
 })
 
 test('Store does not backfill spokenAt on legacy records', () => {

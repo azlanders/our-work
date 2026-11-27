@@ -10,7 +10,10 @@ const DEFAULT_TZ_OFFSET_MS = 8 * 3600000
 // 裁剪时不让相对日期词被切成半截（「昨天」变成「昨」，括号就成了无主装饰）。
 // 截断点落进词内就退到词首，宁可整词丢，也不留半截。
 function clipKeepTerms(text, n, anchor, tzOffsetMs) {
-  const src = String(text || '')
+  // 与 lib/text.js 的 clip 保持同一套空白规范化：自动归档是「你：…\n我：…」，
+  // 不折行会把一条记忆渲染成两行、第二行还丢了编号。
+  const src = String(text ?? '').replace(/\s+/g, ' ').trim()
+  if (n <= 0) return ''
   if (src.length <= n) return src
   let cut = Math.max(0, n - 1)
   for (const h of resolveRelativeDates(src, anchor, tzOffsetMs)) {
@@ -117,16 +120,37 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
 }
 
 /**
- * 回忆块：只放过去存档原文，纪律尾注限制模型不补未问细节、不给名词加定性、不把过去状态/计划/假设当现状，
- * 同时保留无更正说明的矛盾并列规则（2026-11-25，对应 P16 cards12b 未知当事实 12 / 违反禁止 7）。
- * 先按整条预算装入，尽量不在句中腰斩，保证尾注纪律不被裁掉。
+ * 回忆纪律：常驻 system 段，不占每轮证据预算。
+ * 2026-11-27：原来挂在回忆块尾部，1200 字预算里被吃掉约 300 字（25% 证据容量），
+ * 而且块每次都是新消息、规则也跟着重发。搬到常量段后，规则走固定前缀缓存，块只放原文。
+ * 训条取自 CMB 错题实测：183 道「未知当事实」里多数是答对了主点、又补了一句没被问到的细节。
  */
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS } = {}) {
+export const RECALL_RULES = `【记忆纪律】读到记忆摘录时按这些规则回答：
+1. 只用摘录里的原话作答；摘录里没有的数字、日期、人名、地点一个字都不写，自己推算出来的日期也不写（摘录括号里给出的日期可以直接用）。
+2. 只答被问到的点，每个问号一句结论，不加解释、不举例、不补充没被问到的细节。
+3. 摘录里有就必须照原话说，措辞不同也算同一条（「做包装设计」=「做设计这一行」），不要用「没提过」否认。
+4. 同一件事有多个版本时以最晚的为准；两种说法矛盾又看不出先后，就都列出来并说明无法确定。
+5. 过去的状态、计划、猜测、假设不等于现在，别当成已经发生。
+6. 摘录确实没有相关内容的，直说记不清，不猜不补。`
+
+/**
+ * 回忆块：只放过去存档原文。
+ * `tail` 保留给实验臂与旧版对比；生产留空，纪律走 RECALL_RULES 常驻段。
+ * 先按整条预算装入，尽量不在句中腰斩。
+ */
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = '' } = {}) {
   if (!hits?.length) return ''
+  // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
+  // 重复行占满预算却不多给一条证据，先按正文去重，预算留给真正的新内容。
+  const list = []
+  const seenText = new Set()
+  for (const h of hits) {
+    const key = String(h?.rec?.text ?? '').replace(/\s+/g, '').slice(0, 120)
+    if (key && seenText.has(key)) continue
+    if (key) seenText.add(key)
+    list.push(h)
+  }
   const head = Number.isFinite(now) ? `【记忆·相关的存档原文｜现在 ${clockText(now, tzOffsetMs)}】` : '【记忆·相关的存档原文】'
-  // 2026-11-26：120 错题 A/B 显示，模型最常犯的不是「不知道」而是「明明有却说记不清」和
-  // 「拿旧状态当现在」。尾注补两条：措辞不同算同一条；进度/现状/欠账以最晚一条为准。
-  const tail = '（用法：摘录里问到的每个点都逐条找一遍；找到就照原文说，措辞不同也算同一条（「做包装设计」=「做设计这一行」），别用「没提过」否认。问进度、现状、还欠多少以最晚那条为准；过去状态、计划、猜测、假设别当成现在或已发生。只答问到的点，不补未问细节、不给名词加定性、不补这里没有的日期地点或后续，别带进没被问到的其它细节。两种矛盾说法都列并说明无法确定。确实没有就说记不清，无关就忽略。原句里紧跟「昨天」「下周二」这类词的括号日期就是那天的实际日期（如「下周二(2026-06-23)」），问哪天直接用括号里的，别回答成说话那天。）'
   const reserve = head.length + tail.length + 4
   const bodyBudget = Math.max(0, maxChars - reserve)
   if (bodyBudget < 20) return ''
@@ -135,7 +159,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   const lineKeys = []
   let used = 0
   const hitKey = (hit) => hit?.rec?.id ?? hit?.rec ?? hit
-  for (const [i, hit] of hits.entries()) {
+  for (const [i, hit] of list.entries()) {
     const when = ymd(hit.rec.eventAt || hit.rec.createdAt, tzOffsetMs)
     const prefix = `${i + 1}. (${when}) `
     const anchor = hit.rec.spokenAt ?? hit.rec.eventAt ?? hit.rec.createdAt
@@ -174,7 +198,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   const countMissing = (keys) => {
     const seen = new Set(keys)
     let remaining = 0
-    for (const hit of hits) {
+    for (const hit of list) {
       const key = hitKey(hit)
       if (seen.has(key)) continue
       seen.add(key)

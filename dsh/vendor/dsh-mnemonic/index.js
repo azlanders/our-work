@@ -12,7 +12,7 @@ import { Store, defaultStorePath } from './lib/store.js'
 import { buildIndex, indexRecord, search, groupAdjacent } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
 import { loadAliasGroups, expandAliases } from './lib/aliases.js'
-import { renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
+import { RECALL_RULES, renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
 import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, attributeKeywords, sanitizeMemoryText } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
@@ -397,6 +397,13 @@ export function apply(ctx, config = {}) {
       interpolate: false,
       text: () => renderCard(store.records.filter((r) => !r.scope), { maxChars: cfg.cardChars }),
     }), 'dsh-mnemonic: card')
+    // 纪律常驻段：固定文本走前缀缓存，不占每轮 1200 字的证据预算（原本尾注要吃掉约 300 字）。
+    sctx.effect(() => sctx.systemPrompt.section({
+      name: 'dsh-mnemonic:rules',
+      order: 61,
+      interpolate: false,
+      text: () => RECALL_RULES,
+    }), 'dsh-mnemonic: recall rules')
   })
 
   // ── 每轮自动回忆 ──────────────────────────────────────────────────────
