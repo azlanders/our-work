@@ -148,9 +148,10 @@ test('renderRecallBlock keeps full dates, spends the whole budget on evidence, a
 test('a legacy tail arm still renders and stays inside budget', () => {
   const now = Date.parse('2026-06-20T10:00:00+08:00')
   const hits = [{ rec: { text: '约好下周二（2026-06-23）下午三点去复查牙齿。', eventAt: now - 5 * 86400000 } }]
-  const withTail = renderRecallBlock(hits, { maxChars: 400, itemChars: 200, now, tail: RECALL_RULES })
+  // 完整纪律约 340 字，400 字预算扣掉头和尾就没有正文空间了；这里按真实生产预算给 800。
+  const withTail = renderRecallBlock(hits, { maxChars: 800, itemChars: 200, now, tail: RECALL_RULES })
   assert.ok(withTail.includes('记忆纪律'), withTail)
-  assert.ok(withTail.length <= 400, `tail arm must respect maxChars: ${withTail.length}`)
+  assert.ok(withTail.length <= 800, `tail arm must respect maxChars: ${withTail.length}`)
 })
 
 test('default tail is the short one and can be switched off', () => {
