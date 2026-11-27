@@ -126,7 +126,7 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
  * 训条取自 CMB 错题实测：183 道「未知当事实」里多数是答对了主点、又补了一句没被问到的细节。
  */
 export const RECALL_RULES = `【记忆纪律】读到记忆摘录时按这些规则回答：
-1. 只用摘录里的原话作答；摘录里没有的数字、日期、人名、地点一个字都不写，自己推算出来的日期也不写（摘录括号里给出的日期可以直接用）。
+1. 问「隔了几天」「多久」这种本来就要算的，必须算出来给出数字，不许说记不清；其余情况只用摘录里的原话作答，摘录里没有的数字、日期、人名、地点一个字都不写，问具体哪天也只写摘录里出现过的日期（括号里给的可以直接用），自己从「上周五」推出某月某日这种不要写。
 2. 只答被问到的点，每个问号一句结论；不解释原因、不叙述经过、不补充没被问到的细节，哪怕是真的。
 3. 摘录里有就必须照原话说，措辞不同也算同一条（「做包装设计」=「做设计这一行」），不要用「没提过」否认。
 4. 同一件事有多个版本时以最晚的为准；两种说法矛盾又看不出先后，就都列出来并说明无法确定。
@@ -137,21 +137,25 @@ export const RECALL_RULES = `【记忆纪律】读到记忆摘录时按这些规
  * 短尾注：回忆块插在用户提问之后，模型最后读到的是块本身，所以末位放一句最短的约束。
  * 完整纪律在 system 常驻段（RECALL_RULES），这里只做位置提示，控制在 80 字内。
  */
-export const RECALL_TAIL = '（只答问到的点，一句结论；不补摘录里没有的数字、日期、人名，自己算出来的日期也不写；没有就说记不清。）'
+export const RECALL_TAIL = '（只答问到的点，一句结论；不补摘录里没有的数字、日期、人名。问相隔多久要算出来，问具体哪天只写摘录里有的日期；没有就说记不清。）'
 
 /**
  * 回忆块：只放过去存档原文。
  * `tail` 默认是短尾注，传 '' 可完全留空（实验臂用）。
  * 先按整条预算装入，尽量不在句中腰斩。
  */
+let warnedTinyBudget = false
+
 export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL } = {}) {
   if (!hits?.length) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
   // 重复行占满预算却不多给一条证据，先按正文去重，预算留给真正的新内容。
+  // 日期必须进 key：同一句话在不同天被说起是两条证据，「上次什么时候讲的」全靠这个日期。
   const list = []
   const seenText = new Set()
   for (const h of hits) {
-    const key = String(h?.rec?.text ?? '').replace(/\s+/g, '')
+    const rec = h?.rec ?? {}
+    const key = `${String(rec.text ?? '').replace(/\s+/g, '')}|${ymd(rec.eventAt || rec.createdAt, tzOffsetMs)}`
     if (key && seenText.has(key)) continue
     if (key) seenText.add(key)
     list.push(h)
@@ -159,10 +163,18 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   const head = Number.isFinite(now) ? `【记忆·相关的存档原文｜现在 ${clockText(now, tzOffsetMs)}】` : '【记忆·相关的存档原文】'
   const reserve = head.length + tail.length + 4
   const bodyBudget = Math.max(0, maxChars - reserve)
-  if (bodyBudget < 20) return ''
+  if (bodyBudget < 20) {
+    // 只可能是配置错（injectChars/itemChars 调得太小），不是运行期噪音，报一次就够。
+    if (!warnedTinyBudget) {
+      warnedTinyBudget = true
+      console.error(`[mnemonic] 回忆块预算过小（maxChars=${maxChars}, tail=${tail.length}），整块停用；检查 injectChars/itemChars`)
+    }
+    return ''
+  }
 
   const lines = []
   const lineKeys = []
+  const stubFlags = []
   let used = 0
   const hitKey = (hit) => hit?.rec?.id ?? hit?.rec ?? hit
   for (const [i, hit] of list.entries()) {
@@ -177,6 +189,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
     if (used + sep + line.length <= bodyBudget) {
       lines.push(line)
       lineKeys.push(hitKey(hit))
+      stubFlags.push(false)
       used += sep + line.length
       continue
     }
@@ -189,6 +202,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
       if (stub && used + sep + prefix.length + stub.length <= bodyBudget) {
         lines.push(prefix + stub)
         lineKeys.push(hitKey(hit))
+        stubFlags.push(true)
       }
     }
     break
@@ -221,8 +235,8 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   if (missing > 0 && missing <= 3) {
     const text = noticeText(missing)
     if (fits(lines, text)) notice = text
-    else if (lines.length > 1) {
-      // 只有多行正文时才允许用最后一条换提示行；换完仍要少 1-3 条才生效。
+    else if (lines.length > 1 && stubFlags[stubFlags.length - 1]) {
+      // 只允许用已经截断的 stub 换提示行：拿一条完整证据换「还有 N 条你看不到」是纯亏。
       const shorter = lines.slice(0, -1)
       const shorterKeys = lineKeys.slice(0, -1)
       const rest = countMissing(shorterKeys)
@@ -231,6 +245,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
         if (fits(shorter, alt)) {
           lines.length = shorter.length
           lineKeys.length = shorterKeys.length
+          stubFlags.length = shorter.length
           notice = alt
         }
       }

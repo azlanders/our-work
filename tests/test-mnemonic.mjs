@@ -214,13 +214,31 @@ test('recall block stays quiet when many hits are dropped', () => {
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
 })
 
-test('recall block does not drop a shown hit to report duplicate ids', () => {
+test('recall block counts a duplicate id once instead of reporting it as hidden', () => {
   const now = Date.parse('2026-11-25T12:00:00+08:00')
-  const mk = (id, ch) => ({ rec: { id, text: `${id}：${ch.repeat(60)}`, eventAt: now } })
-  const block = renderRecallBlock([mk('A', '甲'), mk('B', '乙'), mk('A', '甲')], { maxChars: 500, itemChars: 80, now })
-  assert.ok(block.includes('B：'), block)
+  const mk = (id, body) => ({ rec: { id, text: body, eventAt: now } })
+  // 同 id 不同正文：第三条装不下，但它的 id 已经在块里，不该再报「另有 1 条」。
+  const block = renderRecallBlock(
+    [mk('A', `甲：${'补'.repeat(60)}`), mk('B', `乙：${'乙'.repeat(60)}`), mk('A', `甲二：${'另'.repeat(60)}`)],
+    { maxChars: 250, itemChars: 80, now },
+  )
+  assert.ok(block.includes('乙：'), block)
   assert.ok(!block.includes('另有'), block)
-  assert.ok(block.length <= 500, `${block.length} > 500`)
+  assert.ok(block.length <= 250, `${block.length} > 250`)
+})
+
+test('recall block keeps the same sentence told on different days', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const same = '你：那家店周三休息。'
+  const hits = [
+    { rec: { id: 'd1', text: same, eventAt: Date.parse('2026-11-20T12:00:00+08:00') } },
+    { rec: { id: 'd2', text: same, eventAt: Date.parse('2026-11-23T12:00:00+08:00') } },
+  ]
+  const block = renderRecallBlock(hits, { maxChars: 900, itemChars: 200, now })
+  // 「周三」会被就地换算成「周三(2026-11-18)」，所以按整句前缀计数。
+  assert.equal((block.match(/那家店周三/g) || []).length, 2, block)
+  assert.ok(block.includes('11-20'), block)
+  assert.ok(block.includes('11-23'), block)
 })
 
 test('recall block dedupes identical text so the budget goes to new evidence', () => {
@@ -1234,6 +1252,49 @@ test('P0 clock stability, abort signal on timeout, and mem_save empty-text super
       // 3. rewriteQueryTerms 超时必须 abort signal
       await preStep({}, async () => ({ kind: 'enter', messages: [{ id: 'u-ab', role: 'user', content: '查一下端口配置是多少' }] }))
       assert.ok(sawSignal && sawSignal.aborted === true, 'timeout must abort upstream llm.stream signal')
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('recall rules 注册为固定 system 段，且排在每轮会变的 card 之前', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-rules-sec-'))
+  try {
+    const sections = []
+    const ctx = {
+      inject(deps, fn) {
+        if (deps.includes('tools')) {
+          fn({ effect(cb) { cb() }, tools: { register() { return () => {} } } })
+        }
+        if (deps.includes('systemPrompt')) {
+          fn({
+            effect(cb) { cb() },
+            systemPrompt: {
+              section(def) {
+                if (String(def.name || '').startsWith('dsh-mnemonic:')) sections.push(def)
+                return () => {}
+              },
+            },
+          })
+        }
+      },
+      on() {},
+      get() { return null },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath: join(dir, 'memories.jsonl'), queryRewrite: false, autoArchive: false })
+    try {
+      const rules = sections.find((s) => s.name === 'dsh-mnemonic:rules')
+      const card = sections.find((s) => s.name === 'dsh-mnemonic:card')
+      assert.ok(rules, 'rules 段没注册')
+      assert.ok(card, 'card 段没注册')
+      assert.equal(rules.text(), RECALL_RULES)
+      assert.equal(rules.interpolate, false)
+      // card 每轮「存 N 条」都变，前缀缓存在它那里断开；固定的 rules 排在后面等于永远不命中缓存。
+      assert.ok(rules.order < card.order, `rules order ${rules.order} 应小于 card order ${card.order}`)
     } finally {
       dispose()
     }

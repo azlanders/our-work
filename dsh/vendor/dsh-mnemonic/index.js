@@ -397,10 +397,12 @@ export function apply(ctx, config = {}) {
       interpolate: false,
       text: () => renderCard(store.records.filter((r) => !r.scope), { maxChars: cfg.cardChars }),
     }), 'dsh-mnemonic: card')
-    // 纪律常驻段：固定文本走前缀缓存，不占每轮 1200 字的证据预算（原本尾注要吃掉约 300 字）。
+    // 纪律常驻段：固定文本不占每轮 1200 字的证据预算（原本尾注要吃掉约 300 字）。
+    // order 必须在 card 之前：card 每轮「存 N 条」都会变，前缀缓存在 card 处断开，
+    // 排在 card 后面的固定段永远拿不到缓存命中，只能全价重发。
     sctx.effect(() => sctx.systemPrompt.section({
       name: 'dsh-mnemonic:rules',
-      order: 61,
+      order: 58,
       interpolate: false,
       text: () => RECALL_RULES,
     }), 'dsh-mnemonic: recall rules')
