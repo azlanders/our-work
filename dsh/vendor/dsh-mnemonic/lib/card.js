@@ -2,10 +2,24 @@
 // 两者都有硬上限——记忆再大也不能把提示词撑爆。
 // 时间统一按北京时间（UTC+8）渲染，避免 Linux UTC 宿主机把深夜记忆偏移到前一天。
 import { clip } from './text.js'
-import { inlineDateHints } from './dates.js'
+import { inlineDateHints, resolveRelativeDates } from './dates.js'
 
 const DAY = 86400000
 const DEFAULT_TZ_OFFSET_MS = 8 * 3600000
+
+// 裁剪时不让相对日期词被切成半截（「昨天」变成「昨」，括号就成了无主装饰）。
+// 截断点落进词内就退到词首，宁可整词丢，也不留半截。
+function clipKeepTerms(text, n, anchor, tzOffsetMs) {
+  const src = String(text || '')
+  if (src.length <= n) return src
+  let cut = Math.max(0, n - 1)
+  for (const h of resolveRelativeDates(src, anchor, tzOffsetMs)) {
+    const s = Number(h.index)
+    const e = s + String(h.term || '').length
+    if (Number.isFinite(s) && s >= 0 && cut > s && cut < e) { cut = s; break }
+  }
+  return `${src.slice(0, cut)}…`
+}
 
 function shiftedDate(ts, tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
   return new Date(Number(ts) + tzOffsetMs)
@@ -120,31 +134,31 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
   const lines = []
   const lineKeys = []
   let used = 0
-  let rendered = 0
   const hitKey = (hit) => hit?.rec?.id ?? hit?.rec ?? hit
   for (const [i, hit] of hits.entries()) {
     const when = ymd(hit.rec.eventAt || hit.rec.createdAt, tzOffsetMs)
     const prefix = `${i + 1}. (${when}) `
+    const anchor = hit.rec.spokenAt ?? hit.rec.eventAt ?? hit.rec.createdAt
     // 就地标注：换算括号贴着「上周五」这类词，行尾括号模型会当装饰跳过。
-    // 先按预算裁原文再插括号——反过来会把「昨天」和日期一起裁成半截。
-    const body = inlineDateHints(clip(hit.rec.text, itemChars), hit.rec.spokenAt ?? hit.rec.eventAt ?? hit.rec.createdAt, tzOffsetMs)
+    // 先裁原文（且不切断时间词）再插括号，反过来会把「昨天」和日期一起裁成半截。
+    const body = inlineDateHints(clipKeepTerms(hit.rec.text, itemChars, anchor, tzOffsetMs), anchor, tzOffsetMs)
     const line = prefix + body
     const sep = lines.length ? 1 : 0
     if (used + sep + line.length <= bodyBudget) {
       lines.push(line)
       lineKeys.push(hitKey(hit))
       used += sep + line.length
-      rendered = i + 1
       continue
     }
     const avail = bodyBudget - used - sep - prefix.length
     // 第一条一定要装下；后续条目只有剩余预算够放有效正文（>=40字）时才裁短塞入，否则宁可留完整条。
     if (!lines.length || avail >= 40) {
-      const stub = clip(body, Math.max(0, avail))
-      if (stub) {
+      const stubRaw = clipKeepTerms(hit.rec.text, Math.max(0, avail), anchor, tzOffsetMs)
+      const stub = stubRaw ? inlineDateHints(stubRaw, anchor, tzOffsetMs) : ''
+      // inline 会变长，塞不下就放弃，绝不让整块超预算。
+      if (stub && used + sep + prefix.length + stub.length <= bodyBudget) {
         lines.push(prefix + stub)
         lineKeys.push(hitKey(hit))
-        rendered = i + 1
       }
     }
     break
@@ -157,7 +171,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
     notice,
     tail,
   ].filter(Boolean).join('\n')
-  const noticeFor = (bodyLines, keys) => {
+  const countMissing = (keys) => {
     const seen = new Set(keys)
     let remaining = 0
     for (const hit of hits) {
@@ -166,22 +180,30 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
       seen.add(key)
       remaining += 1
     }
-    // 少量遗漏值得提醒；漏得多时写成「另有 7 条」只会变成每题都有的噪音。
-    if (remaining <= 0 || remaining > 3) return ''
-    const notice = `（另有 ${remaining} 条相关记录未显示）`
-    return blockText(bodyLines, notice).length <= maxChars ? notice : ''
+    return remaining
   }
+  const noticeText = (n) => `（另有 ${n} 条相关记录未显示）`
+  const fits = (bodyLines, text) => blockText(bodyLines, text).length <= maxChars
 
-  let notice = rendered < hits.length ? noticeFor(lines, lineKeys) : ''
-  // 第一条必须留下；只有多行正文时才允许用最后一条换提示行。
-  if (!notice && rendered < hits.length && lines.length > 1) {
-    const shorter = lines.slice(0, -1)
-    const shorterKeys = lineKeys.slice(0, -1)
-    const candidate = noticeFor(shorter, shorterKeys)
-    if (candidate) {
-      lines.pop()
-      lineKeys.pop()
-      notice = candidate
+  let notice = ''
+  const missing = countMissing(lineKeys)
+  // 少量遗漏值得提醒；漏得多时写成「另有 7 条」只会变成每题都有的噪音。
+  if (missing > 0 && missing <= 3) {
+    const text = noticeText(missing)
+    if (fits(lines, text)) notice = text
+    else if (lines.length > 1) {
+      // 只有多行正文时才允许用最后一条换提示行；换完仍要少 1-3 条才生效。
+      const shorter = lines.slice(0, -1)
+      const shorterKeys = lineKeys.slice(0, -1)
+      const rest = countMissing(shorterKeys)
+      if (rest > 0 && rest <= 3) {
+        const alt = noticeText(rest)
+        if (fits(shorter, alt)) {
+          lines.length = shorter.length
+          lineKeys.length = shorterKeys.length
+          notice = alt
+        }
+      }
     }
   }
   return blockText(lines, notice)

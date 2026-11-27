@@ -189,6 +189,50 @@ test('recall block stays quiet when many hits are dropped', () => {
   assert.ok(block.length <= maxChars, `${block.length} > ${maxChars}`)
 })
 
+test('recall block does not drop a shown hit to report duplicate ids', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const mk = (id, ch) => ({ rec: { id, text: `${id}：${ch.repeat(60)}`, eventAt: now } })
+  const block = renderRecallBlock([mk('A', '甲'), mk('B', '乙'), mk('A', '甲')], { maxChars: 500, itemChars: 80, now })
+  assert.ok(block.includes('B：'), block)
+  assert.ok(!block.includes('另有'), block)
+  assert.ok(block.length <= 500, `${block.length} > 500`)
+})
+
+test('recall block never cuts a relative date term in half', () => {
+  const now = Date.parse('2026-06-30T12:00:00+08:00')
+  const at = Date.parse('2026-05-03T10:00:00+08:00')
+  const text = '甲'.repeat(198) + '昨天' + '乙'.repeat(40)
+  const block = renderRecallBlock([{ rec: { id: 'cut', text, eventAt: at } }], { maxChars: 900, itemChars: 200, now })
+  assert.ok(!block.includes('…昨'), block)
+})
+
+test('stub line never leaves a half-cut date bracket', () => {
+  const now = Date.parse('2026-06-30T12:00:00+08:00')
+  const at = Date.parse('2026-05-03T10:00:00+08:00')
+  const hits = [
+    { rec: { id: 'a', text: '短句。', eventAt: at } },
+    { rec: { id: 'b', text: '甲'.repeat(28) + '昨天' + '乙'.repeat(80), eventAt: at } },
+    ...Array.from({ length: 4 }, (_, i) => ({ rec: { id: `c${i}`, text: '短记录。', eventAt: at } })),
+  ]
+  const block = renderRecallBlock(hits, { maxChars: 378, itemChars: 200, now })
+  assert.ok(!/\(20\d\d-\d\d-?…/.test(block), block)
+  assert.ok(block.length <= 378, `${block.length} > 378`)
+})
+
+test('Store does not backfill spokenAt on legacy records', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-spoken-'))
+  try {
+    const file = join(dir, 'memories.jsonl')
+    const store = new Store(file).load()
+    const eventAt = Date.parse('2026-05-01T10:00:00+08:00')
+    store.add({ text: '昨天去了医院', eventAt, scope: 's' })
+    store.add({ text: '昨天去了医院', eventAt, spokenAt: Date.parse('2026-11-27T10:00:00+08:00'), scope: 's' })
+    assert.equal(store.records.find((r) => r.text === '昨天去了医院').spokenAt, undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('Store merges duplicate metadata and writes atomically without fixed .tmp file', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mnemonic-store-'))
   try {

@@ -100,10 +100,6 @@ export class Store {
         existing.eventAt = parsedEventAt
         metaChanged = true
       }
-      if (parsedSpokenAt && !existing.spokenAt) {
-        existing.spokenAt = parsedSpokenAt
-        metaChanged = true
-      }
       if (source?.kind === 'tool' && existing.source?.kind !== 'tool') {
         existing.source = source
         metaChanged = true
