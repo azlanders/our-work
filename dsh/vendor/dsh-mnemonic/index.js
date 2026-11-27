@@ -13,7 +13,7 @@ import { buildIndex, indexRecord, search, groupAdjacent } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
 import { loadAliasGroups, expandAliases } from './lib/aliases.js'
 import { RECALL_RULES, renderCard, renderRecallBlock, renderClockDate, ymd } from './lib/card.js'
-import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, attributeKeywords, sanitizeMemoryText } from './lib/text.js'
+import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, questionTypeOf, attributeKeywords, sanitizeMemoryText } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -445,7 +445,14 @@ export function apply(ctx, config = {}) {
       // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
       const hasPrevInjectInWindow = messages.some(isMnemonicRecallMessage)
       if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
-      const block = renderRecallBlock(grouped, { maxChars: budget.inject, itemChars: budget.item, now: ts })
+      // 块顶先写一行「这道题问的是什么类别」：弱模型在大段证据里最容易答错的就是答非所问。
+      const qtype = questionTypeOf(query)
+      const block = renderRecallBlock(grouped, {
+        maxChars: budget.inject,
+        itemChars: budget.item,
+        now: ts,
+        hint: qtype ? `（这道题问的是${qtype}，只答${qtype}本身。）` : '',
+      })
       if (!block) return decision
       const message = await memoryMessage(block)
       if (!message) return decision

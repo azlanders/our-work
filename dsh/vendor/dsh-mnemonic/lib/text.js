@@ -70,6 +70,22 @@ export function isMultiNeedQuery(text) {
   return MULTI_NEED_RE.test(String(text || ''))
 }
 
+// 问句要的是哪一类信息。弱模型在 1200 字证据里最先抓错的是「问什么答什么」，
+// 在块顶写一行「本题问时间」比在尾注里讲六条纪律更直接（120 题配对 +6 净胜，p=0.11）。
+const QUESTION_TYPE_RULES = [
+  ['时间', /哪天|什么时候|几号|几点|多久|几天|隔了|上周|昨天|前天|这个月|那年|生日/],
+  ['地点', /在哪|哪里|哪儿|什么地方|地址/],
+  ['数量', /几个|多少|几次|几件|几遍/],
+  ['人名', /谁|叫什么|名字/],
+  ['原因', /为什么|为啥|原因/],
+]
+
+export function questionTypeOf(text) {
+  const q = String(text || '')
+  for (const [name, re] of QUESTION_TYPE_RULES) if (re.test(q)) return name
+  return ''
+}
+
 // 原话和问法常常没有一个共同词：「我叫沈知夏，24」与「全名咋写」「多大来着」。
 // 写入时按句型补属性词，只进检索权重（keywords），不改变注入给模型的原文。
 const ATTRIBUTE_RULES = [

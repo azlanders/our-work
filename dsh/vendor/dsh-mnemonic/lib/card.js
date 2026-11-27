@@ -146,7 +146,7 @@ export const RECALL_TAIL = '（只答问到的点，一句结论；不补摘录�
  */
 let warnedTinyBudget = false
 
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL } = {}) {
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '' } = {}) {
   if (!hits?.length) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
   // 重复行占满预算却不多给一条证据，先按正文去重，预算留给真正的新内容。
@@ -211,6 +211,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, now, 
 
   const blockText = (bodyLines, notice = '') => [
     head,
+    hint,
     bodyLines.join('\n'),
     notice,
     tail,
