@@ -795,6 +795,24 @@ const archivedMsgIds = new Map()
         }
         if (Number.isFinite(first)) hints.push(`（第一次聊天是 ${ymd(first)}，到今天 ${Math.max(1, Math.ceil((ts - first) / DAY))} 天。）`)
       }
+      // 同一槽位两种现在说法：系统侧标冲突，别让模型默默挑一个（Memobase 的 ABORT / CoMMA 的 conflict cluster）。
+      if (freshHits.length) {
+        const slotVals = new Map()
+        for (const h of freshHits) {
+          // 已被显式作废的旧值是「历史」，不是并行说法；只有两条都还活着才算冲突。
+          if (h.rec.supersededBy) continue
+          const slot = stableAttrOf(h.rec)
+          if (!slot) continue
+          const val = userSide(h.rec.text).replace(/\s+/g, '')
+          if (!val) continue
+          const prev = slotVals.get(slot)
+          if (prev && prev !== val) {
+            hints.push('（同一件事有两种说法，按最近那条；分不清就说记不清。）')
+            break
+          }
+          slotVals.set(slot, val)
+        }
+      }
       const hint = hints.join('')
       if (!freshHits.length && !profile && !open && !hint) {
         dropRecallBlocks(messages)
