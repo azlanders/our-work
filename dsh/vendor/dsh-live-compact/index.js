@@ -930,11 +930,13 @@ export { saveShadowImpl as saveShadow };
 // Under settings.chunkMin, return null.
 export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, context = {}) {
   const settings = context.settings ?? readSettings();
+  // 现场只能看到「没切」，看不到是哪条前置条件挡住的；把分支名带回决策日志，省得盲改。
+  const note = context.note || (() => {});
   const decision = jobCutDecision(context.jobs || []);
-  if (!decision.cut) return null;
+  if (!decision.cut) { note("jobs"); return null; }
   const nodes = session.surface.nodes;
   const priced = measurement.nodes;
-  if (nodes.length === 0 || nodes.length !== priced.length) return null;
+  if (nodes.length === 0 || nodes.length !== priced.length) { note("surface-mismatch"); return null; }
   const classifications = nodes.map((seq) => classifyUserEvent(session, seq));
   const first = session.eventAt(nodes[0])?.type === "system/message" ? 1 : 0;
   let end = priced.length - 1;
@@ -944,7 +946,7 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
   }
   end = retreatIncompleteTail(end, first, (index) =>
     session.eventAt(nodes[index])?.type === "assistant/message" ? "assistant" : "other");
-  if (floorCard >= 0 && end <= floorCard) return null;
+  if (floorCard >= 0 && end <= floorCard) { note("tail-before-card"); return null; }
   while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) end -= 1;
   const visible = [];
   for (let index = first; index <= end; index += 1) {
@@ -977,22 +979,25 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
   const newestLong = [...finishedToolRounds(visible)].reverse().find((round) => roundHasLongRead(visible, round));
   const span = rounds.length ? { start: rounds[0].start, end: rounds.at(-1).end } : null;
   const cutEnd = span ? reservedCutEnd(visible[span.start].index, first) : null;
-  if (span && cutEnd === null) return null;
+  if (span && cutEnd === null) { note("cut-end-null"); return null; }
   if (cutEnd !== null) {
     end = cutEnd;
     while (end >= first && classifications[end].isGenuineUserBoundary && !(floorCard >= 0 && end - 1 <= floorCard)) end -= 1;
-    if (floorCard >= 0 && end <= floorCard) return null;
-    if (isCheckpoint(session, nodes[end])) return null;
+    if (floorCard >= 0 && end <= floorCard) { note("end-at-card"); return null; }
+    if (isCheckpoint(session, nodes[end])) { note("end-is-checkpoint"); return null; }
     while (end >= first && !cutOk(toolPairingBalancedAfter, session, nodes[end])) {
-      if (floorCard >= 0 && end - 1 <= floorCard) return null;
+      if (floorCard >= 0 && end - 1 <= floorCard) { note("pairing-vs-card"); return null; }
       end -= 1;
     }
-    if (floorCard >= 0 && end <= floorCard) return null;
+    if (floorCard >= 0 && end <= floorCard) { note("pairing-at-card"); return null; }
   }
   const longSpan = !context.disableLongRead && newestLong && visible[newestLong.start].index > floorCard
     ? { start: visible[newestLong.start].index, end: visible[newestLong.end].index }
     : null;
-  if (!longSpan && (end < first || isCheckpoint(session, nodes[end]))) return null;
+  if (!longSpan && (end < first || isCheckpoint(session, nodes[end]))) {
+    note(end < first ? "no-end" : "end-checkpoint");
+    return null;
+  }
   const spanPieces = (spanStart, spanEnd) => {
     const pieces = [];
     let pendingCommand = "";
@@ -1195,6 +1200,7 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
     const result = evaluateCandidate(candidate);
     if (result) return result;
   }
+  note("no-candidate");
   return null;
 }
 
@@ -2268,6 +2274,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
           const drain = cloud && (projected || last >= URGENT_TOKENS);
           const drainNotes = [];
           let maintenanceFailed = false;
+          let skipReason = "";
           for (let pass = 0; pass < 8; pass += 1) {
             const measured = measurement;
             if (drain && measured.totalTokens <= settings.keepRoundTokens) break;
@@ -2279,18 +2286,20 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
               rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
               totalTokens: measured.totalTokens,
               drain,
+              note: (reason) => { skipReason = reason; },
             });
             if (chunk === null) {
               if (drain && measured.totalTokens > settings.keepRoundTokens) {
                 this.recordDecision(state, {
                   phase: "cut-skip",
                   reason: "no-legal-span",
+                  why: skipReason,
                   totalTokens: measured.totalTokens,
                   drain: true,
                 });
                 this.ctx.logger?.warn?.(`spine drain stopped at ${measured.totalTokens}; no legal span`);
               } else {
-                this.recordDecision(state, { phase: "cut-skip", reason: "no-legal-span", totalTokens: measured.totalTokens, drain: false });
+                this.recordDecision(state, { phase: "cut-skip", reason: "no-legal-span", why: skipReason, totalTokens: measured.totalTokens, drain: false });
                 this.ctx.logger?.debug?.("spine cut skipped");
               }
               break;
