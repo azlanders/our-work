@@ -68,6 +68,8 @@ const NON_USER_KINDS = new Set([
 /** 只看「这是不是一个真人用户轮」，不看有没有文字：图片/语音轮也要当锚点，不能跨轮配对。 */
 export function isHumanUserRole(msg) {
   if (roleOf(msg) !== 'user') return false
+  // 宿主若把回忆块持久化成普通 user 消息，不能把它当成用户在提问。
+  if (isMnemonicRecallMessage(msg)) return false
   const kind = msg?.source?.kind ?? msg?.message?.source?.kind
   if (kind) {
     if (String(kind).startsWith('plugin:')) return false
