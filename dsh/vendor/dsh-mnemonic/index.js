@@ -208,7 +208,9 @@ const archivedMsgIds = new Map()
 
   const recall = (query, limit = cfg.limit, pool = limit, { expandedTerms = '', excludeIds = null, scope = '', nowTs = Date.now(), allowSuperseded = false, allowRepeat = false } = {}) => {
     const t0 = performance.now()
-    const minScore = effectiveMinScore(store.records.length, cfg.minScore)
+    // 阈值按活跃记录放宽：库里堆满作废/静音记录时，小库的宽松档不该被全量条数吃掉。
+    const liveCount = store.records.reduce((n, r) => n + (r.muted || r.supersededBy ? 0 : 1), 0)
+    const minScore = effectiveMinScore(liveCount, cfg.minScore)
     const idx = ensureIndex()
     const aliasTerms = expandAliases(query, aliasGroups)
     const res = search(idx, store.records, query, {
@@ -924,7 +926,7 @@ const archivedMsgIds = new Map()
           chars: block.length,
           soft: budget.inject <= cfg.softInjectChars,
           // 被预算挤掉的条目不等于没召回：静默失败排查时要知道是「没命中」还是「命中但没装下」。
-          dropped: [...new Set(grouped
+          unrendered: [...new Set(grouped
             .filter((h) => !renderedIds.has(h.rec.id))
             .filter((h) => !(h.why || []).includes('adjacent'))
             .map((h) => h.rec.id))].slice(0, 10),
