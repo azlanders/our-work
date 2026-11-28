@@ -936,7 +936,8 @@ const archivedMsgIds = new Map()
       // 所以这里只记录 cov、加一句限定。metaRecall（「上次那件事」）按最近倒着数，无词面重叠，不判。
       let cov = 1
       let covSamples = 0
-      const CAVEAT = '（下面这些是顺带想起的旧事，跟这句话对不上就别拿来答。）\n'
+      // 「相关但不足」要答部分，不是二选一（ConvoMem 的弃权题就是给 1–4 条相关但答不了的消息）。
+      const CAVEAT = '（下面这些是顺带想起的旧事：对得上的部分可以答，对不上的就说没提过。）\n'
       if (explicitAsk && !metaRecall && renderedIds.size && tokenSet(qTrim).size >= 8) {
         // 每条单独算、取最大：整块并集会把条数和预算算进分子，覆盖率永远偏乐观。
         cov = 0
