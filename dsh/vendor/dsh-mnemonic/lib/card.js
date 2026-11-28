@@ -164,18 +164,18 @@ function dayLabel(ts, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS) {
   if (!Number.isFinite(ts)) return ''
   const base = Number.isFinite(now) ? now : Date.now()
   const diff = Math.floor((base + tzOffsetMs) / DAY) - Math.floor((ts + tzOffsetMs) / DAY)
-  // 口语词后面始终补一个绝对日期：Test of Time（ICLR 2025）实测日期算术平均只有 ~15% 正确率，
-  // 而相对表述会让原本答对的题掉 28%–50%。`前天（11-26）` 两样都给，模型不用自己减。
+  // 绝对日期放前面、口语词放括号：arXiv 2503.17073 里相对时间让 8B 模型掉约 50%，
+  // 绝对+相对组合整体 +55%，而「日期放句首」本身只值 +0.6~4.8%，别把预期写大。
   const md = mmdd(ts, tzOffsetMs)
   // 未来的约定不能算「今天」：下周一的事件按今天渲染，模型会当成已经发生。
-  if (diff < 0) return `还没到（${md}）`
-  if (diff === 0) return `今天（${md}）`
-  if (diff === 1) return `昨天（${md}）`
-  if (diff === 2) return `前天（${md}）`
+  if (diff < 0) return `${md}（还没到）`
+  if (diff === 0) return `${md}（今天）`
+  if (diff === 1) return `${md}（昨天）`
+  if (diff === 2) return `${md}（前天）`
   const d = shiftedDate(ts, tzOffsetMs)
-  if (diff <= 6) return `周${'日一二三四五六'[d.getUTCDay()]}（${md}）`
+  if (diff <= 6) return `${md}（周${'日一二三四五六'[d.getUTCDay()]}）`
   const sameYear = d.getUTCFullYear() === shiftedDate(base, tzOffsetMs).getUTCFullYear()
-  const date = sameYear ? `${d.getUTCMonth() + 1}月${d.getUTCDate()}日` : `${d.getUTCFullYear()}年${d.getUTCMonth() + 1}月${d.getUTCDate()}日`
+  const date = sameYear ? md : `${d.getUTCFullYear()}-${md}`
   // 只写日期的话「差几天」还得模型自己减；Test of Time（ICLR 2025）实测天数计算平均只有 ~15% 正确率，
   // 所以这里把差几天算好一起给。超过两个月就不再报天数，免得出现「367 天前」这种没人这么说话的写法。
   return diff <= 60 ? `${date}（${diff}天前）` : date
