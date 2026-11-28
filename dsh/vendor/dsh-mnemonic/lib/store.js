@@ -13,6 +13,12 @@ function textKey(text, scope = '') {
   return `${scope || ''}\0${text}`
 }
 
+function dayKey(ts) {
+  const n = Number(ts)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  return new Date(n + 8 * 3600000).toISOString().slice(0, 10)
+}
+
 export class Store {
   constructor(file, { maxRecords = 5000 } = {}) {
     this.file = file
@@ -72,9 +78,12 @@ export class Store {
     const parsedEventAt = parseEventTimestamp(eventAt)
     const parsedSpokenAt = parseEventTimestamp(spokenAt)
 
-    // 先按 scope + 正文精确查找，彻底杜绝跨会话吞记录与哈希碰撞误合并
+    // 先按 scope + 正文精确查找，彻底杜绝跨会话吞记录与哈希碰撞误合并。
+    // 但同一天说同一句只算复述，跨天再说就是新的时间证据（「我上次什么时候说过」靠这个）。
+    // 只按 scope+正文合并会把它们压成一条，行首日期永远停在第一天。
+    const day = dayKey(parsedSpokenAt || parsedEventAt || Date.now())
     const existing = this.byText.get(textKey(clean, scope))
-    if (existing) {
+    if (existing && dayKey(existing.spokenAt ?? existing.eventAt ?? existing.createdAt) === day) {
       let metaChanged = false
       existing.uses = (existing.uses || 1) + 1
       existing.lastUsed = Date.now()
@@ -269,6 +278,17 @@ export class Store {
   supersede(id, by) {
     const old = this.byId.get(id)
     if (!old || !by || old === by || old.supersededBy === by.id) return false
+    // 跨会话不能作废：一次拿不到 session 的写入会把别人的「现在」改掉。
+    if ((old.scope || '') !== (by.scope || '')) return false
+    // 改回旧名字会造出 A→B→A，两条都从「现在」里消失；遇到环就不写，让调用方新建一条回退记录。
+    let cur = by
+    const seen = new Set()
+    while (cur) {
+      if (cur.id === old.id) return false
+      if (seen.has(cur.id) || seen.size >= 16) break
+      seen.add(cur.id)
+      cur = cur.supersededBy ? this.byId.get(cur.supersededBy) : null
+    }
     old.supersededBy = by.id
     if (!old.validTo) old.validTo = by.eventAt || by.createdAt || Date.now()
     old.basis = 'tool'

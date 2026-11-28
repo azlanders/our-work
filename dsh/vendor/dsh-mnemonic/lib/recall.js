@@ -1,6 +1,7 @@
 // 检索：倒排索引（支持 O(1) 增量写入）+ BM25 + 关键词/标签 + 时间窗加权 + 重要度/新鲜度。
 import { docExpand, expandLocal, extractTimeWindow, queryGrams } from './text.js'
 import { NEG_REMENTION_MS } from './tone.js'
+import { resolveCurrent } from './supersede.js'
 
 const K1 = 1.2
 const B = 0.75
@@ -171,12 +172,14 @@ export function search(
     }
   }
 
+  // 常见词截断只该在大库生效：9 条的小库从第 8 条起就会把「工作/住址」这类词整条丢掉。
+  // 作废/静音记录不算活跃文档，否则旧版本越多，真正能召回当前值的词越先被砍。
+  const activeN = records.reduce((n, r) => n + (r.muted || r.supersededBy ? 0 : 1), 0) || 1
   const candidates = new Set()
   for (const [term] of q) {
     if (term.length < 2) continue
     const df = index.df.get(term) || 0
-    // 小库（<8 条）不做 50% 通用词截断，避免 1 条记录时 df*2 <= n 恒为假导致无法召回
-    if (df > 0 && (index.n < 8 || df * 2 <= index.n)) {
+    if (df > 0 && (index.n < 64 || df * 2 <= activeN)) {
       const p = index.postings.get(term)
       if (p) for (const i of p) candidates.add(i)
     }
@@ -271,26 +274,14 @@ export function search(
     const used = 1 + Math.min(0.12, (rec.uses || 1) * 0.01)
     // 置顶的记忆优先想起来，但不该挤掉当前问题更相关的证据，所以只给有限加成。
     const final = score * (0.85 + 0.3 * importance) * fresh * used * (rec.pinned ? 1.15 : 1)
-    if (final < minScore) continue
+    // 旧值只是通往当前值的入口：它自己的分数可以略低，解析出的当前值仍要按自己的分数过闸。
+    if (final < (rec.supersededBy && !allowSuperseded ? minScore * 0.8 : minScore)) continue
     // 问「现在」时旧值不能直接出现在块里，但它命中的是同一槽位，应该把查询导向最新后继。
     // 只替换返回对象，原文和作废链都不动；历史意图仍由 allowSuperseded 放回旧值。
     let hitRec = rec
     if (rec.supersededBy && !allowSuperseded) {
-      const seen = new Set()
-      let broken = false
-      while (hitRec?.supersededBy) {
-        if (seen.has(hitRec.id) || seen.size >= 8) { broken = true; break }
-        seen.add(hitRec.id)
-        const next = byId.get(hitRec.supersededBy)
-        if (!next) { broken = true; break }
-        if (scope && next.scope && next.scope !== scope) { broken = true; break }
-        hitRec = next
-      }
-      if (broken || !hitRec || hitRec.supersededBy) continue
-      if (hitRec === rec) continue
-      if (hitRec.muted) continue
-      if (scope && hitRec.scope && hitRec.scope !== scope) continue
-      if (excludeIds?.has(hitRec.id)) continue
+      hitRec = resolveCurrent(byId, rec, { scope })
+      if (!hitRec || hitRec === rec || hitRec.muted || excludeIds?.has(hitRec.id)) continue
     }
     // 复读和负面情绪过滤要落在真正返回的记录上：旧值刚提过，不代表它的当前值也不能出现。
     // 「刚讲过」按会话算；老记录没有 lastInjectedScope 时按同会话处理。

@@ -19,7 +19,8 @@ import { toneOf } from './lib/tone.js'
 import { openLoops, renderOpenLoops } from './lib/openloops.js'
 import { boundaryOf, renderBoundaries } from './lib/boundary.js'
 import { userSide, factSentences, factKeywords } from './lib/facts.js'
-import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, isChitChat, isMetaRecall, isPlanStatement, attributeKeywords, sanitizeMemoryText, tokenSet, userPartOf } from './lib/text.js'
+import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, isChitChat, isMetaRecall, isPlanStatement, attributeKeywords, sanitizeMemoryText, neutralizeRoleMarkers, tokenSet, userPartOf } from './lib/text.js'
+import { resolveCurrent } from './lib/supersede.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -344,10 +345,10 @@ export function apply(ctx, config = {}) {
     if (isLowValueOrInjection(user)) return null
     const asstMsg = messages[asstIndex]
     const prevAssistant = messageText(asstMsg) || ''
-    const cleanUser = sanitizeMemoryText(clip(user, cfg.archiveChars))
+    const cleanUser = neutralizeRoleMarkers(sanitizeMemoryText(clip(user, cfg.archiveChars)))
     // 助手那边的「早呀老大」「嗯嗯」不值得存档：检索命中后她会把自己的寒暄当旧事念一遍。
     const usableAsst = isDegradedAssistantText(prevAssistant) || isChitChat(prevAssistant) ? '' : prevAssistant
-    const cleanAsst = usableAsst ? sanitizeMemoryText(clip(usableAsst, cfg.archiveAsstChars)) : ''
+    const cleanAsst = usableAsst ? neutralizeRoleMarkers(sanitizeMemoryText(clip(usableAsst, cfg.archiveAsstChars))) : ''
     const text = cleanAsst ? `用户：${cleanUser}\n我：${cleanAsst}` : `用户：${cleanUser}`
 
     const asstId = asstMsg?.id || hash32(prevAssistant)
@@ -554,13 +555,9 @@ export function apply(ctx, config = {}) {
             // 旧值必须自己说明是旧的，否则模型会把两个名字都当现在的。
             // 新值不一定在这批命中里，所以直接把「现在是什么」带上，别让她只说「改过了」。
             // 顺着作废链找到真正的当前值：A→B→C 时别把中间值 B 当成现状。
-            let succ = null
-            let cursor = h.rec
-            for (let hop = 0; cursor?.supersededBy && hop < 5; hop += 1) {
-              succ = store.byId.get(cursor.supersededBy) || null
-              if (!succ) break
-              cursor = succ
-            }
+            const succ = h.rec.supersededBy
+              ? resolveCurrent(store.byId, h.rec, { scope: sessionScope(exec?.agent) })
+              : null
             const nowTxt = succ ? `；现在：${clip(userPartOf(succ.text) || succ.text, 40)}` : ''
             const oldMark = h.rec.supersededBy ? `（旧说法，已经改了${nowTxt}）` : ''
             return `${i + 1}. [${h.rec.id}] (${when}) ${oldMark}${clip(h.rec.text, 200)}`
