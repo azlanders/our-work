@@ -40,6 +40,20 @@ function recallCoverage(query, text) {
   return hit / q.size
 }
 
+// 截断窗口只认实词：问句里的「什么/记得/上次」这些二元组几乎每段都有，拿它们定位会把窗口带到废话上。
+const FOCUS_STOP = new Set([
+  '什么', '怎么', '哪里', '哪个', '多少', '记得', '记不', '以前', '之前', '上次', '上回',
+  '那个', '这个', '我们', '你的', '我的', '是不', '不是', '有没', '没有', '你还', '还记',
+])
+
+function focusTerms(query, expanded = '') {
+  const out = new Set()
+  for (const t of tokenSet(`${query || ''} ${expanded || ''}`)) {
+    if (t.length >= 2 && !FOCUS_STOP.has(t)) out.add(t)
+  }
+  return out
+}
+
 const NON_USER_KINDS = new Set([
   'runtime-context',
   'compact-checkpoint',
@@ -809,6 +823,7 @@ export function apply(ctx, config = {}) {
         now: ts,
         profile,
         asstOnly,
+        terms: focusTerms(qTrim, expandedTerms),
         onRender: (id) => renderedIds.add(id),
       }
       let recallBlock = renderRecallBlock(grouped, { ...renderOpts, maxChars: budget.inject, hint })
@@ -884,6 +899,8 @@ export function apply(ctx, config = {}) {
           open: openShown.length,
           chars: block.length,
           soft: budget.inject <= cfg.softInjectChars,
+          // 被预算挤掉的条目不等于没召回：静默失败排查时要知道是「没命中」还是「命中但没装下」。
+          dropped: grouped.filter((h) => !renderedIds.has(h.rec.id)).map((h) => h.rec.id).slice(0, 10),
           // 覆盖率只在明确问旧事时算；null 表示这轮没判。攒够样本后按 risk–coverage 反解阈值。
           cov: covSamples ? Number(cov.toFixed(3)) : null,
           caveat: covSamples > 0 && cov < 0.3 ? 1 : 0,

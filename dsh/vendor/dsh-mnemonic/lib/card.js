@@ -9,7 +9,35 @@ const DEFAULT_TZ_OFFSET_MS = 8 * 3600000
 
 // 裁剪时不让相对日期词被切成半截（「昨天」变成「昨」，括号就成了无主装饰）。
 // 头尾都留：长消息的结论常在句尾（「……所以我明天不去了」），只留头会把它整段丢掉。
-function clipKeepTerms(text, n, anchor, tzOffsetMs) {
+// 按问句实词找覆盖率最高的连续窗口：默认的「头 55% + 尾 45%」会把中间整段丢掉，
+// 而答案句经常正好在中间（「……所以我明天不去了」）。窗口与头/尾任一重叠 ≥70% 就退回默认，
+// 避免为了几个常见词把上下文切碎。
+function focusWindow(src, budget, terms) {
+  if (!terms || !terms.size) return null
+  const hits = []
+  for (const t of terms) {
+    if (!t || t.length < 2) continue
+    let from = 0
+    while (from <= src.length - t.length) {
+      const i = src.indexOf(t, from)
+      if (i < 0) break
+      hits.push({ i, len: t.length })
+      from = i + 1
+    }
+  }
+  if (!hits.length) return null
+  let best = null
+  for (const h of hits) {
+    const start = Math.max(0, Math.min(h.i - 20, src.length - budget))
+    let count = 0
+    for (const x of hits) if (x.i >= start && x.i + x.len <= start + budget) count += x.len
+    if (!best || count > best.count) best = { start, count }
+  }
+  // 只命中一个二元组时多半是「什么/那个」这类问句词，不值得为它改切法。
+  return best && best.count >= 4 ? best : null
+}
+
+function clipKeepTerms(text, n, anchor, tzOffsetMs, terms = null) {
   // 与 lib/text.js 的 clip 保持同一套空白规范化：自动归档是「你：…\n我：…」，
   // 不折行会把一条记忆渲染成两行、第二行还丢了编号。
   const src = String(text ?? '').replace(/\s+/g, ' ').trim()
@@ -31,6 +59,28 @@ function clipKeepTerms(text, n, anchor, tzOffsetMs) {
   for (const { s, e } of spans) {
     if (!Number.isFinite(s) || s < 0) continue
     if (tailStart > s && tailStart < e) { tailStart = e; break }
+  }
+  const focus = focusWindow(src, budget, terms)
+  if (focus) {
+    const w0 = focus.start
+    const w1 = Math.min(src.length, w0 + budget)
+    const headOverlap = Math.max(0, Math.min(w1, headCut) - Math.min(w0, headCut))
+    const tailOverlap = Math.max(0, w1 - Math.max(w0, tailStart))
+    const covered = headOverlap >= headCut * 0.7 || tailOverlap >= (src.length - tailStart) * 0.7
+    if (!covered) {
+      const lead = w0 > 0 ? 1 : 0
+      const trail = w1 < src.length ? 1 : 0
+      const avail = budget - lead - trail
+      let s = w0
+      let e = Math.min(src.length, s + avail)
+      for (const sp of spans) {
+        if (!Number.isFinite(sp.s) || sp.s < 0) continue
+        if (s > sp.s && s < sp.e) s = sp.s
+        if (e > sp.s && e < sp.e) e = Math.min(src.length, sp.e)
+      }
+      if (e - s > avail) e = s + avail
+      if (e > s) return `${lead ? '…' : ''}${src.slice(s, e)}${trail ? '…' : ''}`
+    }
   }
   // 两个截断点移动后可能挤到一起，统一按预算兜一次，保证总长不超过 n。
   const maxTail = budget - headCut
@@ -93,20 +143,20 @@ function splitSides(text) {
 }
 
 // 弱模型常把助手自己说过的话当成对方的设定；助手那半用括号标成「当时的回话」。
-function renderBody(text, budget, anchor, tzOffsetMs) {
+function renderBody(text, budget, anchor, tzOffsetMs, terms = null) {
   const parts = splitSides(text)
-  if (!parts) return inlineDateHints(clipKeepTerms(text, budget, anchor, tzOffsetMs), anchor, tzOffsetMs)
+  if (!parts) return inlineDateHints(clipKeepTerms(text, budget, anchor, tzOffsetMs, terms), anchor, tzOffsetMs)
   // 「你：」+「（我当时回：」+「）」共 9 字，先扣掉再分预算，否则拼完会超。
   const avail = budget - 9
-  if (avail < 16) return inlineDateHints(clipKeepTerms(text, budget, anchor, tzOffsetMs), anchor, tzOffsetMs)
+  if (avail < 16) return inlineDateHints(clipKeepTerms(text, budget, anchor, tzOffsetMs, terms), anchor, tzOffsetMs)
   let userBudget = Math.max(8, Math.round(avail * 0.6))
   let asstBudget = Math.max(4, avail - userBudget)
   // 「用户说一大段、我只回了个嗯」是最常见的形态；按 6:4 硬分会把用不上的额度白白扔掉。
   // 一边本来就短，就把剩下的让给另一边，总预算不变。
   if (parts.user.length < userBudget) asstBudget = Math.max(4, avail - parts.user.length)
   else if (parts.asst.length < asstBudget) userBudget = Math.max(8, avail - parts.asst.length)
-  const user = clipKeepTerms(parts.user, userBudget, anchor, tzOffsetMs)
-  const asst = clipKeepTerms(parts.asst, asstBudget, anchor, tzOffsetMs)
+  const user = clipKeepTerms(parts.user, userBudget, anchor, tzOffsetMs, terms)
+  const asst = clipKeepTerms(parts.asst, asstBudget, anchor, tzOffsetMs, terms)
   return inlineDateHints(asst ? `你：${user}（我当时回：${asst}）` : `你：${user}`, anchor, tzOffsetMs)
 }
 
@@ -224,7 +274,7 @@ export const RECALL_TAIL = '（用聊天口气说，别念原文；原话里没�
  */
 let warnedTinyBudget = false
 
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, onRender = null } = {}) {
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, terms = null, onRender = null } = {}) {
   hits = Array.isArray(hits) ? hits : []
   if (!hits.length && !profile && !hint) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
@@ -342,7 +392,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
       : asstOnly?.has(hit.rec.id) ? '〔她说的〕'
       : replacedIds.has(hit.rec.id) ? '（现在的说法）' : ''
     const extra = mark + evtTag
-    const body = extra + renderBody(hit.rec.text, itemBudget, anchor, tzOffsetMs)
+    const body = extra + renderBody(hit.rec.text, itemBudget, anchor, tzOffsetMs, terms)
     const line = prefix + body
     const sep = lines.length ? 1 : 0
     if (used + sep + line.length <= bodyBudget) {
@@ -355,7 +405,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     const avail = bodyBudget - used - sep - prefix.length - extra.length
     // 第一条一定要装下；后续条目只有剩余预算够放有效正文（>=40字）时才裁短塞入，否则宁可留完整条。
     if (!lines.length || avail >= 40) {
-      const stub = avail > 0 ? renderBody(hit.rec.text, avail, anchor, tzOffsetMs) : ''
+      const stub = avail > 0 ? renderBody(hit.rec.text, avail, anchor, tzOffsetMs, terms) : ''
       // inline 会变长，塞不下就放弃，绝不让整块超预算。
       if (stub && used + sep + prefix.length + extra.length + stub.length <= bodyBudget) {
         lines.push(prefix + extra + stub)
