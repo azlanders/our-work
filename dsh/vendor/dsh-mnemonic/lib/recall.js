@@ -1,5 +1,5 @@
 // 检索：倒排索引（支持 O(1) 增量写入）+ BM25 + 关键词/标签 + 时间窗加权 + 重要度/新鲜度。
-import { docExpand, expandLocal, extractTimeWindow, queryGrams, userPartOf } from './text.js'
+import { docExpand, expandLocal, extractTimeWindow, queryGrams } from './text.js'
 import { NEG_REMENTION_MS } from './tone.js'
 
 const K1 = 1.2
@@ -22,11 +22,15 @@ export function indexRecord(index, rec, idx) {
   const kwList = [...(rec.keywords || []), ...(rec.tags || [])]
     .map((k) => String(k || '').trim().toLowerCase())
     .filter(Boolean)
-  // 只把「用户说的那半段」进检索索引：助手自己的话被索引后，会用它当时的猜测去命中
-  // 「用户喜欢什么」，模型再把助手的话当成用户事实（mem0 #4573：97.8% 的垃圾记忆来自
-  // 抽取时拍平 role，召回内容又被喂回抽取器）。正文仍保留两半，渲染时标明归属。
-  const indexText = userPartOf(rec.text) || rec.text
-  const body = indexText + ' ' + kwList.join(' ') + ' ' + docExpand(indexText)
+  // 两半都进索引：mem0 #4573 的病根是抽取时把 role 拍平，不是索引。只收用户半段会把
+  // 她给过的建议、答应过的事变成检索盲区（Graphiti 的边也带两端）。归属由渲染层的
+  // 「你：…（我当时回：…）」和回忆纪律第 5 条保证，不靠删索引来防。
+  // 但包装词本身不能进索引：每条都带「你：／我当时回：」，会变成全库高频二元组，
+  // IDF 被稀释，「你当时回我什么」还会命中每一条。
+  const plain = String(rec.text || '')
+    .replace(/（我当时回：/g, ' ')
+    .replace(/(?:^|\n)(?:用户|你|我)：/g, '\n')
+  const body = plain + ' ' + kwList.join(' ') + ' ' + docExpand(plain)
   const g = queryGrams(body)
   const kwSet = new Set(kwList)
   index.grams.set(rec.id, g)

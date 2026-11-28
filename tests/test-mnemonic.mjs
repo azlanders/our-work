@@ -180,7 +180,7 @@ test('recall block anchors relative dates at spokenAt, not eventAt', () => {
   const block = renderRecallBlock([
     { rec: { id: 'spoken', text: '昨天把旧照片送到江北。', eventAt, spokenAt } },
   ], { maxChars: 900, itemChars: 200, now })
-  assert.ok(block.includes('1. 前天'), 'line label uses spoken words, not ISO dates')
+  assert.ok(block.includes('[M1] 昨天（11-24）'), 'line label gives spoken word + absolute date')
   assert.ok(block.includes('昨天(2026-11-23)'), block)
 
   const legacy = renderRecallBlock([
@@ -678,7 +678,7 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
   }
 })
 
-test('检索只索引用户那半段，助手自己的话不当成用户事实', () => {
+test('两半都进检索索引，归属由渲染层标注', () => {
   const rec = {
     id: 'sides-idx',
     text: '用户：我不吃香菜\n我：你喜欢猫，还养了一只布偶',
@@ -688,8 +688,11 @@ test('检索只索引用户那半段，助手自己的话不当成用户事实',
   }
   const idx = buildIndex([rec])
   const opts = { limit: 3, minScore: 0, minHits: 0 }
-  assert.equal(search(idx, [rec], '布偶', opts).length, 0, 'assistant half must not match as user fact')
+  // 只收用户半段会让她答应过的事变成盲区；防「助手的话当用户事实」靠归属标注和画像只取用户半段。
+  assert.equal(search(idx, [rec], '布偶', opts).length, 1, 'assistant half stays searchable')
   assert.equal(search(idx, [rec], '香菜', opts).length, 1)
+  const block = renderRecallBlock([{ rec, score: 1 }], { maxChars: 600, itemChars: 200 })
+  assert.match(block, /我当时回：/, 'assistant half is marked as her words')
 })
 
 test('attribute keywords bridge colloquial statements to how people ask for them', () => {
@@ -891,7 +894,7 @@ test('capability: mem_save supports eventAt ISO date and supersedes outdated mem
       assert.match(rec.text, /徐汇区衡山路/)
       assert.match(rec.text, /\(2026-11-20\)/)
       assert.match(rec.text, /浦东世纪大道/, '旧值仍可翻到')
-      assert.match(rec.text, /（旧说法）/, '旧值必须自己说明是旧的')
+      assert.match(rec.text, /（旧说法，已经改了）/, '旧值必须自己说明是旧的')
     } finally {
       dispose()
     }

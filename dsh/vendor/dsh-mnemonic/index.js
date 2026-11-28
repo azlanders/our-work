@@ -26,6 +26,19 @@ export const inject = ['tools']
 
 const DAY = 86400000
 const REWRITE_TTL_MS = 5 * 60 * 1000
+
+// 检索命中不等于有证据：BM25 会靠标签、扩词或邻轮把一条正文里没有问句实词的记录带进来，
+// 这种块喂给弱模型，它会拿旧事硬答（167 道「未知当事实」的主因）。这里用真正渲染进块的
+// 正文算覆盖率，只数二元组，专门区分「命中了」和「答得上」。
+function recallCoverage(query, text) {
+  const q = tokenSet(query)
+  const t = tokenSet(text)
+  if (!q.size || !t.size) return 0
+  let hit = 0
+  for (const g of q) if (t.has(g)) hit += 1
+  return hit / q.size
+}
+
 const NON_USER_KINDS = new Set([
   'runtime-context',
   'compact-checkpoint',
@@ -527,7 +540,17 @@ export function apply(ctx, config = {}) {
           const body = hits.map((h, i) => {
             const when = ymd(h.rec.eventAt || h.rec.createdAt)
             // 旧值必须自己说明是旧的，否则模型会把两个名字都当现在的。
-            const oldMark = h.rec.supersededBy ? '（旧说法）' : ''
+            // 新值不一定在这批命中里，所以直接把「现在是什么」带上，别让她只说「改过了」。
+            // 顺着作废链找到真正的当前值：A→B→C 时别把中间值 B 当成现状。
+            let succ = null
+            let cursor = h.rec
+            for (let hop = 0; cursor?.supersededBy && hop < 5; hop += 1) {
+              succ = store.byId.get(cursor.supersededBy) || null
+              if (!succ) break
+              cursor = succ
+            }
+            const nowTxt = succ ? `；现在：${clip(userPartOf(succ.text) || succ.text, 40)}` : ''
+            const oldMark = h.rec.supersededBy ? `（旧说法，已经改了${nowTxt}）` : ''
             return `${i + 1}. [${h.rec.id}] (${when}) ${oldMark}${clip(h.rec.text, 200)}`
           }).join('\n')
           for (const h of hits) store.touch(h.rec.id)
@@ -738,15 +761,38 @@ export function apply(ctx, config = {}) {
       // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
       if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
       const renderedIds = new Set()
-      const recallBlock = renderRecallBlock(grouped, {
-        maxChars: budget.inject,
+      const renderOpts = {
         itemChars: budget.item,
         firstItemChars: cfg.firstItemBoost > 1 ? Math.round(budget.item * cfg.firstItemBoost) : 0,
         now: ts,
-        hint,
         profile,
         onRender: (id) => renderedIds.add(id),
-      })
+      }
+      let recallBlock = renderRecallBlock(grouped, { ...renderOpts, maxChars: budget.inject, hint })
+      // 覆盖率闸门：只做软提示，不整块抹证据——误杀一次就再也答不上，这个代价比多给一句限定大。
+      // 依据 arXiv 2608.22228：弃权判断要放系统侧；但阈值必须先量后调（714 题上按 risk–coverage 反解），
+      // 所以这里只记录 cov、加一句限定。metaRecall（「上次那件事」）按最近倒着数，无词面重叠，不判。
+      let cov = 1
+      let covSamples = 0
+      const CAVEAT = '（下面这些是顺带想起的旧事，跟这句话对不上就别拿来答。）\n'
+      if (explicitAsk && !metaRecall && renderedIds.size && tokenSet(qTrim).size >= 8) {
+        // 每条单独算、取最大：整块并集会把条数和预算算进分子，覆盖率永远偏乐观。
+        cov = 0
+        for (const id of renderedIds) {
+          const r = store.byId.get(id)
+          if (!r) continue
+          covSamples += 1
+          // 两个分母分开算：把扩词塞进同一个分母，会把对得上的记录压到阈值以下；
+          // 只算原问句，又会把「我平时爱喝啥 vs 喜欢冰美式」这种同义改写判死。
+          const text = String(r.text || '')
+          cov = Math.max(cov, recallCoverage(qTrim, text))
+          if (expandedTerms) cov = Math.max(cov, recallCoverage(expandedTerms, text))
+        }
+        if (covSamples && cov < 0.3) {
+          renderedIds.clear()
+          recallBlock = CAVEAT + renderRecallBlock(grouped, { ...renderOpts, maxChars: budget.inject - CAVEAT.length, hint })
+        }
+      }
       let block = [open, recallBlock].filter(Boolean).join('\n')
       // 只有一句提示（比如「认识多久」的起点）时也得让她看到，别被空命中吞掉。
       // 只有「这次没翻到」的提示时不能套「这些事我记得」的标题，否则空结果被包装成有内容。
@@ -792,6 +838,8 @@ export function apply(ctx, config = {}) {
           open: openShown.length,
           chars: block.length,
           soft: budget.inject <= cfg.softInjectChars,
+          // 覆盖率只在明确问旧事时算；null 表示这轮没判。攒够样本后按 risk–coverage 反解阈值。
+          cov: covSamples ? Number(cov.toFixed(3)) : null,
         }) + '\n')
       } catch (error) {
         ctx.logger?.warn?.(`dsh-mnemonic: 注入日志写入失败: ${error?.message || error}`)
