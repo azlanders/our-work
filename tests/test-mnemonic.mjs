@@ -11,6 +11,7 @@ import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/li
 import { docExpand, expandLocal, isPlanStatement } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
 import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
+import { planChatDigest, renderDigest } from '../dsh/vendor/dsh-mnemonic/lib/digest.js'
 
 test('旧运行快照只保留最新一份，其余按 surface 序号返回待替换', () => {
   const event = (kind, form) => ({ type: 'user/message', data: { source: { kind, form } } })
@@ -55,6 +56,72 @@ test('旧运行快照只保留最新一份，其余按 surface 序号返回待�
   const nudgePruned = []
   assert.equal(pruneStaleNudges(nudSession, (seq) => nudgePruned.push(seq), 1), 2)
   assert.deepEqual(nudgePruned, [30, 31])
+})
+
+test('聊天折叠：只折最老的一段，尾部原样保留，tool-call 不与结果拆开', () => {
+  const events = new Map()
+  const nodes = [1]
+  events.set(1, { type: 'system/message', data: { message: { content: [{ type: 'text', text: 'SYS' }] } } })
+  let seq = 2
+  const push = (event) => {
+    events.set(seq, event)
+    nodes.push(seq)
+    seq += 1
+  }
+  // 20 个老回合：真人一句 + 她说一句，中间夹运行上下文墓碑
+  for (let i = 0; i < 20; i += 1) {
+    push({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: `他说第${i}件事：${'甲'.repeat(60)}` }], source: { kind: 'user' } } })
+    push({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'reasoning', text: '思'.repeat(900) }, { type: 'text', text: `我答第${i}件：${'乙'.repeat(40)}` }] } } })
+    push({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '旧快照' }], source: { kind: 'runtime-context', form: 'pruned' } } })
+  }
+  // 尾部 42 个节点（21 轮）保持原样
+  for (let i = 0; i < 21; i += 1) {
+    push({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: `最近第${i}问` }], source: { kind: 'user' } } })
+    push({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: `最近第${i}答` }] } } })
+  }
+  const session = { surface: { nodes }, eventAt: (s) => events.get(s) }
+  const plan = planChatDigest(session, { keepNodes: 42, minChars: 20000 })
+  assert.ok(plan, '老段够大就该折')
+  assert.equal(plan.seqs[0], 2)
+  assert.ok(!plan.seqs.includes(nodes.at(-1)), '尾部原样保留')
+  assert.ok(plan.chars >= 20000, `chars=${plan.chars}`)
+  assert.match(plan.text, /他说过/)
+  assert.match(plan.text, /我说过/)
+  assert.match(plan.text, /mem_recall/)
+  assert.ok(!plan.text.includes('思思思思思'), '旧思考不进摘要')
+
+  // 段太小就不折
+  assert.equal(planChatDigest(session, { keepNodes: 42, minChars: 10 ** 7 }), null)
+  // 没有足够节点也不折
+  assert.equal(planChatDigest({ surface: { nodes: nodes.slice(0, 5) }, eventAt: (s) => events.get(s) }, { keepNodes: 0, minChars: 1 }), null)
+})
+
+test('聊天折叠不把 tool-call 和它的结果拆开', () => {
+  const events = new Map()
+  const nodes = [1]
+  events.set(1, { type: 'system/message', data: { message: { content: [{ type: 'text', text: 'SYS' }] } } })
+  let seq = 2
+  const push = (event) => { events.set(seq, event); nodes.push(seq); seq += 1 }
+  // 第一刀正好落在 tool-call 上：结果在保留区里，必须把这条助手消息踢出折叠段
+  push({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '去查一下' }], source: { kind: 'user' } } })
+  for (let i = 0; i < 6; i += 1) {
+    push({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: `问${i}${'甲'.repeat(500)}` }], source: { kind: 'user' } } })
+    push({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: `答${i}` }] } } })
+  }
+  const callSeq = seq
+  push({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'tool-call', id: 'call_edge', name: 'bash', arguments: '{}' }] } } })
+  const resultSeq = seq
+  push({ type: 'tool/result', data: { message: { role: 'tool', toolCallId: 'call_edge', content: [{ type: 'text', text: '结果' }] } } })
+  for (let i = 0; i < 20; i += 1) {
+    push({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: `尾${i}` }], source: { kind: 'user' } } })
+    push({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: `尾答${i}` }] } } })
+  }
+  const session = { surface: { nodes }, eventAt: (s) => events.get(s) }
+  const plan = planChatDigest(session, { keepNodes: 40, minChars: 100 })
+  if (plan) {
+    const picked = new Set(plan.seqs)
+    assert.ok(!(picked.has(callSeq) && !picked.has(resultSeq)), 'tool-call 留在段里时结果必须一起折')
+  }
 })
 
 test('计划句式不当作改口：下个月搬家不能覆盖现在的住址', () => {

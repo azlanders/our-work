@@ -22,6 +22,7 @@ import { boundaryOf, renderBoundaries } from './lib/boundary.js'
 import { userSide, factSentences, factKeywords } from './lib/facts.js'
 import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, isChitChat, isMetaRecall, isPlanStatement, attributeKeywords, sanitizeMemoryText, neutralizeRoleMarkers, tokenSet, userPartOf } from './lib/text.js'
 import { resolveCurrent } from './lib/supersede.js'
+import { DIGEST_FORM, DIGEST_KIND, planChatDigest } from './lib/digest.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -193,6 +194,25 @@ export function pruneStaleNudges(session, append, keep = NUDGE_KEEP) {
   return hits.length
 }
 
+// 很老的纯聊天段折成一条摘要节点，返回被折掉的字符数（0 表示没折）。
+// 只折最老的一段、尾部留原始对话：Anthropic 的 compaction 也是「只摘要已结束段」。
+export function pruneChatDigest(session, { keepNodes, minChars } = {}) {
+  const plan = planChatDigest(session, { keepNodes, minChars })
+  if (!plan) return 0
+  session.append('user/message', {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text: plan.text }],
+    // runtime-context 在 onebot 的「发言消息」判据里被排除，摘要不会被当成真人说话；
+    // form 单独标出来，宿主/插件再跑剪枝时也不会把这条当快照处理。
+    source: { kind: DIGEST_KIND, form: DIGEST_FORM },
+  }, {
+    surfaceOp: { op: 'replace', startSeq: plan.seqs[0], endSeq: plan.seqs[plan.seqs.length - 1] },
+    sourceEventSeqs: plan.seqs,
+  })
+  return plan.chars
+}
+
 export function effectiveMinScore(recordCount, targetMinScore) {
   const low = Math.min(targetMinScore, 1.2)
   if (recordCount <= 30) return low
@@ -211,6 +231,9 @@ export function apply(ctx, config = {}) {
   const cfg = {
     storePath: config.storePath || defaultStorePath(home),
     maxRecords: num(config.maxRecords, 5000),
+    // 折叠后尾部保留的原始节点数（40 ≈ 20 轮对话）；被折段至少 2 万字符才值得替换一次。
+    digestKeepNodes: num(config.digestKeepNodes, 40),
+    digestMinChars: num(config.digestMinChars, 20000),
     injectChars: num(config.injectChars, 900),
     itemChars: num(config.itemChars, 200),
     // 第一名放宽倍数：1 表示关（默认），跑基准时用 1.6 之类的值做 A/B。
@@ -318,9 +341,10 @@ export function apply(ctx, config = {}) {
   const countersPath = join(dirname(cfg.storePath), 'counters.json')
   let corrections = 0
   // 运行上下文去重的现场计数：pre-step 拿到的 messages 到底有没有这些旧快照，只有数出来才知道。
-let ctxPrunedTotal = 0
-let sysPrunedTotal = 0
-let nudgePrunedTotal = 0
+  let ctxPrunedTotal = 0
+  let sysPrunedTotal = 0
+  let nudgePrunedTotal = 0
+  let digestPrunedChars = 0
   try {
     corrections = Number(JSON.parse(readFileSync(countersPath, 'utf8')).corrections) || 0
   } catch { /* 文件不存在或坏了就当 0，不用为计数器起一个错误分支 */ }
@@ -837,6 +861,11 @@ const archivedMsgIds = new Map()
             source,
           }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
         })
+        // 最后才折最老的纯聊天段：前面的快照/系统/观测卡已经变短，摘要里的正文字数才是准的。
+        digestPrunedChars += pruneChatDigest(session, {
+          keepNodes: cfg.digestKeepNodes,
+          minChars: cfg.digestMinChars,
+        })
       }
       const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserRole(m) ? i : found), -1)
@@ -1207,6 +1236,7 @@ const archivedMsgIds = new Map()
             ctxPrunedTotal,
             sysPrunedTotal,
             nudgePrunedTotal,
+            digestPrunedChars,
             newest: store.records.at(-1)?.createdAt || null,
             todayAdded: store.records.filter((r) => now() - (r.createdAt || 0) < DAY).length,
             injectToday: injectStatsToday(now()),
