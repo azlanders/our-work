@@ -375,10 +375,11 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     const successor = hit.rec.supersededBy ? currentOf(hit.rec) : null
     const successorInBlock = Boolean(successor && successor.id !== hit.rec.id && listById.has(successor.id))
     const mark = hit.rec.supersededBy
-      // 弱模型看到「已经改了」会顺手编个新值，必须明确堵住；当前值就在块里时改指下文，别自相矛盾。
+      // 只陈述「这是以前的说法」，不写「改成什么别猜」：否定式指令会顺带把新值的话题点亮
+      // （HN 复盘里点名过的负知识注入），而且弱模型容易把「别猜」当成邀请。
       ? successorInBlock
-        ? '（旧说法，已经改了；下面写着现在的说法）'
-        : '（旧说法，已经改了；改成什么别猜，不知道就说记不清）'
+        ? '（以前的说法，现在的写在下面）'
+        : '（以前的说法，现在已经不是这样了）'
       // 只被助手半句命中的证据，要自己说清是谁说的，否则会被当成对方的设定（mem0 #4573）。
       : asstOnly?.has(hit.rec.id) ? '〔她说的〕'
       : replacedIds.has(hit.rec.id) ? '（现在的说法）' : ''
