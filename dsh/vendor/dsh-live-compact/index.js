@@ -2301,11 +2301,12 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
                   reason: "no-legal-span",
                   why: skipReason,
                   totalTokens: measured.totalTokens,
+                  n: agent.session?.surface?.nodes?.length ?? 0,
                   drain: true,
                 });
                 this.ctx.logger?.warn?.(`spine drain stopped at ${measured.totalTokens}; no legal span`);
               } else {
-                this.recordDecision(state, { phase: "cut-skip", reason: "no-legal-span", why: skipReason, totalTokens: measured.totalTokens, drain: false });
+                this.recordDecision(state, { phase: "cut-skip", reason: "no-legal-span", why: skipReason, totalTokens: measured.totalTokens, n: agent.session?.surface?.nodes?.length ?? 0, drain: false });
                 this.ctx.logger?.debug?.("spine cut skipped");
               }
               break;
