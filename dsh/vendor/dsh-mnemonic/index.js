@@ -104,6 +104,27 @@ function dropRecallBlocks(messages) {
   }
 }
 
+// 宿主的运行上下文快照自己写着「supersedes earlier snapshots」，但旧副本会一直留在窗口里：
+// 实测一条会话里堆了 172 份运行快照 + 124 份 system 静态段，单轮输入从 1.5 万涨到 15 万 token。
+// 每类只留最后一组，旧的原样摘掉——这不是记忆，是过期状态，留着只会让模型把旧心情当现在。
+const STALE_CONTEXT_PREFIXES = ['Current runtime context.', '（可观测运行信息：']
+
+export function dropStaleRuntimeContext(messages) {
+  let removed = 0
+  for (const prefix of STALE_CONTEXT_PREFIXES) {
+    const hits = []
+    for (let i = 0; i < messages.length; i += 1) {
+      if (messageText(messages[i]).trim().startsWith(prefix)) hits.push(i)
+    }
+    // 从后往前删，下标不会互相错位；最后一组（hits.at(-1)）保留。
+    for (let k = hits.length - 1; k >= 1; k -= 1) {
+      messages.splice(hits[k - 1], 1)
+      removed += 1
+    }
+  }
+  return removed
+}
+
 export function effectiveMinScore(recordCount, targetMinScore) {
   const low = Math.min(targetMinScore, 1.2)
   if (recordCount <= 30) return low
@@ -706,6 +727,7 @@ const archivedMsgIds = new Map()
     try {
       if (decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
       const messages = decision.messages
+      const ctxDropped = dropStaleRuntimeContext(messages)
       const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserRole(m) ? i : found), -1)
       if (lastUserIndex < 0) return decision
@@ -1011,6 +1033,7 @@ const archivedMsgIds = new Map()
           hits: renderedIds.size,
           open: openShown.length,
           chars: block.length,
+          ctx: ctxDropped,
           soft: budget.inject <= cfg.softInjectChars,
           // 被预算挤掉的条目不等于没召回：静默失败排查时要知道是「没命中」还是「命中但没装下」。
           unrendered: [...new Set(grouped
