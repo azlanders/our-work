@@ -300,6 +300,7 @@ export function search(
     const entryScore = hitRec === rec
       ? final
       : score * (0.85 + 0.3 * hitImportance) * hitFresh * hitUsed * (hitRec.pinned ? 1.15 : 1)
+    if (entryScore < minScore) continue
     const entry = {
       rec: hitRec,
       score: Math.round(entryScore * 100) / 100,
