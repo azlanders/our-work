@@ -258,7 +258,8 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     ? `（现在：${list
       .filter((h) => replacedIds.has(h.rec.id) && !h.rec.supersededBy)
       .slice(0, 2)
-      .map((h) => clip(h.rec.text, 40))
+      // 当前值只取她说的那半句：带上「我当时回」会把 40 字预算浪费在包装词上。
+      .map((h) => clip(String(h.rec.text || '').replace(/^你：/, '').replace(/（我当时回：[\s\S]*$/, ''), 40))
       .join('；')}）`
     : ''
   const reserve = head.length + tail.length + hint.length + profile.length + nowLine.length + 5
@@ -291,8 +292,9 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     const anchor = hit.rec.spokenAt ?? hit.rec.eventAt ?? hit.rec.createdAt
     // 说话时间和事发时间差一天以上（补录、导入、计划类）时把事发日也标出来，别让行首盖掉。
     // 未来的日期不能写「事发」：计划类记录会被读成已经发生。
+    const evtBase = Number.isFinite(now) ? now : Date.now()
     const evtTag = hit.rec.eventAt && Math.abs(hit.rec.eventAt - anchor) > DAY
-      ? `〔${hit.rec.eventAt > now ? '计划' : '事发'} ${mmdd(hit.rec.eventAt, tzOffsetMs)}〕`
+      ? `〔${hit.rec.eventAt > evtBase ? '计划' : '事发'} ${mmdd(hit.rec.eventAt, tzOffsetMs)}〕`
       : ''
     // 最强的那条多给一点字数：错题里「证据在块里却答错」有一类是正文被截掉了关键那半句。
     // 总预算不变，多给第一条的额度是从后面弱相关条目里挪的。

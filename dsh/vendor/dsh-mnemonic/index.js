@@ -378,7 +378,9 @@ export function apply(ctx, config = {}) {
           if (theirs.size < 3) continue
           let shared = 0
           for (const g of mine) if (theirs.has(g)) shared += 1
-          if (shared / (mine.size + theirs.size - shared) >= 0.65) {
+          // 折叠只是展示层，但折错会把一条真事从块里藏掉；调研里自动合并的 precision 目标
+          // 是 ≥0.98，文本近重复到不了这个量级，所以把阈值从 0.65 提到 0.75，宁漏不合。
+          if (shared / (mine.size + theirs.size - shared) >= 0.75) {
             rec.canonicalId = other.canonicalId || other.id
             store.touched = true
             break
