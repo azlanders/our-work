@@ -54,6 +54,7 @@ test('stableAttrOf 不把加班、出差当成改职业', () => {
   assert.equal(stableAttrOf(rec({ text: '用户：我换工作了' })), '工作')
   assert.equal(stableAttrOf(rec({ text: '用户：我换工作了，现在在便利店上夜班' })), '工作')
   assert.equal(stableAttrOf(rec({ text: '用户：我在便利店上班' })), '工作')
+  assert.equal(stableAttrOf(rec({ text: '用户：我在便利店上夜班' })), '工作')
   assert.equal(stableAttrOf(rec({ text: '用户：我叫沈知夏' })), '称呼')
 })
 

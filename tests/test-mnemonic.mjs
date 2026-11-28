@@ -678,6 +678,20 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
   }
 })
 
+test('检索只索引用户那半段，助手自己的话不当成用户事实', () => {
+  const rec = {
+    id: 'sides-idx',
+    text: '用户：我不吃香菜\n我：你喜欢猫，还养了一只布偶',
+    scope: 'p',
+    importance: 0.6,
+    createdAt: Date.now(),
+  }
+  const idx = buildIndex([rec])
+  const opts = { limit: 3, minScore: 0, minHits: 0 }
+  assert.equal(search(idx, [rec], '布偶', opts).length, 0, 'assistant half must not match as user fact')
+  assert.equal(search(idx, [rec], '香菜', opts).length, 1)
+})
+
 test('attribute keywords bridge colloquial statements to how people ask for them', () => {
   assert.deepEqual(attributeKeywords('今天天气不错'), [])
   assert.ok(attributeKeywords('我叫沈知夏，知了的知，夏天的夏，24').includes('全名'))

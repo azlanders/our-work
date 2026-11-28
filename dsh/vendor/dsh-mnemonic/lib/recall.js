@@ -1,5 +1,5 @@
 // 检索：倒排索引（支持 O(1) 增量写入）+ BM25 + 关键词/标签 + 时间窗加权 + 重要度/新鲜度。
-import { docExpand, expandLocal, extractTimeWindow, queryGrams } from './text.js'
+import { docExpand, expandLocal, extractTimeWindow, queryGrams, userPartOf } from './text.js'
 import { NEG_REMENTION_MS } from './tone.js'
 
 const K1 = 1.2
@@ -22,7 +22,11 @@ export function indexRecord(index, rec, idx) {
   const kwList = [...(rec.keywords || []), ...(rec.tags || [])]
     .map((k) => String(k || '').trim().toLowerCase())
     .filter(Boolean)
-  const body = rec.text + ' ' + kwList.join(' ') + ' ' + docExpand(rec.text)
+  // 只把「用户说的那半段」进检索索引：助手自己的话被索引后，会用它当时的猜测去命中
+  // 「用户喜欢什么」，模型再把助手的话当成用户事实（mem0 #4573：97.8% 的垃圾记忆来自
+  // 抽取时拍平 role，召回内容又被喂回抽取器）。正文仍保留两半，渲染时标明归属。
+  const indexText = userPartOf(rec.text) || rec.text
+  const body = indexText + ' ' + kwList.join(' ') + ' ' + docExpand(indexText)
   const g = queryGrams(body)
   const kwSet = new Set(kwList)
   index.grams.set(rec.id, g)
