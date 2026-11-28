@@ -802,10 +802,12 @@ const archivedMsgIds = new Map()
         })
         sysPrunedTotal += pruneStaleSystemNodes(session, (seq) => {
           session.append('system/message', {
-            id: randomUUID(),
-            role: 'system',
-            content: [],
-            source: { kind: 'system-prompt' },
+            message: {
+              id: randomUUID(),
+              role: 'system',
+              content: [],
+              source: { kind: 'system-prompt' },
+            },
           }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
         })
         nudgePrunedTotal += pruneStaleNudges(session, (seq, event) => {
