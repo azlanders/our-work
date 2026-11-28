@@ -70,6 +70,13 @@ export function isMnemonicRecallMessage(msg) {
   return kind === 'plugin:dsh-mnemonic'
 }
 
+/** 宿主不一定在下一轮替我们清掉旧回忆块；先把它们摘掉，避免过期时间戳和旧证据一起留在窗口里。 */
+function dropRecallBlocks(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (isMnemonicRecallMessage(messages[i])) messages.splice(i, 1)
+  }
+}
+
 export function effectiveMinScore(recordCount, targetMinScore) {
   const low = Math.min(targetMinScore, 1.2)
   if (recordCount <= 30) return low
@@ -207,7 +214,7 @@ export function apply(ctx, config = {}) {
   }
 
   const REWRITE_SYS = `把用户的这句话转成往旧聊天记录里检索用的词。只输出词，空格分隔，8-12 个。
-要写人名、物件、动作，以及同义词和上位词（问"喝的"写 咖啡 美式 拿铁 茶；问"吃的"写 抄手 面 饭 早饭）。
+要写人名、物件、动作，以及同义词和上位词；问类别时写这一类里常见的具体东西。
 不要解释，不要句子。`
 
   const llmAndModel = () => {
@@ -648,8 +655,8 @@ export function apply(ctx, config = {}) {
       }
       const lastInject = lastInjectByScope.get(scopeKey) || { at: 0, sig: '' }
       if (cfg.injectCooldownMs && ts - lastInject.at < cfg.injectCooldownMs) return decision
-      // 「我叫啥来着」这种口语回溯不带「记得/上次」，但确实在翻旧账，也该拿到满档预算。
-      const wantsRecall = /记得|记不记得|记住(?:什么|啥|哪些|没|了吗|过)|上次|上回|之前|以前|那天|那次|生日|叫什么|叫啥|啥名字|住哪|多久|来着|多大|几岁|老家|哪人/.test(qTrim)
+      // 强回溯才值得满档预算和一次查询改写；「我之前也不吃辣」这种陈述不该按查档案处理。
+      const wantsRecall = /记得|记不记得|记住(?:什么|啥|哪些|没|了吗|过)|上次|上回|那天|那次|生日|叫什么|叫啥|啥名字|住哪|来着|多大|几岁|老家|哪人/.test(qTrim)
       // 「你还记得上次那件事吗」这种没点名的追问，关键词检索一条也召不回；按最近聊过的倒着数。
       const metaRecall = !chitChat && isMetaRecall(qTrim)
       // 查询改写是每条一次上游调用：日常闲聊改写收益很小，只在真要翻旧账时才付这笔钱。
@@ -701,8 +708,13 @@ export function apply(ctx, config = {}) {
       const hits = chitChat || stopRecall || proactiveBlocked ? [] : recalled
       // 同一句原文已经在当前窗口里（用户刚复述、或上一轮回忆块还留着），再注一遍就是复读。
       const flatten = (s) => String(s || '').replace(/(?:用户|我|你)：/g, '').replace(/\s+/g, '')
-      // 只比「这轮提问之前」的窗口：把当前这句也算进去，用户复述自己的旧话时会把唯一证据过滤掉，变成她否认记得。
-      const windowText = messages.slice(0, lastUserIndex).map((m) => flatten(messageText(m))).join('\n')
+      // 只比「这轮提问之前」的真实对话：把当前这句也算进去，用户复述自己的旧话时会把唯一证据过滤掉；
+      // 把旧回忆块算进去，上一轮已经提过的证据下一轮会被误判成「已经在对话里」而丢掉。
+      const windowText = messages
+        .slice(0, lastUserIndex)
+        .filter((m) => !isMnemonicRecallMessage(m))
+        .map((m) => flatten(messageText(m)))
+        .join('\n')
       const hasPrevInjectInWindow = messages.some(isMnemonicRecallMessage)
       const freshHits = hits.filter((h) => {
         // 只比用户那半段：记录里「我：嗯」这半截不会出现在窗口里，带着它永远匹配不上。
@@ -742,10 +754,10 @@ export function apply(ctx, config = {}) {
       // 只有「没说是哪件事」需要提示；按题型标「这道题问的是时间」是考试腔，聊天里像舞台提示。
       const hints = []
       // 模糊追问但一条相关的都没筛出来时，别再让她「按最近聊过的提一句」——那会变成硬扯无关旧事。
-      if (metaRecall && !stopRecall && recalled.length) hints.push('（对方没说是哪件事，按最近聊过的提一句，再问她是不是这件。）')
+      if (metaRecall && !stopRecall && freshHits.length) hints.push('（对方没说是哪件事，按最近聊过的提一句，再问她是不是这件。）')
       // 空泛的「我懂你」在多轮里会被读成敷衍（N=82，附和密度 +98% 的实验）。
       // 不禁止共情，只要求带上具体内容：一件具体的事 + 一句开放的追问。
-      if (!chitChat && !stopRecall && toneOf(qTrim) === 'neg') hints.push('（对方在难受，别只说“我懂你”；提一句具体的事，再问一句现在怎么样。）')
+      if (!chitChat && !stopRecall && toneOf(qTrim) === 'neg' && (freshHits.length || pending.length)) hints.push('（对方在难受，别只说“我懂你”；提一句具体的事，再问一句现在怎么样。）')
       // 系统侧弃权：明确在问旧事、却一条原话都没翻到时，直接告诉模型「没翻到」。
       // 依据 arXiv 2608.22228：把弃权交给生成端不可靠，小模型尤其会拿最后一句当锚编出一段「我们聊过」。
       const explicitAsk = wantsRecall
@@ -753,7 +765,10 @@ export function apply(ctx, config = {}) {
         // 「今天生日吃什么」「还要多久到家」是眼下的问题，不是查档案；带前瞻词就不当成回溯。
         && !/今天|明天|今年|还要|几点|等一下|马上/.test(qTrim)
       // 上一轮回忆块还在窗口里：原文就在眼前，不能反过来告诉模型「没翻到」。
-      if (explicitAsk && !stopRecall && !chitChat && !freshHits.length && !hasPrevInjectInWindow) hints.push('（这次没翻到相关原话，别编，直说记不清，再顺口问一句。）')
+      if (explicitAsk && !stopRecall && !chitChat && !freshHits.length && !hasPrevInjectInWindow
+        && !/认识.*(?:多久|多长|几年|多少天)|多久了/.test(qTrim)) {
+        hints.push('（这次没翻到相关原话，别编，直说记不清，再顺口问一句。）')
+      }
       // 「我们认识多久了」得有个起点：取本会话最早一条，别让她现场编。
       if (/认识.*(?:多久|多长|几年|多少天)|多久了/.test(qTrim)) {
         let first = Infinity
@@ -765,14 +780,20 @@ export function apply(ctx, config = {}) {
         if (Number.isFinite(first)) hints.push(`（第一次聊天是 ${ymd(first)}，到今天 ${Math.max(1, Math.ceil((ts - first) / DAY))} 天。）`)
       }
       const hint = hints.join('')
-      if (!freshHits.length && !profile && !open && !hint) return decision
+      if (!freshHits.length && !profile && !open && !hint) {
+        dropRecallBlocks(messages)
+        return decision
+      }
       // 邻轮分组：把命中卡的下一轮并进同一条证据链（预算不变，渲染层截断）。
       // 当前这句刚归档就在数组末尾；不排除的话，「正在问的这句话」会被当成上一轮的补充证据注回去。
       const grouped = groupAdjacent(freshHits, store.records, { skipIds: excludeIds })
       const sig = `${grouped.map((h) => h.rec.id).join(',')}|${hash32(profile)}|${hash32(open)}|${hash32(hint)}`
       // 2026-11-25：原来只看 120s + sig，宿主不持久化临时注入消息或上下文裁剪后，连续追问会被静默吞掉回忆；
       // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
-      if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
+      if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) {
+        dropRecallBlocks(messages)
+        return decision
+      }
       const renderedIds = new Set()
       // 只落在她那一半的命中要自报归属，否则会被当对方的设定。
       const asstOnly = new Set()
@@ -822,7 +843,10 @@ export function apply(ctx, config = {}) {
       // 只有一句提示（比如「认识多久」的起点）时也得让她看到，别被空命中吞掉。
       // 只有「这次没翻到」的提示时不能套「这些事我记得」的标题，否则空结果被包装成有内容。
       if (!block && hint) block = /没翻到相关原话/.test(hint) ? hint : `【这些事我记得】\n${hint}`
-      if (!block) return decision
+      if (!block) {
+        dropRecallBlocks(messages)
+        return decision
+      }
       if (proactive && freshHits.length) {
         while (proactiveCount.size >= 128) {
           const oldest = proactiveCount.keys().next().value
@@ -875,9 +899,7 @@ export function apply(ctx, config = {}) {
       // 位置本身值 4-5pp。插在提问前等于「先看记忆再读问题」，和常识的 RAG 顺序一致。
       // 插之前先清掉窗口里旧的回忆块：宿主不清理，一个长会话能攒十几份，纯烧 token 还稀释注意力。
       const anchor = messages[lastUserIndex]
-      for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (isMnemonicRecallMessage(messages[i])) messages.splice(i, 1)
-      }
+      dropRecallBlocks(messages)
       // anchor 是同一数组里的对象引用，正常情况下 indexOf 一定命中；宿主换了数组时退回「最后一条真人消息之前」，
       // 不能退回删除前的 lastUserIndex——删掉 k 个旧块后那个下标已经偏了，会插到问题后面。
       let at = messages.indexOf(anchor)
