@@ -4,13 +4,33 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
+import { apply, isHumanUserMessage, pruneSupersededContext, supersededSnapshotSeqs } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { RECALL_RULES, RECALL_TAIL, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
 import { docExpand, expandLocal, isPlanStatement } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
 import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
+
+test('旧运行快照只保留最新一份，其余按 surface 序号返回待替换', () => {
+  const event = (kind, form) => ({ type: 'user/message', data: { source: { kind, form } } })
+  const events = new Map([
+    [10, event('runtime-context', 'snapshot')],
+    [11, event('user')],
+    [12, event('runtime-context', 'snapshot')],
+    [13, event('runtime-context', 'pruned')],
+    [14, event('runtime-context', 'snapshot')],
+  ])
+  const session = { surface: { nodes: [10, 11, 12, 13, 14] }, eventAt: (seq) => events.get(seq) }
+  assert.deepEqual(supersededSnapshotSeqs(session), [10, 12])
+
+  const replaced = []
+  assert.equal(pruneSupersededContext(session, (seq) => replaced.push(seq)), 2)
+  assert.deepEqual(replaced, [10, 12])
+
+  assert.deepEqual(supersededSnapshotSeqs({}), [])
+  assert.equal(pruneSupersededContext({ surface: { nodes: [10] } }, () => {}), 0)
+})
 
 test('计划句式不当作改口：下个月搬家不能覆盖现在的住址', () => {
   assert.equal(isPlanStatement('我下个月准备搬到徐汇'), true)

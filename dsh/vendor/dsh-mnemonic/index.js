@@ -9,6 +9,7 @@
 import { homedir } from 'node:os'
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { Store, defaultStorePath } from './lib/store.js'
 import { buildIndex, indexRecord, search, groupAdjacent } from './lib/recall.js'
 import { diversify } from './lib/diversify.js'
@@ -104,25 +105,35 @@ function dropRecallBlocks(messages) {
   }
 }
 
-// 宿主的运行上下文快照自己写着「supersedes earlier snapshots」，但旧副本会一直留在窗口里：
-// 实测一条会话里堆了 172 份运行快照 + 124 份 system 静态段，单轮输入从 1.5 万涨到 15 万 token。
-// 每类只留最后一组，旧的原样摘掉——这不是记忆，是过期状态，留着只会让模型把旧心情当现在。
-const STALE_CONTEXT_PREFIXES = ['Current runtime context.', '（可观测运行信息：']
+// 宿主的运行快照每步追加一份、旧副本永不回收，而快照正文里就写着「supersedes earlier」。
+// 实测一条会话 surface 上堆了 106 份、20.3 万字符，占整轮输入 56%；对话快照由宿主在
+// pre-step 之后提交，消息参数里看不到，只能在 surface 上做替换。旧快照不是记忆，是过期状态，
+// 留着还会让模型把旧心情当现在。这里只保留最新一份，其余换成一行的墓碑。
+// 墓碑仍用 runtime-context 这个 source.kind：宿主和 onebot 都靠它把「上下文快照」排除在
+// 「用户真的说过的话」之外；换成新 kind 会被当成用户发言写进回合记忆。form 用 pruned 区分。
+const PRUNED_CONTEXT_KIND = 'runtime-context'
+const PRUNED_CONTEXT_FORM = 'pruned'
+const PRUNED_CONTEXT_TEXT = '<system-reminder>\n更早的运行上下文快照已被替换，其中数值不再适用。\n</system-reminder>'
 
-export function dropStaleRuntimeContext(messages) {
-  let removed = 0
-  for (const prefix of STALE_CONTEXT_PREFIXES) {
-    const hits = []
-    for (let i = 0; i < messages.length; i += 1) {
-      if (messageText(messages[i]).trim().startsWith(prefix)) hits.push(i)
-    }
-    // 从后往前删，下标不会互相错位；最后一组（hits.at(-1)）保留。
-    for (let k = hits.length - 1; k >= 1; k -= 1) {
-      messages.splice(hits[k - 1], 1)
-      removed += 1
-    }
+/** 返回 surface 上已被最新快照取代的旧运行上下文序号（不包含最新一份）。 */
+export function supersededSnapshotSeqs(session) {
+  const nodes = session?.surface?.nodes
+  if (!Array.isArray(nodes)) return []
+  const kept = []
+  for (const seq of nodes) {
+    const event = session.eventAt?.(seq)
+    if (event?.type !== 'user/message' || event.data?.source?.kind !== 'runtime-context') continue
+    if (event.data.source.form !== 'snapshot') continue
+    kept.push(seq)
   }
-  return removed
+  return kept.slice(0, -1)
+}
+
+/** 用最小可见的墓碑节点替换旧快照；append 由调用方注入，便于单测。 */
+export function pruneSupersededContext(session, append) {
+  const seqs = supersededSnapshotSeqs(session)
+  for (const seq of seqs) append(seq)
+  return seqs.length
 }
 
 export function effectiveMinScore(recordCount, targetMinScore) {
@@ -249,6 +260,8 @@ export function apply(ctx, config = {}) {
   // 纠正次数落盘：只放内存的话，重启后面板上的「被纠正几次」会归零，看着像从没被纠过。
   const countersPath = join(dirname(cfg.storePath), 'counters.json')
   let corrections = 0
+  // 运行上下文去重的现场计数：pre-step 拿到的 messages 到底有没有这些旧快照，只有数出来才知道。
+let ctxPrunedTotal = 0
   try {
     corrections = Number(JSON.parse(readFileSync(countersPath, 'utf8')).corrections) || 0
   } catch { /* 文件不存在或坏了就当 0，不用为计数器起一个错误分支 */ }
@@ -727,7 +740,17 @@ const archivedMsgIds = new Map()
     try {
       if (decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
       const messages = decision.messages
-      const ctxDropped = dropStaleRuntimeContext(messages)
+      const session = payload?.agent?.session
+      if (typeof session?.append === 'function') {
+        ctxPrunedTotal += pruneSupersededContext(session, (seq) => {
+          session.append('user/message', {
+            id: randomUUID(),
+            role: 'user',
+            content: [{ type: 'text', text: PRUNED_CONTEXT_TEXT }],
+            source: { kind: PRUNED_CONTEXT_KIND, form: PRUNED_CONTEXT_FORM },
+          }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
+        })
+      }
       const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserRole(m) ? i : found), -1)
       if (lastUserIndex < 0) return decision
@@ -1094,6 +1117,7 @@ const archivedMsgIds = new Map()
             maxRecords: cfg.maxRecords,
             avgQueryMs: queryCount ? Math.round((totalQueryMs / queryCount) * 100) / 100 : 0,
             corrections,
+            ctxPrunedTotal,
             newest: store.records.at(-1)?.createdAt || null,
             todayAdded: store.records.filter((r) => now() - (r.createdAt || 0) < DAY).length,
             injectToday: injectStatsToday(now()),
