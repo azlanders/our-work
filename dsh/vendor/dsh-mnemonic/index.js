@@ -863,6 +863,7 @@ export function apply(ctx, config = {}) {
           soft: budget.inject <= cfg.softInjectChars,
           // 覆盖率只在明确问旧事时算；null 表示这轮没判。攒够样本后按 risk–coverage 反解阈值。
           cov: covSamples ? Number(cov.toFixed(3)) : null,
+          caveat: covSamples > 0 && cov < 0.3 ? 1 : 0,
         }) + '\n')
       } catch (error) {
         ctx.logger?.warn?.(`dsh-mnemonic: 注入日志写入失败: ${error?.message || error}`)
