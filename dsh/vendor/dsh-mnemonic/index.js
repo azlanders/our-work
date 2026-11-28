@@ -136,6 +136,28 @@ export function pruneSupersededContext(session, append) {
   return seqs.length
 }
 
+// 系统提示词在历史内路由上是「整段重渲染再 append」：每变一次就多一份完整副本，旧的只是空文本占位。
+// 实测一次请求里 10 份非空 system（2.9 万字符），只有最后一份是当前值。宿主自己在换系列时就是用
+// 空文本替换旧节点，这里沿用同一做法。
+export function staleSystemNodeSeqs(session) {
+  const nodes = session?.surface?.nodes
+  if (!Array.isArray(nodes)) return []
+  const filled = []
+  for (const seq of nodes) {
+    const event = session.eventAt?.(seq)
+    if (event?.type !== 'system/message') continue
+    if (!Array.isArray(event.data?.content) || event.data.content.length === 0) continue
+    filled.push(seq)
+  }
+  return filled.slice(0, -1)
+}
+
+export function pruneStaleSystemNodes(session, append) {
+  const seqs = staleSystemNodeSeqs(session)
+  for (const seq of seqs) append(seq)
+  return seqs.length
+}
+
 export function effectiveMinScore(recordCount, targetMinScore) {
   const low = Math.min(targetMinScore, 1.2)
   if (recordCount <= 30) return low
@@ -262,6 +284,7 @@ export function apply(ctx, config = {}) {
   let corrections = 0
   // 运行上下文去重的现场计数：pre-step 拿到的 messages 到底有没有这些旧快照，只有数出来才知道。
 let ctxPrunedTotal = 0
+let sysPrunedTotal = 0
   try {
     corrections = Number(JSON.parse(readFileSync(countersPath, 'utf8')).corrections) || 0
   } catch { /* 文件不存在或坏了就当 0，不用为计数器起一个错误分支 */ }
@@ -750,6 +773,14 @@ const archivedMsgIds = new Map()
             source: { kind: PRUNED_CONTEXT_KIND, form: PRUNED_CONTEXT_FORM },
           }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
         })
+        sysPrunedTotal += pruneStaleSystemNodes(session, (seq) => {
+          session.append('system/message', {
+            id: randomUUID(),
+            role: 'system',
+            content: [],
+            source: { kind: 'system-prompt' },
+          }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
+        })
       }
       const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserRole(m) ? i : found), -1)
@@ -1118,6 +1149,7 @@ const archivedMsgIds = new Map()
             avgQueryMs: queryCount ? Math.round((totalQueryMs / queryCount) * 100) / 100 : 0,
             corrections,
             ctxPrunedTotal,
+            sysPrunedTotal,
             newest: store.records.at(-1)?.createdAt || null,
             todayAdded: store.records.filter((r) => now() - (r.createdAt || 0) < DAY).length,
             injectToday: injectStatsToday(now()),

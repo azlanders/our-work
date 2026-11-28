@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply, isHumanUserMessage, pruneSupersededContext, supersededSnapshotSeqs } from '../dsh/vendor/dsh-mnemonic/index.js'
+import { apply, isHumanUserMessage, pruneStaleSystemNodes, pruneSupersededContext, staleSystemNodeSeqs, supersededSnapshotSeqs } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { RECALL_RULES, RECALL_TAIL, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
@@ -30,6 +30,17 @@ test('旧运行快照只保留最新一份，其余按 surface 序号返回待�
 
   assert.deepEqual(supersededSnapshotSeqs({}), [])
   assert.equal(pruneSupersededContext({ surface: { nodes: [10] } }, () => {}), 0)
+
+  const sys = new Map([
+    [20, { type: 'system/message', data: { content: [{ type: 'text', text: '旧提示' }] } }],
+    [21, { type: 'system/message', data: { content: [] } }],
+    [22, { type: 'system/message', data: { content: [{ type: 'text', text: '新提示' }] } }],
+  ])
+  const sysSession = { surface: { nodes: [20, 21, 22] }, eventAt: (seq) => sys.get(seq) }
+  assert.deepEqual(staleSystemNodeSeqs(sysSession), [20])
+  const emptied = []
+  assert.equal(pruneStaleSystemNodes(sysSession, (seq) => emptied.push(seq)), 1)
+  assert.deepEqual(emptied, [20])
 })
 
 test('计划句式不当作改口：下个月搬家不能覆盖现在的住址', () => {
