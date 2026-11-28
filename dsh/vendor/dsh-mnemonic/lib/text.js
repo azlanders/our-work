@@ -176,9 +176,10 @@ export function attributeKeywords(text, { max = ATTRIBUTE_MAX } = {}) {
 export function tokens(text) {
   const s = String(text || '').toLowerCase()
   const out = []
-  const runs = s.match(/[a-z0-9_]+|[\u4e00-\u9fff]+/g) || []
+  // 用 Unicode 字母类：日语假名、韩文、西里尔、带重音的拉丁词（café）都要能进索引。
+  const runs = s.match(/[\p{L}\p{N}_]+/gu) || []
   for (const run of runs) {
-    if (/^[a-z0-9_]/.test(run)) {
+    if (/^[a-z0-9_]+$/i.test(run)) {
       if (run.length >= 2) out.push(run)
       continue
     }

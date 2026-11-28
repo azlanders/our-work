@@ -7,7 +7,7 @@
  * - 防自我回声、防提示词注入污染、容量自动压实（maxRecords）、UTC+8 北京时间渲染、上游超时熔断。
  */
 import { homedir } from 'node:os'
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Store, defaultStorePath } from './lib/store.js'
 import { buildIndex, indexRecord, search, groupAdjacent } from './lib/recall.js'
@@ -181,6 +181,14 @@ export function apply(ctx, config = {}) {
   let totalQueryMs = 0
   // 每天只看五个数里的两个：被纠正了几次、注入了多少字。逐轮一行，面板和复盘都用得上。
   const statsPath = join(dirname(cfg.storePath), 'inject-log.jsonl')
+  // 逐轮一行且永不清理的话，一年就是几十万行；超过 2MB 整体轮转成 .1，够复盘又不撑爆磁盘。
+  const appendStats = (entry) => {
+    mkdirSync(dirname(statsPath), { recursive: true })
+    try {
+      if (statSync(statsPath).size > 2 * 1024 * 1024) renameSync(statsPath, `${statsPath}.1`)
+    } catch { /* 首次写入时文件还不存在，statSync 必失败，这里没有别的分支可走 */ }
+    appendFileSync(statsPath, JSON.stringify(entry) + '\n')
+  }
   // 纠正次数落盘：只放内存的话，重启后面板上的「被纠正几次」会归零，看着像从没被纠过。
   const countersPath = join(dirname(cfg.storePath), 'counters.json')
   let corrections = 0
@@ -950,8 +958,7 @@ const archivedMsgIds = new Map()
       }
       lastInjectMeta.set(scopeKey, { at: ts, ids: [...renderedIds] })
       try {
-        mkdirSync(dirname(statsPath), { recursive: true })
-        appendFileSync(statsPath, JSON.stringify({
+        appendStats({
           at: ts,
           sc: hash32(scopeKey),
           hits: renderedIds.size,
@@ -966,7 +973,7 @@ const archivedMsgIds = new Map()
           // 覆盖率只在明确问旧事时算；null 表示这轮没判。攒够样本后按 risk–coverage 反解阈值。
           cov: covSamples ? Number(cov.toFixed(3)) : null,
           caveat: covSamples > 0 && cov < 0.3 ? 1 : 0,
-        }) + '\n')
+        })
       } catch (error) {
         ctx.logger?.warn?.(`dsh-mnemonic: 注入日志写入失败: ${error?.message || error}`)
       }
