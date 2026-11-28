@@ -325,7 +325,9 @@ export function parseEventTimestamp(value) {
   if (value === null || value === undefined || value === '') return null
   if (typeof value === 'number' && Number.isFinite(value)) return value
   const s = String(value).trim()
-  if (/^\d{10,13}$/.test(s)) return Number(s)
+  // 10 位是秒级时间戳（日志/模型常直接传），按毫秒读会落到 1970 年。
+  if (/^\d{10}$/.test(s)) return Number(s) * 1000
+  if (/^\d{11,13}$/.test(s)) return Number(s)
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const t = Date.parse(`${s}T12:00:00+08:00`)
     return Number.isFinite(t) ? t : null
@@ -337,7 +339,10 @@ export function parseEventTimestamp(value) {
 export function clip(text, max) {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim()
   if (s.length <= max) return s
-  return s.slice(0, Math.max(0, max - 1)) + '…'
+  let end = Math.max(0, max - 1)
+  // 不把 emoji 的代理对切成孤立高位：库里出现非法 Unicode 会让上游请求报错或变 �。
+  if (end > 0 && /[\uD800-\uDBFF]/.test(s[end - 1])) end -= 1
+  return s.slice(0, end) + '…'
 }
 
 export function hash32(text) {

@@ -104,7 +104,10 @@ function dueOf(text, anchor) {
   }
   if (!hits.length) return null
   hits.sort((a, b) => a.index - b.index)
-  return hits[0]
+  // 「周一我去医院了，明天告诉你结果」：第一个日期是已发生的周一，真正的约定是明天。
+  // 有未来日期就优先未来，全在过去才退回最早。
+  const dayStart = localDayStart(anchor || Date.now())
+  return hits.find((h) => h.dueAt >= dayStart) || hits[0]
 }
 
 function anchorOf(rec) {

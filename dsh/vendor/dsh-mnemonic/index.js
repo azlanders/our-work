@@ -65,7 +65,8 @@ const NON_USER_KINDS = new Set([
   'nudge',
 ])
 
-export function isHumanUserMessage(msg) {
+/** 只看「这是不是一个真人用户轮」，不看有没有文字：图片/语音轮也要当锚点，不能跨轮配对。 */
+export function isHumanUserRole(msg) {
   if (roleOf(msg) !== 'user') return false
   const kind = msg?.source?.kind ?? msg?.message?.source?.kind
   if (kind) {
@@ -73,6 +74,11 @@ export function isHumanUserMessage(msg) {
     if (NON_USER_KINDS.has(kind)) return false
     if (kind !== 'user') return false
   }
+  return true
+}
+
+export function isHumanUserMessage(msg) {
+  if (!isHumanUserRole(msg)) return false
   const txt = messageText(msg).trim()
   if (!txt) return false
   if (txt.startsWith('Current runtime context.')) return false
@@ -82,7 +88,11 @@ export function isHumanUserMessage(msg) {
 /** 回忆注入消息的判据只留一份：相邻消息检查和 120s 去重共用。 */
 export function isMnemonicRecallMessage(msg) {
   const kind = msg?.source?.kind ?? msg?.message?.source?.kind
-  return kind === 'plugin:dsh-mnemonic'
+  if (kind === 'plugin:dsh-mnemonic') return true
+  // 宿主可能把临时注入持久化成普通 user 消息并丢掉 source：再用内容指纹兜一层，
+  // 否则旧回忆块会一轮叠一轮，长会话里堆十几份过期时间戳。
+  const txt = messageText(msg).trim()
+  return txt.startsWith('【以前聊过的·只当参考') && /\n\[M1\]/.test(txt)
 }
 
 /** 宿主不一定在下一轮替我们清掉旧回忆块；先把它们摘掉，避免过期时间戳和旧证据一起留在窗口里。 */
@@ -208,12 +218,14 @@ const archivedMsgIds = new Map()
 
   const recall = (query, limit = cfg.limit, pool = limit, { expandedTerms = '', excludeIds = null, scope = '', nowTs = Date.now(), allowSuperseded = false, allowRepeat = false } = {}) => {
     const t0 = performance.now()
+    // 一条几万字的粘贴会把查询二元组堆到几万个，乘上候选集就是上亿次查找，整进程卡死。
+    const q = clip(String(query || ''), 400)
     // 阈值按活跃记录放宽：库里堆满作废/静音记录时，小库的宽松档不该被全量条数吃掉。
     const liveCount = store.records.reduce((n, r) => n + (r.muted || r.supersededBy ? 0 : 1), 0)
     const minScore = effectiveMinScore(liveCount, cfg.minScore)
     const idx = ensureIndex()
-    const aliasTerms = expandAliases(query, aliasGroups)
-    const res = search(idx, store.records, query, {
+    const aliasTerms = expandAliases(q, aliasGroups)
+    const res = search(idx, store.records, q, {
       limit: pool,
       minScore,
       minHits: cfg.minHits,
@@ -346,6 +358,8 @@ const archivedMsgIds = new Map()
   // pre-step 时当前这条用户消息还没得到回复，配上一轮的助手回复会张冠李戴。
   // 存「上一轮完整的一问一答」：先找最近的助手回复，再找它前面那条真人用户消息。
   const archiveTurn = (messages, lastUserIndex, scope = '') => {
+    // 没有 session 就没有隔离域：写全局会把这条记忆暴露给所有会话。
+    if (!scope) return null
     let asstIndex = -1
     for (let i = lastUserIndex - 1; i >= 0; i -= 1) {
       if (roleOf(messages[i]) === 'assistant') { asstIndex = i; break }
@@ -353,11 +367,13 @@ const archivedMsgIds = new Map()
     if (asstIndex < 0) return null
     let userIndex = -1
     for (let i = asstIndex - 1; i >= 0; i -= 1) {
-      if (isHumanUserMessage(messages[i])) { userIndex = i; break }
+      // 锚点按角色取，不跳过图片/语音轮：否则会拿「图片那轮的回复」配「更早的文字提问」。
+      if (isHumanUserRole(messages[i])) { userIndex = i; break }
     }
     if (userIndex < 0) return null
     const userMsg = messages[userIndex]
     const user = messageText(userMsg) || ''
+    if (!user.trim()) return null
     const cleanUser = neutralizeRoleMarkers(sanitizeMemoryText(clip(user, cfg.archiveChars)))
     if (isLowValueOrInjection(cleanUser)) return null
     const asstMsg = messages[asstIndex]
@@ -373,7 +389,10 @@ const archivedMsgIds = new Map()
     const dayTag = new Date(msgTs + 8 * 3600000).toISOString().slice(0, 10)
     const msgKey = `${scope || '__global__'}|${userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(user)}@${dayTag}`}|${asstId}`
     if (archivedMsgIds.has(msgKey)) {
-      return archivedMsgIds.get(msgKey) || null
+      const known = archivedMsgIds.get(msgKey)
+      if (known && store.byId.has(known)) return known
+      // 容量压实可能已经把那条淘汰了：删掉死 id，让这一轮重新归档。
+      archivedMsgIds.delete(msgKey)
     }
     if (archivedMsgIds.size >= 128) {
       const oldest = archivedMsgIds.keys().next().value
@@ -508,16 +527,27 @@ const archivedMsgIds = new Map()
           if (!sanitizeMemoryText(args?.text)) {
             return { ok: false, id: '', total: store.records.length, text: '没写进去：正文是空的。' }
           }
-          const rec = store.add({
-            text: args?.text,
-            keywords: [...new Set([...(Array.isArray(args?.keywords) ? args.keywords : []), ...attributeKeywords(args?.text)])],
-            tags: args?.tags || [],
-            importance: args?.importance ?? 0.5,
-            eventAt: args?.eventAt ?? null,
-            spokenAt: Date.now(),
-            source: { kind: 'tool' },
-            scope: sessionScope(exec?.agent),
-          })
+          const scope = sessionScope(exec?.agent)
+          // 没有 session 就没有隔离域：写全局会让这条记忆出现在所有会话里。
+          if (!scope) return { ok: false, id: '', total: store.records.length, text: '没有会话标识，没写记忆（避免串会话）。' }
+          // 工具正文没有归档那层 400 字上限，模型写超长会把索引撑爆。
+          const rawText = String(args?.text ?? '').slice(0, 2000)
+          const tags = Array.isArray(args?.tags) ? args.tags : (args?.tags ? [String(args.tags)] : [])
+          let rec
+          try {
+            rec = store.add({
+              text: rawText,
+              keywords: [...new Set([...(Array.isArray(args?.keywords) ? args.keywords : []), ...attributeKeywords(rawText)])],
+              tags,
+              importance: args?.importance ?? 0.5,
+              eventAt: args?.eventAt ?? null,
+              spokenAt: Date.now(),
+              source: { kind: 'tool' },
+              scope,
+            })
+          } catch (error) {
+            return { ok: false, id: '', total: store.records.length, text: `本地写盘失败：${error?.message || error}` }
+          }
           if (!rec) return { ok: false, id: '', total: store.records.length, text: '没写进去：正文是空的。' }
           if (args?.pinned === true && !rec.pinned) {
             rec.pinned = true
@@ -631,11 +661,12 @@ const archivedMsgIds = new Map()
       if (decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
       const messages = decision.messages
       const scope = sessionScope(payload?.agent)
-      const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserMessage(m) ? i : found), -1)
+      const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserRole(m) ? i : found), -1)
       if (lastUserIndex < 0) return decision
       // 同一轮工具调用续步（最后一条真人消息后已有助手消息）不再重跑改写与回忆插队，保住历史与 KV cache
       if (messages.slice(lastUserIndex + 1).some((m) => roleOf(m) === 'assistant')) return decision
-      const query = messageText(messages[lastUserIndex])
+      const query = clip(messageText(messages[lastUserIndex]), 400)
+      if (!query.trim()) return decision
       const currentTurnId = cfg.autoArchive ? archiveTurn(messages, lastUserIndex, scope) : null
       if (isMnemonicRecallMessage(messages[lastUserIndex - 1])) return decision
       const qTrim = query.trim()

@@ -50,6 +50,9 @@ export class Store {
       try {
         const rec = JSON.parse(trimmed)
         if (!rec?.id || !rec?.text) continue
+        // JSONL 是外部文件：手改/旧版本/别的工具写坏一个字段，不能让整个插件装载失败。
+        rec.keywords = Array.isArray(rec.keywords) ? rec.keywords : []
+        rec.tags = Array.isArray(rec.tags) ? rec.tags : []
         if (idxById.has(rec.id)) {
           records[idxById.get(rec.id)] = rec
         } else {
@@ -114,6 +117,12 @@ export class Store {
       }
       // 合并时不改写 spokenAt：「昨天去了医院」里的「昨天」锚的是第一次说出口的时间，
       // 后来同一句话再被导入一次就把锚挪到今天，相对日期会算到错误的那天。
+      // 用户明确要求记住同一句，等于撤销之前的「别记这个」。
+      if (source?.kind === 'tool' && existing.muted) {
+        existing.muted = false
+        delete existing.mutedAt
+        metaChanged = true
+      }
       if (source?.kind === 'tool' && existing.source?.kind !== 'tool') {
         existing.source = source
         metaChanged = true
@@ -152,8 +161,19 @@ export class Store {
     }
     this.records.push(rec)
     this.byId.set(id, rec)
-    this.byText.set(textKey(clean, rec.scope), rec)
-    this.appendLine(rec)
+    const key = textKey(clean, rec.scope)
+    const prevTextRec = this.byText.get(key)
+    this.byText.set(key, rec)
+    try {
+      this.appendLine(rec)
+    } catch (error) {
+      // 先写盘失败要把内存回滚，否则「记住了」只是内存里的幻觉，下一轮检索得到、重启就没了。
+      this.records.pop()
+      this.byId.delete(id)
+      if (prevTextRec) this.byText.set(key, prevTextRec)
+      else this.byText.delete(key)
+      throw error
+    }
 
     // 压一次就回到上限，下一条又要压；留一点余量把全量重写摊薄。
     // 余量必须随上限缩放：固定 200 条时 maxRecords=5 的小库永远触发不了压实。
