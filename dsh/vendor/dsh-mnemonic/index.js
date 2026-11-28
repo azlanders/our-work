@@ -119,14 +119,22 @@ const PRUNED_CONTEXT_TEXT = '<system-reminder>\n更早的运行上下文快照�
 export function supersededSnapshotSeqs(session) {
   const nodes = session?.surface?.nodes
   if (!Array.isArray(nodes)) return []
-  const kept = []
+  const tags = new Map()
+  let newest = -1
   for (const seq of nodes) {
     const event = session.eventAt?.(seq)
-    if (event?.type !== 'user/message' || event.data?.source?.kind !== 'runtime-context') continue
-    if (event.data.source.form !== 'snapshot') continue
-    kept.push(seq)
+    if (event?.type !== 'user/message') continue
+    const source = event.data?.source
+    // 早期版本用过 runtime-context-pruned 这个 kind，被 onebot 当成真人发言；这里一次性迁回。
+    if (source?.kind === 'runtime-context-pruned') {
+      tags.set(seq, 'legacy')
+      continue
+    }
+    if (source?.kind !== 'runtime-context' || source.form !== 'snapshot') continue
+    tags.set(seq, 'snapshot')
+    newest = seq
   }
-  return kept.slice(0, -1)
+  return nodes.filter((seq) => tags.get(seq) === 'legacy' || (tags.get(seq) === 'snapshot' && seq !== newest))
 }
 
 /** 用最小可见的墓碑节点替换旧快照；append 由调用方注入，便于单测。 */
@@ -815,8 +823,10 @@ const archivedMsgIds = new Map()
           const at = new Date((event.time || Date.now()) + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' ')
           const qq = event.data?.source?.qq || {}
           const source = { kind: 'nudge', form: 'pruned' }
+          // 不带 proactiveReceiptToken：receipt-transaction 会把带 token 的第二条消息当成
+          // 重复的主动搭话而 blocked；折叠后的卡只是时间线，不该再参与投递校验。
           const kept = {}
-          for (const key of ['chatKind', 'chatId', 'senderId', 'proactiveReceiptToken']) {
+          for (const key of ['chatKind', 'chatId', 'senderId']) {
             if (qq[key] !== undefined) kept[key] = qq[key]
           }
           if (Object.keys(kept).length) source.qq = kept

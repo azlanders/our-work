@@ -357,9 +357,9 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     // 编号按真正进了块的行数走：中间有条目被预算挤掉时，[M1][M2][M4] 会让模型以为少了一条。
     const prefix = `[M${lines.length + 1}] ${when ? `${when} ` : ''}`
     // 话里的「昨天/上周」按事发时间换算；计划类仍按说话时间，否则「明天要考试」会被整体后移。
-    const anchor = hit.rec.eventAt && !isPlanStatement(hit.rec.text)
-      ? hit.rec.eventAt
-      : hit.rec.spokenAt ?? hit.rec.createdAt
+    // 正文里的「昨天/上周三」只能按「这句话是什么时候说的」换算。eventAt 往往就是
+    // 写入时用同一个相对词推出来的，再拿它当锚会二次换算、整体偏一天。
+    const anchor = hit.rec.spokenAt ?? hit.rec.eventAt ?? hit.rec.createdAt
     // 说话时间和事发时间差一天以上（补录、导入、计划类）时把事发日也标出来，别让行首盖掉。
     // 未来的日期不能写「事发」：计划类记录会被读成已经发生。
     const evtBase = Number.isFinite(now) ? now : Date.now()

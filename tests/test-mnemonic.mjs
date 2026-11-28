@@ -20,13 +20,14 @@ test('旧运行快照只保留最新一份，其余按 surface 序号返回待�
     [12, event('runtime-context', 'snapshot')],
     [13, event('runtime-context', 'pruned')],
     [14, event('runtime-context', 'snapshot')],
+    [15, event('runtime-context-pruned')],
   ])
-  const session = { surface: { nodes: [10, 11, 12, 13, 14] }, eventAt: (seq) => events.get(seq) }
-  assert.deepEqual(supersededSnapshotSeqs(session), [10, 12])
+  const session = { surface: { nodes: [10, 11, 12, 13, 14, 15] }, eventAt: (seq) => events.get(seq) }
+  assert.deepEqual(supersededSnapshotSeqs(session), [10, 12, 15])
 
   const replaced = []
-  assert.equal(pruneSupersededContext(session, (seq) => replaced.push(seq)), 2)
-  assert.deepEqual(replaced, [10, 12])
+  assert.equal(pruneSupersededContext(session, (seq) => replaced.push(seq)), 3)
+  assert.deepEqual(replaced, [10, 12, 15])
 
   assert.deepEqual(supersededSnapshotSeqs({}), [])
   assert.equal(pruneSupersededContext({ surface: { nodes: [10] } }, () => {}), 0)
@@ -200,7 +201,7 @@ test('renderRecallBlock keeps full dates, spends the whole budget on evidence, a
   const block = renderRecallBlock(hits, { maxChars: 260, itemChars: 180, now })
   // 块头给绝对「现在」，行首给相对日期：模型要换算有锚点，又不用自己从 ISO 字符串里读。
   assert.ok(block.includes('2026-06-20'), 'block head carries the absolute now-date')
-  assert.ok(/^\d+\. 周[一二三四五六日]/m.test(block), block)
+  assert.ok(/^\[M\d+\] \d\d-\d\d（周[一二三四五六日]）/m.test(block), block)
   // 纪律已搬到常驻 system 段（RECALL_RULES），块内不再预留尾注空间。
   assert.ok(!block.includes('记忆纪律'), 'rules must not be duplicated inside the block')
   assert.ok(RECALL_RULES.includes('记不清'), 'rules text keeps the abstention clause')
@@ -234,7 +235,7 @@ test('recall block anchors relative dates at spokenAt, not eventAt', () => {
   const block = renderRecallBlock([
     { rec: { id: 'spoken', text: '昨天把旧照片送到江北。', eventAt, spokenAt } },
   ], { maxChars: 900, itemChars: 200, now })
-  assert.ok(block.includes('[M1] 昨天（11-24）'), 'line label gives spoken word + absolute date')
+  assert.ok(block.includes('[M1] 11-24（昨天）'), 'line label gives absolute date then spoken word')
   assert.ok(block.includes('昨天(2026-11-23)'), block)
 
   const legacy = renderRecallBlock([
@@ -263,7 +264,7 @@ test('recall block reports a small number of dropped hits', () => {
   const maxChars = 260
   const block = renderRecallBlock(hits, { maxChars, itemChars: 80, now })
   // 装得下多少就放多少，剩下的条数必须如实报出来（1-3 条才提示，多了是噪音）。
-  const shown = (block.match(/^\d+\. /gm) || []).length
+  const shown = (block.match(/^\[M\d+\] /gm) || []).length
   assert.ok(shown >= 3, block)
   const dropped = 5 - shown
   assert.ok(dropped >= 1 && dropped <= 3, block)
@@ -346,7 +347,7 @@ test('短回复不吃掉用户那半段的预算', () => {
   const block = renderRecallBlock([
     { rec: { id: 'sides', text: `用户：${'甲'.repeat(180)}\n我：嗯`, eventAt: now } },
   ], { maxChars: 400, itemChars: 200, now })
-  const body = block.split('\n').find((l) => /^\d+\. /.test(l)) || ''
+  const body = block.split('\n').find((l) => /^\[M\d+\] /.test(l)) || ''
   // 固定 6:4 只能放约 115 个「甲」；把「我：嗯」吃不掉的额度还给用户侧后应明显更多。
   assert.ok((body.match(/甲/g) || []).length > 150, body)
 })
@@ -358,7 +359,7 @@ test('recall block never cuts a relative date term in half', () => {
   const block = renderRecallBlock([{ rec: { id: 'cut', text, eventAt: at } }], { maxChars: 900, itemChars: 200, now })
   assert.ok(!block.includes('…昨'), block)
   assert.ok(!block.includes('昨…'), block)
-  const body = block.split('\n').filter((l) => /^\d+\. /.test(l)).join('\n')
+  const body = block.split('\n').filter((l) => /^\[M\d+\] /.test(l)).join('\n')
   // 头尾都留的裁法会把整个「昨天」留在尾巴上；留下就必须带上完整日期，不能是半截。
   if (body.includes('昨')) assert.ok(body.includes('昨天(2026-05-02)'), body)
 })
@@ -382,11 +383,15 @@ test('recall block never trades a complete evidence line for a notice', () => {
   const hits = Array.from({ length: 3 }, (_, i) => ({
     rec: { id: `pop-${i}`, text: `第${i + 1}条：${'丙'.repeat(40)}`, eventAt: now - i * 86400000 },
   }))
-  const block = renderRecallBlock(hits, { maxChars: 180, itemChars: 80, now })
-  const shown = (block.match(/^\d+\. /gm) || []).length
-  assert.ok(shown >= 2, block)
-  assert.ok(!block.includes('还有'), '两条完整原话装得下时不该换成「还有 N 件」')
-  assert.ok(block.length <= 180, `${block.length} > 180`)
+  // 块头标题 + 尾注约 77 字，两条完整原话要 ~125 字；180 的预算物理上放不下两条。
+  const roomy = renderRecallBlock(hits, { maxChars: 205, itemChars: 80, now })
+  assert.ok((roomy.match(/^\[M\d+\] /gm) || []).length >= 2, roomy)
+  assert.ok(!roomy.includes('还有'), '两条完整原话装得下时不该换成「还有 N 件」')
+  assert.ok(roomy.length <= 205, `${roomy.length} > 205`)
+  // 预算再紧一档：可以只留一条原话 + 提示，但不能把原话全换成提示。
+  const tight = renderRecallBlock(hits, { maxChars: 180, itemChars: 80, now })
+  assert.ok((tight.match(/^\[M\d+\] /gm) || []).length >= 1, tight)
+  assert.ok(tight.length <= 180, `${tight.length} > 180`)
 })
 
 test('Store does not backfill spokenAt on legacy records', () => {
@@ -471,11 +476,13 @@ test('apply integration deduplicates tool-loop pre-steps, wires diversify limit,
     try {
       const saveTool = registeredTools.get('mem_save')
       const recallTool = registeredTools.get('mem_recall')
-      await saveTool.execute({ text: '约定周六在南滨路吃老火锅', keywords: ['南滨路', '火锅'], importance: 0.8 })
-      await saveTool.execute({ text: '南滨路吃老火锅的时候别点太辣', keywords: ['南滨路', '火锅'], importance: 0.7 })
-      await saveTool.execute({ text: '家里的猫叫半两喜欢冻干', keywords: ['半两', '冻干'], importance: 0.8 })
+      // mem_save 没有 session 时会拒写（避免串会话），这里显式给一个隔离域。
+      const agent = { agent: { session: { id: 'sess-apply' } } }
+      await saveTool.execute({ text: '约定周六在南滨路吃老火锅', keywords: ['南滨路', '火锅'], importance: 0.8 }, agent)
+      await saveTool.execute({ text: '南滨路吃老火锅的时候别点太辣', keywords: ['南滨路', '火锅'], importance: 0.7 }, agent)
+      await saveTool.execute({ text: '家里的猫叫半两喜欢冻干', keywords: ['半两', '冻干'], importance: 0.8 }, agent)
 
-      const recallRes = await recallTool.execute({ query: '半两爱吃啥', limit: 2 })
+      const recallRes = await recallTool.execute({ query: '半两爱吃啥', limit: 2 }, agent)
       assert.equal(recallRes.hits, 1)
       assert.ok(recallRes.text.includes('冻干'))
 
@@ -484,12 +491,12 @@ test('apply integration deduplicates tool-loop pre-steps, wires diversify limit,
         { id: 'u1', role: 'user', content: '周六去南滨路吃火锅要记住什么', source: { kind: 'user' } },
         { id: 'rc1', role: 'user', content: 'Current runtime context. Policy...', source: { kind: 'runtime-context' } },
       ]
-      const d1 = await preStepHandler({}, async () => ({ kind: 'enter', messages: msgs }))
+      const d1 = await preStepHandler(agent, async () => ({ kind: 'enter', messages: msgs }))
       assert.equal(d1.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 1)
       assert.equal(rewriteCalls, 1)
 
       // Step 2 in same tool loop: must not call rewriteQuery or archive again
-      const d2 = await preStepHandler({}, async () => ({ kind: 'enter', messages: d1.messages }))
+      const d2 = await preStepHandler(agent, async () => ({ kind: 'enter', messages: d1.messages }))
       assert.equal(rewriteCalls, 1)
       assert.equal(d2.messages.filter((m) => m.source?.kind === 'plugin:dsh-mnemonic').length, 1)
 
@@ -720,7 +727,7 @@ test('multi-need questions get a bigger recall budget, plain chat keeps the lean
     const lean = { limit: 2, injectChars: 900, itemChars: 60, multiLimit: 6, multiInjectChars: 1800, multiItemChars: 120 }
     const plain = await injected('还箱子的事还记得吗', lean)
     const multi = await injected('我们约定过的还箱子的事都有哪些', lean)
-    const count = (block) => block.split(/\\n|\n/).filter((l) => /^\d+\. /.test(l.trim())).length
+  const count = (block) => block.split(/\\n|\n/).filter((l) => /^\[M\d+\] /.test(l.trim())).length
     assert.ok(count(plain) >= 1, 'plain question still recalls a couple of items')
     // 邻轮分组会往命中卡后面补一张（同一件事的下一轮），所以条目数上限是 limit+2；
     // 真正的预算约束是字数，纪律尾注约 215 字，留 300 字余量。
@@ -770,22 +777,20 @@ test('attribute keywords bridge colloquial statements to how people ask for them
   assert.equal(search(buildIndex(bare), bare, q, { limit: 3, minScore: 1.0, minHits: 1 })[0]?.rec.id, 'attr-1')
 })
 
-test('category expansion bridges attribute questions to specific instances', () => {
-  // 问「口味」但原文只写「美式加双份奶、吃辣胃疼」
+test('category expansion bridges category questions to generic category words', () => {
+  // 类目词只给通用词（口味/歌/机器），不下沉到具体实例：具体词会把排序带偏，
+  // 而原话里写的是「美式」「爵士」「小电磨」这类实例名。
   const drink = expandLocal('要给我姐带早饭和咖啡，她那口味你还记得不？')
-  assert.ok(drink.includes('美式'))
+  assert.ok(drink.includes('口味'))
   assert.ok(drink.includes('辣'))
-  // 问「什么歌」但原文只写「老粤语歌和旧爵士」
-  assert.ok(expandLocal('我喜欢听啥路子的歌来着？').includes('爵士'))
-  // 问「磨豆子哪台」但原文只写「小电磨」「手摇机」
+  assert.ok(expandLocal('我喜欢听啥路子的歌来着？').includes('歌'))
   const mill = expandLocal('我家现在磨豆子用的是哪台？')
-  assert.ok(mill.includes('电磨'))
-  assert.ok(mill.includes('手摇'))
+  assert.ok(mill.includes('机器'))
   // 无关问题不扩
   assert.equal(expandLocal('今天几号'), '')
   // 类目词只做增量：旧规则给的词不重复追加，既有排序权重不被改写
-  const both = expandLocal('喝的咖啡和口味').split(' ')
-  assert.deepEqual(both.filter((w) => w === '咖啡'), ['咖啡'])
+  const both = expandLocal('喝的咖啡和口味').split(' ').filter(Boolean)
+  assert.deepEqual(both, [...new Set(both)], '扩出的词不能重复')
 })
 
 test('doc-side attribute keywords make first-person facts findable by question wording', () => {
@@ -933,7 +938,8 @@ test('capability: mem_save supports eventAt ISO date and supersedes outdated mem
     }
     const dispose = apply(ctx, { storePath, queryRewrite: false })
     try {
-      const r1 = await registered.mem_save.execute({ text: '住在浦东世纪大道附近', keywords: ['住址', '浦东'], importance: 0.8 })
+      const exec = { agent: { session: { id: 'sess-supersede' } } }
+      const r1 = await registered.mem_save.execute({ text: '住在浦东世纪大道附近', keywords: ['住址', '浦东'], importance: 0.8 }, exec)
       assert.equal(r1.ok, true)
       const r2 = await registered.mem_save.execute({
         text: '已经搬家到徐汇区衡山路附近',
@@ -941,14 +947,15 @@ test('capability: mem_save supports eventAt ISO date and supersedes outdated mem
         importance: 0.9,
         eventAt: '2026-11-20',
         supersedes: r1.id,
-      })
+      }, exec)
       assert.equal(r2.ok, true)
       assert.equal(r2.total, 2, 'old memory is kept as a superseded pointer')
       const rec = await registered.mem_recall.execute({ query: '住址' })
       assert.match(rec.text, /徐汇区衡山路/)
       assert.match(rec.text, /\(2026-11-20\)/)
       assert.match(rec.text, /浦东世纪大道/, '旧值仍可翻到')
-      assert.match(rec.text, /（旧说法，已经改了）/, '旧值必须自己说明是旧的')
+      // 旧值后面还会跟一句「现在：…」，所以只匹配前缀。
+      assert.match(rec.text, /（旧说法，已经改了/, '旧值必须自己说明是旧的')
     } finally {
       dispose()
     }
@@ -991,7 +998,8 @@ test('autoArchive stores the last complete user→assistant pair, not the new qu
         { id: 'pair-a1', role: 'assistant', content: '记下了，周六三点半坡酒馆桂花乌龙' },
         { id: 'pair-u2', role: 'user', content: '那天要不要带伞' },
       ]
-      await preStep({}, async () => ({ kind: 'enter', messages: msgs }))
+      // autoArchive 需要会话标识才有隔离域，没有 scope 会拒写。
+      await preStep({ agent: { session: { id: 'sess-pair' } } }, async () => ({ kind: 'enter', messages: msgs }))
       const s = new Store(storePath).load()
       assert.equal(s.records.length, 1)
       assert.match(s.records[0].text, /周六三点在半坡酒馆喝桂花乌龙/)
@@ -1023,7 +1031,7 @@ test('autoArchive drops upstream error replies but keeps the user half of the tu
         { id: 'deg-a1', role: 'assistant', content: 'Error: Your AI credits balance is too low to continue.' },
         { id: 'deg-u2', role: 'user', content: '刚才那条记下了吗' },
       ]
-      await preStep({}, async () => ({ kind: 'enter', messages: msgs }))
+      await preStep({ agent: { session: { id: 'sess-degraded' } } }, async () => ({ kind: 'enter', messages: msgs }))
       const s = new Store(storePath).load()
       assert.equal(s.records.length, 1, 'the turn itself is still archived')
       assert.match(s.records[0].text, /我妈对青霉素过敏/)
@@ -1154,11 +1162,12 @@ test('index generation sync: ensureIndex rebuilds cleanly after Store.compact() 
     }
     const dispose = apply(ctx, { storePath, maxRecords: 3, queryRewrite: false })
     try {
-      await registered.mem_save.execute({ text: '核心结论是徐汇区衡山路咖啡馆很好喝', keywords: ['衡山路'], importance: 0.95 })
-      await registered.mem_save.execute({ text: '普通日常记录甲关于散步', importance: 0.2 })
-      await registered.mem_save.execute({ text: '普通日常记录乙关于看云', importance: 0.2 })
+      const exec = { agent: { session: { id: 'sess-gen' } } }
+      await registered.mem_save.execute({ text: '核心结论是徐汇区衡山路咖啡馆很好喝', keywords: ['衡山路'], importance: 0.95 }, exec)
+      await registered.mem_save.execute({ text: '普通日常记录甲关于散步', importance: 0.2 }, exec)
+      await registered.mem_save.execute({ text: '普通日常记录乙关于看云', importance: 0.2 }, exec)
       // Fourth insert triggers Store.compact() inside add(), which calls persist() and resets store.dirty=false
-      await registered.mem_save.execute({ text: '新增关键事实浦东机场二号航站楼集合', keywords: ['浦东机场'], importance: 0.9 })
+      await registered.mem_save.execute({ text: '新增关键事实浦东机场二号航站楼集合', keywords: ['浦东机场'], importance: 0.9 }, exec)
       const out = await registered.mem_recall.execute({ query: '浦东机场' })
       assert.equal(out.hits, 1, 'post-compact index must stay aligned with store.records')
       assert.match(out.text, /浦东机场二号航站楼/)
@@ -1200,14 +1209,17 @@ test('P0 scope isolation end-to-end: apply wires scope into recall, pre-step, an
       get() { return null },
       logger: { info() {}, warn() {} },
     }
+    // 无 scope 的记录只可能来自导入/历史数据：mem_save 现在拒写无会话记忆，
+    // 常驻卡仍要保证这些老记录能上卡，所以直接种进库里再启动插件。
+    const seed = new Store(storePath).load()
+    seed.add({ text: '全员通用公告：周五下午三点例会', keywords: ['例会'], importance: 0.9, source: { kind: 'tool' } })
+    seed.flush()
+
     const dispose = apply(ctx, { storePath, queryRewrite: false, autoArchive: false })
     try {
       await registered.mem_save.execute(
         { text: '私聊绝密：门禁备份密码是 7391', keywords: ['门禁', '密码'], importance: 0.95 },
         { agent: { session: { id: 'private:user1' } } },
-      )
-      await registered.mem_save.execute(
-        { text: '全员通用公告：周五下午三点例会', keywords: ['例会'], importance: 0.9 },
       )
 
       // 群聊 mem_recall 不能召回私聊记忆
@@ -1364,16 +1376,21 @@ test('P0 clock stability, abort signal on timeout, and mem_save empty-text super
     }
     const dispose = apply(ctx, { storePath, queryRewrite: true, rewriteTimeoutMs: 40, autoArchive: false })
     try {
-      const saved = await registered.mem_save.execute({ text: '重要配置端口 3081', keywords: ['端口'] })
+      const exec = { agent: { session: { id: 'sess-p0' } } }
+      const saved = await registered.mem_save.execute({ text: '重要配置端口 3081', keywords: ['端口'] }, exec)
       assert.equal(saved.ok, true)
 
       // 2. supersedes 搭配空白正文时，绝不能误删旧记录
-      const badReplace = await registered.mem_save.execute({ text: '   ', supersedes: saved.id })
+      const badReplace = await registered.mem_save.execute({ text: '   ', supersedes: saved.id }, exec)
       assert.equal(badReplace.ok, false)
       assert.equal(badReplace.total, 1, 'old record must survive empty replacement text')
 
       // 3. rewriteQueryTerms 超时必须 abort signal
-      await preStep({}, async () => ({ kind: 'enter', messages: [{ id: 'u-ab', role: 'user', content: '之前那个端口配置是多少' }] }))
+      // 只有强回溯问句才会付改写调用，用「还记得」句触发。
+      await preStep(
+        { agent: { session: { id: 'sess-p0' } } },
+        async () => ({ kind: 'enter', messages: [{ id: 'u-ab', role: 'user', content: '你还记得之前那个端口配置是多少吗' }] }),
+      )
       assert.ok(sawSignal && sawSignal.aborted === true, 'timeout must abort upstream llm.stream signal')
     } finally {
       dispose()
