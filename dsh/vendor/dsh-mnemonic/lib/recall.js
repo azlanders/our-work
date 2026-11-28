@@ -113,6 +113,15 @@ function idf(index, term) {
   return Math.max(0.5, Math.log(1 + (index.n - df + 0.5) / (df + 0.5)))
 }
 
+/** 「昨天聊了什么」按说话时间，问事情发生日按 eventAt；别拿计划日期冒充聊天日期。 */
+function timeOf(rec, query, now = Date.now()) {
+  const speechQuery = /聊|说|提|问|告诉|讲过|提到|对话|回复/.test(String(query || ''))
+  const ts = speechQuery
+    ? rec.spokenAt ?? rec.eventAt
+    : rec.eventAt ?? rec.spokenAt
+  return ts || rec.createdAt || now
+}
+
 /**
  * @returns {{rec, score, hits, why}[]} 按分数降序；分数没过闸门的直接不返回。
  */
@@ -188,7 +197,7 @@ export function search(
     for (let i = records.length - 1; i >= 0 && added < 64; i -= 1) {
       const r = records[i]
       if (scope && r.scope && r.scope !== scope) continue
-      const ts = r.eventAt || r.createdAt || 0
+      const ts = timeOf(r, query)
       if (ts >= timeWin.start && ts <= timeWin.end) {
         candidates.add(i)
         added += 1
@@ -238,7 +247,7 @@ export function search(
       }
     }
 
-    const recTs = rec.eventAt || rec.createdAt || now
+    const recTs = timeOf(rec, query, now)
     const inTimeWin = Boolean(timeWin && recTs >= timeWin.start && recTs <= timeWin.end)
     if (inTimeWin) {
       const hasRecallIntent = /聊|说|干|做|去|提|约|记得|发生|什么|啥|哪|谁/.test(String(query || ''))
