@@ -321,10 +321,11 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
   }
   // 语义上的「更新的段落」模型只是软偏好（最多反转 25%），所以新旧同块时把当前值在块尾
   // 再写一遍——这是唯一被实验支持能压过确认偏差的位置手段。只在冲突场景才付这份字。
-  const nowLine = replacedIds.size
-    ? `（现在：${list
-      .filter((h) => replacedIds.has(h.rec.id) && !h.rec.supersededBy)
-      .slice(0, 2)
+  const currentInList = list
+    .filter((h) => replacedIds.has(h.rec.id) && !h.rec.supersededBy)
+    .slice(0, 2)
+  const nowLine = currentInList.length
+    ? `（现在：${currentInList
       // 当前值只取她说的那半句：带上「我当时回」会把 40 字预算浪费在包装词上。
       .map((h) => clip(userPartOf(h.rec.text) || String(h.rec.text || ''), 40))
       .join('；')}）`

@@ -765,7 +765,10 @@ const archivedMsgIds = new Map()
           const hits = diversify(pool, { limit, gramsIndex: ensureIndex().grams })
           if (!hits.length) return { hits: 0, text: '这事我没记到。' }
           const body = hits.map((h, i) => {
-            const when = ymd(h.rec.eventAt || h.rec.createdAt)
+            const spokenAt = h.rec.spokenAt ?? h.rec.eventAt ?? h.rec.createdAt
+            const says = h.rec.spokenAt && h.rec.eventAt && Math.abs(h.rec.spokenAt - h.rec.eventAt) > DAY
+              ? `说于 ${ymd(h.rec.spokenAt)}；事发 ${ymd(h.rec.eventAt)}`
+              : ymd(spokenAt)
             // 旧值必须自己说明是旧的，否则模型会把两个名字都当现在的。
             // 新值不一定在这批命中里，所以直接把「现在是什么」带上，别让她只说「改过了」。
             // 顺着作废链找到真正的当前值：A→B→C 时别把中间值 B 当成现状。
@@ -774,7 +777,7 @@ const archivedMsgIds = new Map()
               : null
             const nowTxt = succ ? `；现在：${clip(userPartOf(succ.text) || succ.text, 40)}` : ''
             const oldMark = h.rec.supersededBy ? `（旧说法，已经改了${nowTxt}）` : ''
-            return `${i + 1}. [${h.rec.id}] (${when}) ${oldMark}${clip(h.rec.text, 200)}`
+            return `${i + 1}. [${h.rec.id}] (${says}) ${oldMark}${clip(h.rec.text, 200)}`
           }).join('\n')
           for (const h of hits) store.touch(h.rec.id)
           return { hits: hits.length, text: body }
@@ -921,7 +924,7 @@ const archivedMsgIds = new Map()
       const lastInject = lastInjectByScope.get(scopeKey) || { at: 0, sig: '' }
       if (cfg.injectCooldownMs && ts - lastInject.at < cfg.injectCooldownMs) return decision
       // 强回溯才值得满档预算和一次查询改写；「我之前也不吃辣」这种陈述不该按查档案处理。
-      const wantsRecall = /记得|记不记得|记住(?:什么|啥|哪些|没|了吗|过)|上次|上回|那天|那次|生日|叫什么|叫啥|啥名字|住哪|来着|多大|几岁|老家|哪人/.test(qTrim)
+      const wantsRecall = /记得|记不记得|记住(?:什么|啥|哪些|没|了吗|过)|上次|上回|那天|那次|生日|叫什么|叫啥|啥名字|住哪|来着|多大|几岁|老家|哪人|什么时候|啥时候|哪天|哪一天|几号|几月|多久|多长时间|周几|礼拜几/.test(qTrim)
       // 「你还记得上次那件事吗」这种没点名的追问，关键词检索一条也召不回；按最近聊过的倒着数。
       const metaRecall = !chitChat && isMetaRecall(qTrim)
       // 查询改写是每条一次上游调用：日常闲聊改写收益很小，只在真要翻旧账时才付这笔钱。

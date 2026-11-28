@@ -12,6 +12,8 @@ import { docExpand, expandLocal, isPlanStatement } from '../dsh/vendor/dsh-mnemo
 import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
 import { planChatDigest, renderDigest } from '../dsh/vendor/dsh-mnemonic/lib/digest.js'
+import { stableAttrOf } from '../dsh/vendor/dsh-mnemonic/lib/profile.js'
+import { openLoops } from '../dsh/vendor/dsh-mnemonic/lib/openloops.js'
 
 test('旧运行快照只保留最新一份，其余按 surface 序号返回待替换', () => {
   const event = (kind, form) => ({ type: 'user/message', data: { source: { kind, form } } })
@@ -132,6 +134,27 @@ test('计划句式不当作改口：下个月搬家不能覆盖现在的住址',
   assert.equal(isPlanStatement('我搬到了徐汇'), false)
   assert.equal(isPlanStatement('已经搬到徐汇了'), false)
   assert.equal(isPlanStatement('我现在住在徐汇'), false)
+})
+
+test('现在的自我陈述可以覆盖旧画像，临时状态仍不能', () => {
+  assert.equal(stableAttrOf({ text: '我现在住在徐汇' }), '住处')
+  assert.equal(stableAttrOf({ text: '我现在在便利店上夜班' }), '工作')
+  assert.equal(stableAttrOf({ text: '我现在叫小明' }), '称呼')
+  assert.equal(stableAttrOf({ text: '我今天上班好累' }), '')
+})
+
+test('未了事项按到期日而不是说话日计算年龄', () => {
+  const now = Date.parse('2026-11-29T12:00:00+08:00')
+  const spokenAt = Date.parse('2026-11-09T12:00:00+08:00')
+  const items = openLoops([{
+    id: 'long-promise',
+    text: '你：下个月给你答复',
+    spokenAt,
+    eventAt: spokenAt,
+    scope: 's',
+  }], { scopes: ['s'], now, maxAgeDays: 14 })
+  assert.equal(items.length, 1)
+  assert.equal(items[0].rec.id, 'long-promise')
 })
 
 test('groupAdjacent 只并同会话的下一轮，隔天算补充、超过 48 小时不并', () => {
@@ -366,6 +389,19 @@ test('recall block counts a duplicate id once instead of reporting it as hidden'
   assert.ok(block.includes('乙：'), block)
   assert.ok(!block.includes('还有'), block)
   assert.ok(block.length <= 250, `${block.length} > 250`)
+})
+
+test('当前值不在命中块里时，不渲染空的“现在”标签', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const old = { id: 'old', text: '我住在浦东', eventAt: now - 2 * 86400000, supersededBy: 'new' }
+  const fresh = { id: 'new', text: '我已经搬到徐汇', eventAt: now - 86400000 }
+  const block = renderRecallBlock([{ rec: old }], {
+    maxChars: 400,
+    itemChars: 200,
+    now,
+    byId: new Map([['old', old], ['new', fresh]]),
+  })
+  assert.ok(!block.includes('（现在：）'), block)
 })
 
 test('recall block keeps the same sentence told on different days', () => {
@@ -736,6 +772,47 @@ test('mem_recall tool includes YYYY-MM-DD dates in returned snippets', async () 
   }
 })
 
+test('mem_recall distinguishes spoken date from event date', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mnemonic-tool-spoken-'))
+  try {
+    const storePath = join(dir, 'memories.jsonl')
+    const s = new Store(storePath).load()
+    s.add({
+      text: '上周三去看了牙',
+      keywords: ['看牙'],
+      importance: 0.9,
+      spokenAt: Date.UTC(2026, 10, 25, 10, 0, 0),
+      eventAt: Date.UTC(2026, 10, 20, 9, 0, 0),
+    })
+    s.persist()
+
+    const registered = {}
+    const ctx = {
+      inject(deps, fn) {
+        if (deps.includes('tools')) {
+          fn({
+            effect(cb) { cb() },
+            tools: { register(def) { registered[def.name] = def; return () => {} } },
+          })
+        }
+      },
+      on() {},
+      get() { return null },
+      logger: { info() {}, warn() {} },
+    }
+    const dispose = apply(ctx, { storePath, queryRewrite: false })
+    try {
+      const out = await registered.mem_recall.execute({ query: '看牙' })
+      assert.equal(out.hits, 1)
+      assert.match(out.text, /说于 2026-11-25；事发 2026-11-20/)
+    } finally {
+      dispose()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 
 import { indexRecord } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
 import { extractTimeWindow, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, attributeKeywords, sanitizeMemoryText } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
@@ -975,6 +1052,7 @@ test('capability: temporal query recalls yesterday memory even with low lexical 
 
   const win = extractTimeWindow('昨天我们聊了什么？', nowTs)
   assert.ok(win && win.label === '昨天')
+  assert.equal(extractTimeWindow('大前天聊了什么？', nowTs)?.label, '大前天')
 
   const records = [
     { id: 'old1', text: '十号讨论了部署脚本重构', keywords: [], tags: [], importance: 0.5, createdAt: oldTs, uses: 1 },
@@ -1019,7 +1097,7 @@ test('capability: mem_save supports eventAt ISO date and supersedes outdated mem
       assert.equal(r2.total, 2, 'old memory is kept as a superseded pointer')
       const rec = await registered.mem_recall.execute({ query: '住址' })
       assert.match(rec.text, /徐汇区衡山路/)
-      assert.match(rec.text, /\(2026-11-20\)/)
+      assert.match(rec.text, /说于 .*；事发 2026-11-20/)
       assert.match(rec.text, /浦东世纪大道/, '旧值仍可翻到')
       // 旧值后面还会跟一句「现在：…」，所以只匹配前缀。
       assert.match(rec.text, /（旧说法，已经改了/, '旧值必须自己说明是旧的')

@@ -188,7 +188,6 @@ export function openLoops(records, { scopes, now = Date.now(), maxAgeDays = 14 }
     if (allow && !allow.has(rec.scope || '')) continue
     const anchor = anchorOf(rec)
     const at = anchor ?? now
-    if (Number.isFinite(ageLimit) && now - at > ageLimit * DAY) continue
     const text = userPartOf(rec.text).replace(/\s+/g, ' ').trim()
     if (!text || FAREWELL_RE.test(text)) continue
     if (SECRET_RE.test(text)) continue
@@ -198,6 +197,10 @@ export function openLoops(records, { scopes, now = Date.now(), maxAgeDays = 14 }
     } else if (!DEFER_RE.test(text)) {
       continue
     }
+    // 约定还没到期时，不能因为「说这句话」已经过去很多天就把它删掉。
+    // 「下个月给你答复」可以说在二十天前，但 dueAt 仍在未来。
+    const ageAnchor = due && due.dueAt >= now - 2 * DAY ? due.dueAt : at
+    if (Number.isFinite(ageLimit) && now - ageAnchor > ageLimit * DAY) continue
     items.push({ rec, dueAt: due ? due.dueAt : 0, text, at })
   }
 

@@ -289,11 +289,11 @@ export function extractTimeWindow(query, now = Date.now(), tzOffsetMs = DEFAULT_
   if (/昨天|昨日/.test(s)) {
     return { start: startOfToday - DAY, end: startOfToday - 1, label: '昨天' }
   }
-  if (/前天|前日/.test(s)) {
-    return { start: startOfToday - 2 * DAY, end: startOfToday - DAY - 1, label: '前天' }
-  }
   if (/大前天/.test(s)) {
     return { start: startOfToday - 3 * DAY, end: startOfToday - 2 * DAY - 1, label: '大前天' }
+  }
+  if (/前天|前日/.test(s)) {
+    return { start: startOfToday - 2 * DAY, end: startOfToday - DAY - 1, label: '前天' }
   }
   if (/最近|这几天|前几天|近几天/.test(s)) {
     return { start: startOfToday - 7 * DAY, end: endOfToday, label: '最近7天' }
