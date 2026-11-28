@@ -173,13 +173,30 @@ export function search(
   }
 
   // 常见词截断只该在大库生效：9 条的小库从第 8 条起就会把「工作/住址」这类词整条丢掉。
-  // 作废/静音记录不算活跃文档，否则旧版本越多，真正能召回当前值的词越先被砍。
+  // df/idf 都必须按活跃文档算：只改分母不改分子，死记录越多越容易把 live 实词砍掉。
   const activeN = records.reduce((n, r) => n + (r.muted || r.supersededBy ? 0 : 1), 0) || 1
+  const liveDf = (term) => {
+    const p = index.postings.get(term)
+    if (!p) return 0
+    let n = 0
+    for (const i of p) {
+      const r = records[i]
+      if (r && !r.muted && !r.supersededBy) n += 1
+    }
+    return n
+  }
+  const termStats = new Map()
   const candidates = new Set()
   for (const [term] of q) {
     if (term.length < 2) continue
-    const df = index.df.get(term) || 0
-    if (df > 0 && (index.n < 64 || df * 2 <= activeN)) {
+    const dfTotal = index.df.get(term) || 0
+    const dfLive = dfTotal ? liveDf(term) : 0
+    const dfForIdf = dfLive || dfTotal
+    termStats.set(term, {
+      idf: Math.max(0.5, Math.log(1 + (activeN - dfForIdf + 0.5) / (dfForIdf + 0.5))),
+    })
+    // dfLive=0 说明只存在于旧记录里：历史意图仍要靠它召回，不能在候选阶段就砍掉。
+    if (dfTotal > 0 && (activeN < 64 || dfLive === 0 || dfLive * 2 <= activeN)) {
       const p = index.postings.get(term)
       if (p) for (const i of p) candidates.add(i)
     }
@@ -233,7 +250,7 @@ export function search(
       if (!tf) continue
       if (term.length === 1) { score += 0.15 * qtf; continue }
       hits += 1
-      const part = idf(index, term) * ((tf * (K1 + 1)) / (tf + K1 * (1 - B + B * (len / index.avgLen))))
+      const part = (termStats.get(term)?.idf ?? idf(index, term)) * ((tf * (K1 + 1)) / (tf + K1 * (1 - B + B * (len / index.avgLen))))
       score += part * qtf
       why.push(term)
     }

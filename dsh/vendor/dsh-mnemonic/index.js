@@ -187,7 +187,7 @@ export function apply(ctx, config = {}) {
   const lastInjectMeta = new Map()
   // 主动提起旧事的日配额：人类对话里自然引用旧事实只占 7.9%（MemUse 2026），每轮都翻等于话痨。
   const proactiveCount = new Map()
-  const archivedMsgIds = new Set()
+const archivedMsgIds = new Map()
   const rewriteCache = new Map()
 
   /** 增量同步索引：仅追加新记录时 O(1) 增量更新，删除/压实/改写元数据时才全量重建。 */
@@ -356,30 +356,32 @@ export function apply(ctx, config = {}) {
     if (userIndex < 0) return null
     const userMsg = messages[userIndex]
     const user = messageText(userMsg) || ''
-    if (isLowValueOrInjection(user)) return null
+    const cleanUser = neutralizeRoleMarkers(sanitizeMemoryText(clip(user, cfg.archiveChars)))
+    if (isLowValueOrInjection(cleanUser)) return null
     const asstMsg = messages[asstIndex]
     const prevAssistant = messageText(asstMsg) || ''
-    const cleanUser = neutralizeRoleMarkers(sanitizeMemoryText(clip(user, cfg.archiveChars)))
     // 助手那边的「早呀老大」「嗯嗯」不值得存档：检索命中后她会把自己的寒暄当旧事念一遍。
     const usableAsst = isDegradedAssistantText(prevAssistant) || isChitChat(prevAssistant) ? '' : prevAssistant
     const cleanAsst = usableAsst ? neutralizeRoleMarkers(sanitizeMemoryText(clip(usableAsst, cfg.archiveAsstChars))) : ''
     const text = cleanAsst ? `用户：${cleanUser}\n我：${cleanAsst}` : `用户：${cleanUser}`
 
+    const msgTs = parseEventTimestamp(asstMsg?.createdAt ?? asstMsg?.timestamp ?? userMsg?.createdAt ?? userMsg?.timestamp) || Date.now()
     const asstId = asstMsg?.id || hash32(prevAssistant)
-    const msgKey = `${scope || '__global__'}|${userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(user)}`}|${asstId}`
+    // 没有消息 id 时内容哈希必须带日期：同一问一答隔天再说，是新的时间证据，不能被当成已归档。
+    const dayTag = new Date(msgTs + 8 * 3600000).toISOString().slice(0, 10)
+    const msgKey = `${scope || '__global__'}|${userMsg?.id ? `id:${userMsg.id}` : `txt:${hash32(user)}@${dayTag}`}|${asstId}`
     if (archivedMsgIds.has(msgKey)) {
-      return store.findByText(text, scope)?.id || null
+      return archivedMsgIds.get(msgKey) || null
     }
     if (archivedMsgIds.size >= 128) {
-      const oldest = archivedMsgIds.values().next().value
+      const oldest = archivedMsgIds.keys().next().value
       if (oldest !== undefined) archivedMsgIds.delete(oldest)
     }
-    archivedMsgIds.add(msgKey)
 
-    const msgTs = parseEventTimestamp(asstMsg?.createdAt ?? asstMsg?.timestamp ?? userMsg?.createdAt ?? userMsg?.timestamp) || Date.now()
     // 事实句只进索引和画像，正文照旧保留：改写成事实会丢语气和上下文（LongMemEval 的 document expansion 也是扩索引）。
     const facts = factSentences(text)
     const rec = store.add({ text, keywords: [...new Set([...attributeKeywords(text), ...factKeywords(facts)])], tags: [], importance: 0.35, eventAt: msgTs, spokenAt: msgTs, source: { kind: 'auto' }, scope })
+    if (rec) archivedMsgIds.set(msgKey, rec.id)
     if (rec && facts.length && !rec.facts?.length) {
       rec.facts = facts
       store.touched = true
@@ -452,6 +454,8 @@ export function apply(ctx, config = {}) {
         if (!mayReplace) break
         if (old === rec || old.supersededBy) continue
         if ((old.scope || '') !== (scope || '')) continue
+        // 隔天重复同一个值不该把昨天的同值记录作废，否则链越来越长，「以前叫什么」会变成「别猜」。
+        if (userSide(old.text) === userSide(rec.text)) continue
         // 工具显式存下的记忆是人工确认过的，永远不自动作废。
         if (old.source?.kind === 'tool') continue
         if (stableAttrOf(old) !== slot) continue
@@ -529,6 +533,7 @@ export function apply(ctx, config = {}) {
           if (wanted) {
             replaced = store.supersede(wanted, rec)
           }
+          if (wanted && !replaced) return { ok: false, id: rec.id, total: store.records.length, text: '旧条不在同一会话，或改回旧值会成环，没替换。要改现在的说法，请新建一条并说明。' }
           if (replaced && !flushSafe()) return { ok: false, id: rec.id, total: store.records.length, text: '本地没写进去，稍后再试。' }
           const extra = replaced ? `（已替换旧条 ${wanted}）` : ''
           return { ok: true, id: rec.id, total: store.records.length, text: `记住了 ${rec.id}${extra}（一共 ${store.records.length} 件）。` }
@@ -824,6 +829,7 @@ export function apply(ctx, config = {}) {
         profile,
         asstOnly,
         terms: focusTerms(qTrim, expandedTerms),
+        byId: store.byId,
         onRender: (id) => renderedIds.add(id),
       }
       let recallBlock = renderRecallBlock(grouped, { ...renderOpts, maxChars: budget.inject, hint })
@@ -900,7 +906,10 @@ export function apply(ctx, config = {}) {
           chars: block.length,
           soft: budget.inject <= cfg.softInjectChars,
           // 被预算挤掉的条目不等于没召回：静默失败排查时要知道是「没命中」还是「命中但没装下」。
-          dropped: grouped.filter((h) => !renderedIds.has(h.rec.id)).map((h) => h.rec.id).slice(0, 10),
+          dropped: [...new Set(grouped
+            .filter((h) => !renderedIds.has(h.rec.id))
+            .filter((h) => !(h.why || []).includes('adjacent'))
+            .map((h) => h.rec.id))].slice(0, 10),
           // 覆盖率只在明确问旧事时算；null 表示这轮没判。攒够样本后按 risk–coverage 反解阈值。
           cov: covSamples ? Number(cov.toFixed(3)) : null,
           caveat: covSamples > 0 && cov < 0.3 ? 1 : 0,

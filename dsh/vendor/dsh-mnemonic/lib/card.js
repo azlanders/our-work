@@ -1,7 +1,7 @@
 // 两块渲染：状态卡（常驻 system prompt）和回忆块（每轮最多一次注入）。
 // 两者都有硬上限——记忆再大也不能把提示词撑爆。
 // 时间统一按北京时间（UTC+8）渲染，避免 Linux UTC 宿主机把深夜记忆偏移到前一天。
-import { clip, isPlanStatement } from './text.js'
+import { clip, isPlanStatement, userPartOf } from './text.js'
 import { inlineDateHints, resolveRelativeDates } from './dates.js'
 
 const DAY = 86400000
@@ -274,7 +274,7 @@ export const RECALL_TAIL = '（用聊天口气说，别念原文；原话里没�
  */
 let warnedTinyBudget = false
 
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, terms = null, onRender = null } = {}) {
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, terms = null, byId = null, onRender = null } = {}) {
   hits = Array.isArray(hits) ? hits : []
   if (!hits.length && !profile && !hint) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
@@ -313,12 +313,14 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
   const currentOf = (rec) => {
     let cur = rec
     const seen = new Set()
+    const map = byId || listById
     while (cur?.supersededBy) {
       if (seen.has(cur.id) || seen.size >= 8) return null
       seen.add(cur.id)
-      const next = listById.get(cur.supersededBy)
+      const next = map.get(cur.supersededBy)
       if (!next) return null
-      cur = next.rec
+      cur = next.rec ?? next
+      if (cur.muted) return null
     }
     return cur && !cur.supersededBy ? cur : null
   }
@@ -335,7 +337,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
       .filter((h) => replacedIds.has(h.rec.id) && !h.rec.supersededBy)
       .slice(0, 2)
       // 当前值只取她说的那半句：带上「我当时回」会把 40 字预算浪费在包装词上。
-      .map((h) => clip(String(h.rec.text || '').replace(/^你：/, '').replace(/（我当时回：[\s\S]*$/, ''), 40))
+      .map((h) => clip(userPartOf(h.rec.text) || String(h.rec.text || ''), 40))
       .join('；')}）`
     : ''
   const reserve = head.length + tail.length + hint.length + profile.length + nowLine.length + 5
@@ -382,7 +384,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     // 先裁原文（且不切断时间词）再插括号，反过来会把「昨天」和日期一起裁成半截。
     // 只有问「以前」时旧值才会被召回；标一句旧说法与「已经改了」，免得模型把它当现在。
     const successor = hit.rec.supersededBy ? currentOf(hit.rec) : null
-    const successorInBlock = Boolean(successor && successor.id !== hit.rec.id)
+    const successorInBlock = Boolean(successor && successor.id !== hit.rec.id && listById.has(successor.id))
     const mark = hit.rec.supersededBy
       // 弱模型看到「已经改了」会顺手编个新值，必须明确堵住；当前值就在块里时改指下文，别自相矛盾。
       ? successorInBlock

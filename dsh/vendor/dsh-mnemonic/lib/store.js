@@ -2,6 +2,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { hash32, hashId, parseEventTimestamp, sanitizeMemoryText } from './text.js'
+import { MAX_HOPS } from './supersede.js'
 
 const DAY = 86400000
 
@@ -83,7 +84,9 @@ export class Store {
     // 只按 scope+正文合并会把它们压成一条，行首日期永远停在第一天。
     const day = dayKey(parsedSpokenAt || parsedEventAt || Date.now())
     const existing = this.byText.get(textKey(clean, scope))
-    if (existing && dayKey(existing.spokenAt ?? existing.eventAt ?? existing.createdAt) === day) {
+    // 工具写入是「一条事实」而不是「某天说过的话」：同一句隔天再存仍合并，不按天分条。
+    const mergeAcrossDays = source?.kind === 'tool'
+    if (existing && (mergeAcrossDays || dayKey(existing.spokenAt ?? existing.eventAt ?? existing.createdAt) === day)) {
       let metaChanged = false
       existing.uses = (existing.uses || 1) + 1
       existing.lastUsed = Date.now()
@@ -285,7 +288,7 @@ export class Store {
     const seen = new Set()
     while (cur) {
       if (cur.id === old.id) return false
-      if (seen.has(cur.id) || seen.size >= 16) break
+      if (seen.has(cur.id) || seen.size >= MAX_HOPS) return false
       seen.add(cur.id)
       cur = cur.supersededBy ? this.byId.get(cur.supersededBy) : null
     }
