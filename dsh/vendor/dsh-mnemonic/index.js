@@ -158,6 +158,32 @@ export function pruneStaleSystemNodes(session, append) {
   return seqs.length
 }
 
+// 主动搭话的观测卡里写着「今天你做过这些」「距上次说话 4 天」这类只对当时成立的状态。
+// 历史里堆 95 张（3.7 万字符）会把几天前的作息当成现在。按 N.E.K.O RFC #2491 的口径：
+// 过期项只挡注入、不删盘；同 key 只留最新。这里保留最近 5 张全文（对齐 ObservationMasking 的
+// attention_window=5），更早的压成一行时间线。
+const NUDGE_KEEP = 5
+
+export function staleNudgeSeqs(session, keep = NUDGE_KEEP) {
+  const nodes = session?.surface?.nodes
+  if (!Array.isArray(nodes)) return []
+  const hits = []
+  for (const seq of nodes) {
+    const event = session.eventAt?.(seq)
+    if (event?.type !== 'user/message') continue
+    const source = event.data?.source
+    if (source?.kind !== 'nudge' || source.form === 'pruned') continue
+    hits.push({ seq, event })
+  }
+  return hits.slice(0, Math.max(0, hits.length - keep))
+}
+
+export function pruneStaleNudges(session, append, keep = NUDGE_KEEP) {
+  const hits = staleNudgeSeqs(session, keep)
+  for (const hit of hits) append(hit.seq, hit.event)
+  return hits.length
+}
+
 export function effectiveMinScore(recordCount, targetMinScore) {
   const low = Math.min(targetMinScore, 1.2)
   if (recordCount <= 30) return low
@@ -285,6 +311,7 @@ export function apply(ctx, config = {}) {
   // 运行上下文去重的现场计数：pre-step 拿到的 messages 到底有没有这些旧快照，只有数出来才知道。
 let ctxPrunedTotal = 0
 let sysPrunedTotal = 0
+let nudgePrunedTotal = 0
   try {
     corrections = Number(JSON.parse(readFileSync(countersPath, 'utf8')).corrections) || 0
   } catch { /* 文件不存在或坏了就当 0，不用为计数器起一个错误分支 */ }
@@ -781,6 +808,22 @@ const archivedMsgIds = new Map()
             source: { kind: 'system-prompt' },
           }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
         })
+        nudgePrunedTotal += pruneStaleNudges(session, (seq, event) => {
+          const at = new Date((event.time || Date.now()) + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' ')
+          const qq = event.data?.source?.qq || {}
+          const source = { kind: 'nudge', form: 'pruned' }
+          const kept = {}
+          for (const key of ['chatKind', 'chatId', 'senderId', 'proactiveReceiptToken']) {
+            if (qq[key] !== undefined) kept[key] = qq[key]
+          }
+          if (Object.keys(kept).length) source.qq = kept
+          session.append('user/message', {
+            id: randomUUID(),
+            role: 'user',
+            content: [{ type: 'text', text: `（主动搭话 ${at}，当时的观测卡已过期，细节略）` }],
+            source,
+          }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
+        })
       }
       const scope = sessionScope(payload?.agent)
       const lastUserIndex = messages.reduce((found, m, i) => (isHumanUserRole(m) ? i : found), -1)
@@ -1150,6 +1193,7 @@ const archivedMsgIds = new Map()
             corrections,
             ctxPrunedTotal,
             sysPrunedTotal,
+            nudgePrunedTotal,
             newest: store.records.at(-1)?.createdAt || null,
             todayAdded: store.records.filter((r) => now() - (r.createdAt || 0) < DAY).length,
             injectToday: injectStatsToday(now()),

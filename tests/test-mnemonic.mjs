@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply, isHumanUserMessage, pruneStaleSystemNodes, pruneSupersededContext, staleSystemNodeSeqs, supersededSnapshotSeqs } from '../dsh/vendor/dsh-mnemonic/index.js'
+import { apply, isHumanUserMessage, pruneStaleNudges, pruneStaleSystemNodes, pruneSupersededContext, staleNudgeSeqs, staleSystemNodeSeqs, supersededSnapshotSeqs } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { RECALL_RULES, RECALL_TAIL, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
@@ -41,6 +41,19 @@ test('旧运行快照只保留最新一份，其余按 surface 序号返回待�
   const emptied = []
   assert.equal(pruneStaleSystemNodes(sysSession, (seq) => emptied.push(seq)), 1)
   assert.deepEqual(emptied, [20])
+
+  const nud = new Map([
+    [30, { type: 'user/message', time: 1, data: { source: { kind: 'nudge' } } }],
+    [31, { type: 'user/message', time: 2, data: { source: { kind: 'nudge' } } }],
+    [32, { type: 'user/message', time: 3, data: { source: { kind: 'nudge', form: 'pruned' } } }],
+    [33, { type: 'user/message', time: 4, data: { source: { kind: 'nudge' } } }],
+    [34, { type: 'user/message', time: 5, data: { source: { kind: 'user' } } }],
+  ])
+  const nudSession = { surface: { nodes: [30, 31, 32, 33, 34] }, eventAt: (seq) => nud.get(seq) }
+  assert.deepEqual(staleNudgeSeqs(nudSession, 1).map((hit) => hit.seq), [30, 31])
+  const nudgePruned = []
+  assert.equal(pruneStaleNudges(nudSession, (seq) => nudgePruned.push(seq), 1), 2)
+  assert.deepEqual(nudgePruned, [30, 31])
 })
 
 test('计划句式不当作改口：下个月搬家不能覆盖现在的住址', () => {
