@@ -1072,6 +1072,7 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
     totalTokens: context.totalTokens,
     drain: context.drain === true,
     urgentTokens: URGENT_TOKENS,
+    note,
   };
   let longPicked = null;
   const forceLongRead = context.forceLongRead === true;
@@ -1084,6 +1085,8 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
   let ordinaryPicked = null;
   if (end >= first && !isCheckpoint(session, nodes[end])) {
     ordinaryPicked = selectCutIndexes(items, cutOptions);
+  } else {
+    note(end < first ? "pick-end-low" : "pick-end-card");
   }
   const candidates = [];
   const addCandidate = (candidate, usedLongCut) => {
@@ -1106,7 +1109,10 @@ export function selectNewestChunk(session, measurement, key = DEFAULT_KEY, conte
     addCandidate(ordinaryPicked, false);
     addCandidate(longPicked, true);
   }
-  if (!candidates.length) return null;
+  if (!candidates.length) {
+    note(`no-candidates:${ordinaryPicked ? "o" : "-"}${longPicked ? "l" : "-"}`);
+    return null;
+  }
 
   const evaluateCandidate = ({ candidate, usedLongCut }) => {
     const picked = { ...candidate };

@@ -925,30 +925,32 @@ export function selectCutIndexes(items, {
   totalTokens,
   drain = false,
   urgentTokens = 48000,
+  note = () => {},
 } = {}) {
-  if (!items?.length) return null;
+  if (!items?.length) { note("cut:no-items"); return null; }
   const cloud = engine !== "local";
   // 云端平时不切。已有的 48000 紧急线，或调用方已经开启的收尾，才选切点。
   // Ordinary cloud turns do not cut. The existing 48000 line, or an explicit drain, selects a span.
   const draining = drain || (typeof totalTokens === "number" && totalTokens >= urgentTokens);
-  if (cloud && !draining) return null;
+  if (cloud && !draining) { note("cut:cloud-idle"); return null; }
   const lowerBound = Math.max(0, minStart);
   const limit = maxEnd === null ? items.length - 1 : maxEnd;
-  if (limit < lowerBound) return null;
+  if (limit < lowerBound) { note("cut:limit"); return null; }
   const lastUser = items.reduce((found, item, index) => (isUserBoundary(item) ? index : found), -1);
   const firstUser = items.findIndex(isUserBoundary);
   const floor = firstUser >= 0 ? firstUser + 1 : 0;
   let end = walkOffTail(items, limit, draining);
-  if (end < lowerBound) return null;
+  if (end < lowerBound) { note("cut:end-low"); return null; }
   // 切点右边还有卡片，说明这一刀在已缓存前缀里。不切。
   // A checkpoint to the right means this span is inside the cached prefix. Do not cut.
-  if (cutCrossesNewerCheckpoint(items, end)) return null;
+  if (cutCrossesNewerCheckpoint(items, end)) { note("cut:crosses-card"); return null; }
   if (!cloud) {
-    if (lastUser >= 0 && end <= lastUser) return null;
+    if (lastUser >= 0 && end <= lastUser) { note("cut:local-user"); return null; }
     if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") return { start: end, end, pointerOnly: true, gain: 0 };
-    if ((items[end].tokens || 0) > chunkMax) return null;
+    if ((items[end].tokens || 0) > chunkMax) { note("cut:local-huge"); return null; }
     const local = expandBack(items, end, Math.max(lowerBound, floor, lastUser), { crossUser: false, chunkMax });
-    if (local.gain < chunkMin || !balanced(items, local.start, local.end)) return null;
+    if (local.gain < chunkMin) { note("cut:local-gain"); return null; }
+    if (!balanced(items, local.start, local.end)) { note("cut:local-balance"); return null; }
     return local;
   }
   let pointer = null;
@@ -966,6 +968,7 @@ export function selectCutIndexes(items, {
   if (phase.gain >= chunkMin) {
     if (phase.tokens <= chunkMax && balanced(items, phase.start, phase.end)
         && !(lastUser >= phase.start && lastUser <= phase.end)) return phase;
+    note("cut:phase-reject");
     return null;
   }
 
@@ -975,11 +978,11 @@ export function selectCutIndexes(items, {
   // messages remain as JSON lines in the card so their constraints survive.
   // Local sessions deliberately keep the old strict no-cross-user behavior.
   end = retreatBefore(items, end, lastUser);
-  if (end < lowerBound || end < floor) return pointer;
+  if (end < lowerBound || end < floor) { note("cut:fallback-low"); return pointer; }
   // Retreating before the latest user can move the candidate to the left of
   // a newer checkpoint. That span is already in the cached prefix and is not
   // a legal fallback cut.
-  if (cutCrossesNewerCheckpoint(items, end)) return pointer;
+  if (cutCrossesNewerCheckpoint(items, end)) { note("cut:fallback-card"); return pointer; }
   if ((items[end].tokens || 0) > pointerMax && items[end].type === "tool") {
     return { start: end, end, pointerOnly: true, gain: 0 };
   }
@@ -988,8 +991,10 @@ export function selectCutIndexes(items, {
   if (extended.start < crossUserFloor) extended.start = crossUserFloor;
   extended.gain = nonUserGain(items, extended.start, extended.end);
   extended.tokens = spanTokens(items, extended.start, extended.end);
-  if (extended.tokens > chunkMax || extended.gain < chunkMin || !balanced(items, extended.start, extended.end)) return pointer;
-  if (lastUser >= extended.start && lastUser <= extended.end) return pointer;
+  if (extended.tokens > chunkMax) { note("cut:extended-max"); return pointer; }
+  if (extended.gain < chunkMin) { note(`cut:extended-gain:${extended.gain}`); return pointer; }
+  if (!balanced(items, extended.start, extended.end)) { note("cut:extended-balance"); return pointer; }
+  if (lastUser >= extended.start && lastUser <= extended.end) { note("cut:extended-user"); return pointer; }
   return extended;
 }
 
