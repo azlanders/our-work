@@ -2292,7 +2292,7 @@ export default class SpineCompactionEngine extends BasicCompactionEngine {
               rawLookup: (id) => this.rawSeen.get(`${state.key}\0${id}`),
               totalTokens: measured.totalTokens,
               drain,
-              note: (reason) => { skipReason = reason; },
+              note: (reason) => { skipReason = skipReason ? `${skipReason}>${reason}` : reason; },
             });
             if (chunk === null) {
               if (drain && measured.totalTokens > settings.keepRoundTokens) {
