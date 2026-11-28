@@ -714,12 +714,20 @@ export function apply(ctx, config = {}) {
       // 也不是每轮都带：只有命中旧事、或对方这轮说到自己（我/咱）时才铺画像，否则纯占字还容易被复读。
       // 宿主没给 session id 时没有「本会话」可言：这时候铺画像等于把别的会话的记录当她的自我介绍。
       const wantsProfile = !chitChat && !stopRecall && scope && (freshHits.length > 0 || /我|咱|俺/.test(query))
-      const profile = wantsProfile ? renderProfile(profileSlots(store.records, [scope]), { maxChars: cfg.profileChars }) : ''
+      // 画像行和本轮原话重复时只留原话：同一件事一轮里说两遍既费字又像查档案。
+      const evidenceBlob = freshHits.map((h) => userPartOf(h.rec?.text)).join('\n')
+      const slots = wantsProfile
+        // 少于 3 个字的值（「24」「男」）容易在别的句子里撞上，不做折叠。
+        ? profileSlots(store.records, [scope]).filter((s) => s.value.length < 3 || !evidenceBlob.includes(s.value))
+        : []
+      const profile = slots.length ? renderProfile(slots, { maxChars: cfg.profileChars }) : ''
       // 未了的事：到期的约定一定会提；没写日期的「回头聊」只在正经聊天时当引子，别在「晚安」后面追一句。
       // 提过一次就消停：到期的等一天，没日期的等三天，否则每轮都在念同一句。
       // 没有 session id 时没有「本会话」可言：scopes:[''] 会把所有空 scope 记录当成每个会话的未了事，
       // 私聊和群各写过一条「明天告诉你」，两边都会收到同一条提醒。
       const pending = (scope ? openLoops(store.records, { scopes: [scope], now: ts, maxAgeDays: cfg.openLoopsMaxAgeDays }) : [])
+        // 未了事如果这一轮已经作为原话注入了，就不再单列一行。
+        .filter((i) => !freshHits.some((h) => h.rec?.id === i.rec?.id))
         .filter((i) => {
           if (i.dueAt ? i.dueAt > ts : chitChat) return false
           // 约定过了两天还没下文，多半已经翻篇了；再翻出来只会像催账。
