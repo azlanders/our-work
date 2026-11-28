@@ -727,7 +727,16 @@ const archivedMsgIds = new Map()
       const scopeKey = scope || '__global__'
       // 「不对，我什么时候说过这个」是最有用的负反馈：只要上一条注入还在半小时内，就记一次纠正。
       const prevMeta = lastInjectMeta.get(scopeKey)
-      if (prevMeta && ts - prevMeta.at < 30 * 60 * 1000 && /记错|不对|不是这|错了|哪有|谁说/.test(query)) bumpCorrections()
+      // 判据只留「明确说记忆错了」的几种说法：光一个「不对」在一句话里太常见，拿它降分等于随机惩罚。
+      const CORRECTION_RE = /你记错|记错了|记错了吧|我没说过|我什么时候说过|我不记得说过|你搞混|你搞错了|我说的是/
+      if (prevMeta && ts - prevMeta.at < 30 * 60 * 1000 && CORRECTION_RE.test(query)) {
+        bumpCorrections()
+        // 只打标记降温，不删也不改原文；三天内这些记忆排到后面，让用户接着说出来的新事实接管。
+        for (const id of prevMeta.ids) {
+          const rec = store.byId.get(id)
+          if (rec) rec.disputedAt = ts
+        }
+      }
       // 「别老提这个」是产品里最有效的表达闸门：不删，只静音刚才那几条。
       if (prevMeta && ts - prevMeta.at < 30 * 60 * 1000 && /别老提|别(?:再)?(?:说|提)(?:这个|那个|这事|那事)|不想听(?:这个|那个)/.test(query)) {
         for (const id of prevMeta.ids) {
@@ -1057,6 +1066,7 @@ const archivedMsgIds = new Map()
             pinnedCount: store.records.filter((r) => r.pinned).length,
             mutedCount: store.records.filter((r) => r.muted).length,
             supersededCount: store.records.filter((r) => r.supersededBy).length,
+            disputedCount: store.records.filter((r) => r.disputedAt).length,
             indexedCount,
             maxRecords: cfg.maxRecords,
             avgQueryMs: queryCount ? Math.round((totalQueryMs / queryCount) * 100) / 100 : 0,

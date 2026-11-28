@@ -10,6 +10,8 @@
 
 const MARK = "Spine extract.";
 const KEEP_BUDGET = 8000;
+// 纯聊天段一次最多切 8K token：卡片能保住的必须行有预算，段越大越容易漏行、覆盖率直接判失败。
+const CHAT_SPAN_MAX = 8000;
 const TEXTUAL = new Set(["text", "input_text", "output_text"]);
 const SOURCE_ROLES = new Set(["user", "assistant", "tool"]);
 export const RAIL_TOKENS = 32000;
@@ -987,11 +989,15 @@ export function selectCutIndexes(items, {
     return { start: end, end, pointerOnly: true, gain: 0 };
   }
   const crossUserFloor = Math.max(lowerBound, floor);
-  const extended = expandBack(items, end, crossUserFloor - 1, { crossUser: true, chunkMax });
+  // 跨用户消息的这一刀在纯聊天会话里是唯一可用的落点；但卡片能保住的「必须保留行」有预算上限，
+  // 段一大会因为漏行把覆盖率打成 false，于是永远切不动（生产实测：15 万 token 一直 cut-skip）。
+  // 聊天段按 8K 封顶，工具段仍用 chunkMax。
+  const chatMax = Math.min(chunkMax, CHAT_SPAN_MAX);
+  const extended = expandBack(items, end, crossUserFloor - 1, { crossUser: true, chunkMax: chatMax });
   if (extended.start < crossUserFloor) extended.start = crossUserFloor;
   extended.gain = nonUserGain(items, extended.start, extended.end);
   extended.tokens = spanTokens(items, extended.start, extended.end);
-  if (extended.tokens > chunkMax) { note("cut:extended-max"); return pointer; }
+  if (extended.tokens > chatMax) { note("cut:extended-max"); return pointer; }
   if (extended.gain < chunkMin) { note(`cut:extended-gain:${extended.gain}`); return pointer; }
   if (!balanced(items, extended.start, extended.end)) { note("cut:extended-balance"); return pointer; }
   if (lastUser >= extended.start && lastUser <= extended.end) { note("cut:extended-user"); return pointer; }

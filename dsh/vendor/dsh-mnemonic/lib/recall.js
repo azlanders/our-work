@@ -289,8 +289,11 @@ export function search(
     const age = Math.max(0, now - freshTs) / DAY
     const fresh = age <= 1 ? 1.12 : age <= 7 ? 1.06 : age <= 30 ? 1.0 : age <= 180 ? 0.94 : 0.88
     const used = 1 + Math.min(0.12, (rec.uses || 1) * 0.01)
+    // 用户明确说过「你记错了」的那几条：先降分，不改内容也不删除，真伪交给后续对话自己覆盖。
+    // 三天窗口只是让它别每次抢先；真记对了，用户再提一次就会带上 uses 回来。
+    const disputed = (record) => (record?.disputedAt && now - record.disputedAt < 3 * DAY ? 0.6 : 1)
     // 置顶的记忆优先想起来，但不该挤掉当前问题更相关的证据，所以只给有限加成。
-    const final = score * (0.85 + 0.3 * importance) * fresh * used * (rec.pinned ? 1.15 : 1)
+    const final = score * (0.85 + 0.3 * importance) * fresh * used * (rec.pinned ? 1.15 : 1) * disputed(rec)
     // 旧值只是通往当前值的入口：它自己的分数可以略低，解析出的当前值仍要按自己的分数过闸。
     if (final < (rec.supersededBy && !allowSuperseded ? minScore * 0.8 : minScore)) continue
     // 问「现在」时旧值不能直接出现在块里，但它命中的是同一槽位，应该把查询导向最新后继。
@@ -316,7 +319,7 @@ export function search(
     const hitUsed = 1 + Math.min(0.12, (hitRec.uses || 1) * 0.01)
     const entryScore = hitRec === rec
       ? final
-      : score * (0.85 + 0.3 * hitImportance) * hitFresh * hitUsed * (hitRec.pinned ? 1.15 : 1)
+      : score * (0.85 + 0.3 * hitImportance) * hitFresh * hitUsed * (hitRec.pinned ? 1.15 : 1) * disputed(hitRec)
     if (entryScore < minScore) continue
     const entry = {
       rec: hitRec,
