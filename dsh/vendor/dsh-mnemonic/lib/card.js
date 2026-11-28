@@ -224,7 +224,7 @@ export const RECALL_TAIL = '（用聊天口气说，别念原文；原话里没�
  */
 let warnedTinyBudget = false
 
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', onRender = null } = {}) {
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, onRender = null } = {}) {
   hits = Array.isArray(hits) ? hits : []
   if (!hits.length && !profile && !hint) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
@@ -303,6 +303,8 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     const mark = hit.rec.supersededBy
       // 弱模型看到「已经改了」会顺手编个新值，必须明确堵住。
       ? '（旧说法，已经改了；改成什么别猜，不知道就说记不清）'
+      // 只被助手半句命中的证据，要自己说清是谁说的，否则会被当成对方的设定（mem0 #4573）。
+      : asstOnly?.has(hit.rec.id) ? '〔她说的〕'
       : replacedIds.has(hit.rec.id) ? '（现在的说法）' : ''
     const extra = mark + evtTag
     const body = extra + renderBody(hit.rec.text, itemBudget, anchor, tzOffsetMs)

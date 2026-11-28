@@ -19,7 +19,7 @@ import { toneOf } from './lib/tone.js'
 import { openLoops, renderOpenLoops } from './lib/openloops.js'
 import { boundaryOf, renderBoundaries } from './lib/boundary.js'
 import { userSide, factSentences, factKeywords } from './lib/facts.js'
-import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, isChitChat, isMetaRecall, attributeKeywords, sanitizeMemoryText, tokenSet, userPartOf } from './lib/text.js'
+import { messageText, roleOf, clip, hash32, parseEventTimestamp, isLowValueOrInjection, isDegradedAssistantText, isMultiNeedQuery, isChitChat, isMetaRecall, isPlanStatement, attributeKeywords, sanitizeMemoryText, tokenSet, userPartOf } from './lib/text.js'
 
 export const name = 'dsh-mnemonic'
 export const inject = ['tools']
@@ -420,7 +420,10 @@ export function apply(ctx, config = {}) {
       const multi = /也|还(?:在|有|养)|同时|另外|兼职|副业|第二份|两只|三个|之一|有时候|偶尔|以前|曾经/.test(newText)
       const explicit = /改成|改为|换成|换(?:了|个)工作|换到|转行|改行|搬到|调到|现在是|不再是|已经不在|离职|辞职|毕业|退休|改名|改叫|回到/.test(newText)
       const definitional = slot === '称呼' || slot === '住处' || slot === '生日'
-      const mayReplace = !multi && (definitional || explicit)
+      // 计划不是事实：「我下个月搬到徐汇」不能把现在的住址作废（Graphiti 的做法是计划类用说话时刻
+      // 当 valid_at，等它真的发生）。只有带完成标记的才算改口，纯未来表述一律不覆盖。
+      const planned = isPlanStatement(newText)
+      const mayReplace = !multi && !planned && (definitional || explicit)
       for (const old of store.records) {
         if (!mayReplace) break
         if (old === rec || old.supersededBy) continue
@@ -761,11 +764,23 @@ export function apply(ctx, config = {}) {
       // 仅当当前 messages 窗口内仍保留上次注入消息时才跳过。
       if (hasPrevInjectInWindow && sig === lastInject.sig && ts - lastInject.at < 120000) return decision
       const renderedIds = new Set()
+      // 只落在她那一半的命中要自报归属，否则会被当对方的设定。
+      const asstOnly = new Set()
+      {
+        const q = `${qTrim} ${expandedTerms}`
+        for (const h of grouped) {
+          const u = userPartOf(h.rec.text)
+          if (!u) { asstOnly.add(h.rec.id); continue }
+          const rest = String(h.rec.text || '').replace(u, ' ')
+          if (recallCoverage(q, u) < 0.1 && recallCoverage(q, rest) >= 0.1) asstOnly.add(h.rec.id)
+        }
+      }
       const renderOpts = {
         itemChars: budget.item,
         firstItemChars: cfg.firstItemBoost > 1 ? Math.round(budget.item * cfg.firstItemBoost) : 0,
         now: ts,
         profile,
+        asstOnly,
         onRender: (id) => renderedIds.add(id),
       }
       let recallBlock = renderRecallBlock(grouped, { ...renderOpts, maxChars: budget.inject, hint })

@@ -8,9 +8,19 @@ import { apply, isHumanUserMessage } from '../dsh/vendor/dsh-mnemonic/index.js'
 import { RECALL_RULES, RECALL_TAIL, renderCard, renderRecallBlock } from '../dsh/vendor/dsh-mnemonic/lib/card.js'
 import { diversify } from '../dsh/vendor/dsh-mnemonic/lib/diversify.js'
 import { buildIndex, search, groupAdjacent } from '../dsh/vendor/dsh-mnemonic/lib/recall.js'
-import { docExpand, expandLocal } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
+import { docExpand, expandLocal, isPlanStatement } from '../dsh/vendor/dsh-mnemonic/lib/text.js'
 import { dateHints, resolveRelativeDates } from '../dsh/vendor/dsh-mnemonic/lib/dates.js'
 import { Store } from '../dsh/vendor/dsh-mnemonic/lib/store.js'
+
+test('计划句式不当作改口：下个月搬家不能覆盖现在的住址', () => {
+  assert.equal(isPlanStatement('我下个月准备搬到徐汇'), true)
+  assert.equal(isPlanStatement('打算换到浦东上班'), true)
+  assert.equal(isPlanStatement('以后住杭州'), true)
+  // 带完成标记的才算既成事实
+  assert.equal(isPlanStatement('我搬到了徐汇'), false)
+  assert.equal(isPlanStatement('已经搬到徐汇了'), false)
+  assert.equal(isPlanStatement('我现在住在徐汇'), false)
+})
 
 test('groupAdjacent 只并同会话的下一轮，隔天算补充、超过 48 小时不并', () => {
   const base = 1_700_000_000_000

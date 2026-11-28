@@ -103,6 +103,17 @@ export function isMultiNeedQuery(text) {
 // 纯寒暄/情绪的一句半句，没有要找的信息。这时候翻旧账只会显得「又在提以前的事」。
 const CHITCHAT_RE = /^(?:在吗|在不在|早(?:安|呀|啊)?|晚安|哈喽|哈啰|你好|hi|hello|嗨|嗯+|哦+|噢+|好[的呀吧]?|行吧|睡了|困了|累了|无聊|想你|抱抱|摸摸|亲亲|吃(?:饭)?了(?:吗|嘛|没)?|哈哈+)[\s!！。.~～?？]*$/iu
 
+/**
+ * 「打算/准备/下周…」这类未来表述不是既成事实：拿它去覆盖现在的住址/称呼，
+ * 会让「下个月搬到徐汇」提前变成「已经搬了」。Graphiti 对计划类记录用的是说话时刻
+ * 而不是计划发生日，这里做同样的区分。
+ */
+export function isPlanStatement(text) {
+  const s = String(text || '')
+  const completed = /已经|搬到了|搬到.{0,6}了|换成.{0,6}了|改成.{0,6}了|现在是|不再是/.test(s)
+  return !completed && /打算|准备|计划|以后|过几天|下周|下个月|明年|明天|想要|要搬/.test(s)
+}
+
 export function isChitChat(text) {
   const t = String(text || '').trim()
   if (t.length <= 10 && CHITCHAT_RE.test(t)) return true
