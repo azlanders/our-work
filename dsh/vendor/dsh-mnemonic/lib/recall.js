@@ -197,13 +197,11 @@ export function search(
 
   if (!candidates.size) return []
 
-  const out = []
+  const byId = new Map(records.map((r) => [r.id, r]))
+  const out = new Map()
   for (const idx of candidates) {
     const rec = records[idx]
     if (!rec || (excludeIds && excludeIds.has(rec.id))) continue
-    // 被同一槽位的新说法取代过的记录不再召回：库里同时给新旧两个值，模型最容易说错（TASK 实测 53%）。
-    // 原文仍在库里，画像层也按最新的走，只是不参与检索。
-    if (rec.supersededBy && !allowSuperseded) continue
     // 静音是硬过滤：降权在强相关查询上压不住，而真正会触发这条的恰恰是强相关。
     if (rec.muted) continue
     // 「刚讲过」是按会话算的：同一个 bot 有私聊和好几个群，私聊刚提过的事不该在群里也哑火。
@@ -267,8 +265,31 @@ export function search(
     // 置顶的记忆优先想起来，但不该挤掉当前问题更相关的证据，所以只给有限加成。
     const final = score * (0.85 + 0.3 * importance) * fresh * used * (rec.pinned ? 1.15 : 1)
     if (final < minScore) continue
-    out.push({ rec, score: Math.round(final * 100) / 100, hits, why })
+    // 问「现在」时旧值不能直接出现在块里，但它命中的是同一槽位，应该把查询导向最新后继。
+    // 只替换返回对象，原文和作废链都不动；历史意图仍由 allowSuperseded 放回旧值。
+    let hitRec = rec
+    if (rec.supersededBy && !allowSuperseded) {
+      for (let hop = 0; hitRec?.supersededBy && hop < 5; hop += 1) {
+        const next = byId.get(hitRec.supersededBy)
+        if (!next) break
+        hitRec = next
+      }
+      if (hitRec === rec) continue
+      if (hitRec.muted) continue
+      if (scope && hitRec.scope && hitRec.scope !== scope) continue
+      if (excludeIds?.has(hitRec.id)) continue
+    }
+    const key = hitRec.id
+    const entry = {
+      rec: hitRec,
+      score: Math.round(final * 100) / 100,
+      hits,
+      why: hitRec === rec ? why : [...why, 'current'],
+    }
+    const prev = out.get(key)
+    if (!prev || entry.score > prev.score) out.set(key, entry)
   }
-  out.sort((a, b) => b.score - a.score || (b.rec.importance || 0) - (a.rec.importance || 0))
-  return out.slice(0, Math.max(1, limit))
+  return [...out.values()]
+    .sort((a, b) => b.score - a.score || (b.rec.importance || 0) - (a.rec.importance || 0))
+    .slice(0, Math.max(1, limit))
 }

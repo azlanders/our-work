@@ -305,9 +305,12 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     // 就地标注：换算括号贴着「上周五」这类词，行尾括号模型会当装饰跳过。
     // 先裁原文（且不切断时间词）再插括号，反过来会把「昨天」和日期一起裁成半截。
     // 只有问「以前」时旧值才会被召回；标一句旧说法与「已经改了」，免得模型把它当现在。
+    const successorInBlock = hit.rec.supersededBy && replacedIds.has(hit.rec.supersededBy)
     const mark = hit.rec.supersededBy
-      // 弱模型看到「已经改了」会顺手编个新值，必须明确堵住。
-      ? '（旧说法，已经改了；改成什么别猜，不知道就说记不清）'
+      // 弱模型看到「已经改了」会顺手编个新值，必须明确堵住；当前值就在块里时改指下文，别自相矛盾。
+      ? successorInBlock
+        ? '（旧说法，已经改了；下面写着现在的说法）'
+        : '（旧说法，已经改了；改成什么别猜，不知道就说记不清）'
       // 只被助手半句命中的证据，要自己说清是谁说的，否则会被当成对方的设定（mem0 #4573）。
       : asstOnly?.has(hit.rec.id) ? '〔她说的〕'
       : replacedIds.has(hit.rec.id) ? '（现在的说法）' : ''
