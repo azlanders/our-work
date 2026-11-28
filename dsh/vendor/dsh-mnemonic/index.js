@@ -927,6 +927,7 @@ const archivedMsgIds = new Map()
         asstOnly,
         terms: focusTerms(qTrim, expandedTerms),
         byId: store.byId,
+        scope,
         onRender: (id) => renderedIds.add(id),
       }
       let recallBlock = renderRecallBlock(grouped, { ...renderOpts, maxChars: budget.inject, hint })

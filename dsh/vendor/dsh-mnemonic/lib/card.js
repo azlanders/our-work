@@ -3,6 +3,7 @@
 // 时间统一按北京时间（UTC+8）渲染，避免 Linux UTC 宿主机把深夜记忆偏移到前一天。
 import { clip, isPlanStatement, userPartOf } from './text.js'
 import { inlineDateHints, resolveRelativeDates } from './dates.js'
+import { resolveCurrent } from './supersede.js'
 
 const DAY = 86400000
 const DEFAULT_TZ_OFFSET_MS = 8 * 3600000
@@ -274,7 +275,7 @@ export const RECALL_TAIL = '（用聊天口气说，别念原文；原话里没�
  */
 let warnedTinyBudget = false
 
-export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, terms = null, byId = null, onRender = null } = {}) {
+export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, firstItemChars = 0, now, tzOffsetMs = DEFAULT_TZ_OFFSET_MS, tail = RECALL_TAIL, hint = '', profile = '', asstOnly = null, terms = null, byId = null, onRender = null, scope = '' } = {}) {
   hits = Array.isArray(hits) ? hits : []
   if (!hits.length && !profile && !hint) return ''
   // 同一句话常被自动归档重复写入（同一轮存两遍、或邻轮扩展把已命中的又并进来一次）。
@@ -310,20 +311,8 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
   // 多跳链（A→B→C）要把 A 指到 C：只找直接后继会在 B 不在块里或 B 自己也被作废时标错。
   const listById = new Map()
   for (const hit of list) if (hit.rec?.id) listById.set(hit.rec.id, hit)
-  const currentOf = (rec) => {
-    let cur = rec
-    const seen = new Set()
-    const map = byId || listById
-    while (cur?.supersededBy) {
-      if (seen.has(cur.id) || seen.size >= 8) return null
-      seen.add(cur.id)
-      const next = map.get(cur.supersededBy)
-      if (!next) return null
-      cur = next.rec ?? next
-      if (cur.muted) return null
-    }
-    return cur && !cur.supersededBy ? cur : null
-  }
+  // 走链只有一份实现（supersede.js）；这里只负责把「块内命中对象」和「全库记录」两种字典喂进去。
+  const currentOf = (rec) => resolveCurrent(byId || listById, rec, { scope: scope || null })
   const replacedIds = new Set()
   for (const hit of list) {
     if (!hit.rec?.supersededBy) continue
