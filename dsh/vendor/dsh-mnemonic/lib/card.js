@@ -161,7 +161,7 @@ export function renderCard(records, { maxChars = 300, now = Date.now() } = {}) {
     .sort((a, b) => (b.importance || 0) - (a.importance || 0) || (b.createdAt || 0) - (a.createdAt || 0))
   const recent = live
     .filter(cardWorthy)
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .sort((a, b) => (b.spokenAt || b.createdAt || 0) - (a.spokenAt || a.createdAt || 0))
 
   // 没有任何够格的内容时返回空串：只剩一个标题挂在 system prompt 里既占字又没信息。
   if (!facts.length && !recent.length) return ''
@@ -231,9 +231,17 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
   // 重复行占满预算却不多给一条证据，先按正文去重，预算留给真正的新内容。
   // 按「正文 + 说的那天」去重：同一天归档两遍是噪音，不同天说同一句是两条时间证据
   // （「我上次什么时候说过」全靠这个日期）。
+  // canonical 组里当前值优先：命中排序常把更短的旧值排前面，先到先得会把当前值丢掉。
+  const canonicalKeep = new Map()
+  for (const h of hits) {
+    const rec = h?.rec ?? {}
+    const canon = rec.canonicalId || rec.id
+    if (!canon) continue
+    const prev = canonicalKeep.get(canon)
+    if (!prev || (prev.rec?.supersededBy && !rec.supersededBy)) canonicalKeep.set(canon, h)
+  }
   const list = []
   const seenText = new Set()
-  const seenCanon = new Set()
   for (const h of hits) {
     const rec = h?.rec ?? {}
     const key = `${String(rec.text ?? '').replace(/\s+/g, '')}|${ymd(rec.spokenAt ?? rec.eventAt ?? rec.createdAt, tzOffsetMs)}`
@@ -241,8 +249,7 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     if (key) seenText.add(key)
     // 换了个说法的同一件事：保留原文但只显示一份，免得模型以为听了好几遍。
     const canon = rec.canonicalId || rec.id
-    if (canon && seenCanon.has(canon)) continue
-    if (canon) seenCanon.add(canon)
+    if (canon && canonicalKeep.get(canon) !== h) continue
     list.push(h)
   }
   const head = Number.isFinite(now)
@@ -305,7 +312,10 @@ export function renderRecallBlock(hits, { maxChars = 900, itemChars = 200, first
     // 就地标注：换算括号贴着「上周五」这类词，行尾括号模型会当装饰跳过。
     // 先裁原文（且不切断时间词）再插括号，反过来会把「昨天」和日期一起裁成半截。
     // 只有问「以前」时旧值才会被召回；标一句旧说法与「已经改了」，免得模型把它当现在。
-    const successorInBlock = hit.rec.supersededBy && replacedIds.has(hit.rec.supersededBy)
+    const successor = hit.rec.supersededBy
+      ? list.find((x) => x.rec?.id === hit.rec.supersededBy)
+      : null
+    const successorInBlock = Boolean(successor && !successor.rec?.supersededBy)
     const mark = hit.rec.supersededBy
       // 弱模型看到「已经改了」会顺手编个新值，必须明确堵住；当前值就在块里时改指下文，别自相矛盾。
       ? successorInBlock

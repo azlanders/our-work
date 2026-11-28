@@ -774,7 +774,7 @@ export function apply(ctx, config = {}) {
         let first = Infinity
         for (const r of store.records) {
           if ((r.scope || '') !== (scope || '')) continue
-          const at = r.eventAt || r.createdAt
+          const at = r.spokenAt || r.eventAt || r.createdAt
           if (at && at < first) first = at
         }
         if (Number.isFinite(first)) hints.push(`（第一次聊天是 ${ymd(first)}，到今天 ${Math.max(1, Math.ceil((ts - first) / DAY))} 天。）`)

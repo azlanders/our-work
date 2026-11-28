@@ -94,6 +94,7 @@ export function groupAdjacent(hits, records, { gapMs = 30 * 60 * 1000, maxNeighb
     if (!next || taken.has(next.id) || skipIds?.has(next.id)) continue
     if ((next.scope || '') !== (h.rec.scope || '')) continue
     // 邻轮扩展也要看作废标记，否则被取代的旧值能借「下一条」的身份绕回块里。
+    if (next.muted) continue
     if (next.supersededBy) continue
     // 用「这句话什么时候说的」算间隔：导入/回填的记录 createdAt 是写库时间，会把几年前的事排成相邻。
     const nextAt = next.spokenAt || next.eventAt || next.createdAt
@@ -197,11 +198,14 @@ export function search(
 
   if (!candidates.size) return []
 
+  const cap = Math.max(0, limit)
+  if (!cap) return []
   const byId = new Map(records.map((r) => [r.id, r]))
   const out = new Map()
   for (const idx of candidates) {
     const rec = records[idx]
-    if (!rec || (excludeIds && excludeIds.has(rec.id))) continue
+    if (!rec) continue
+    if (excludeIds?.has(rec.id) && (allowSuperseded || !rec.supersededBy)) continue
     // 静音是硬过滤：降权在强相关查询上压不住，而真正会触发这条的恰恰是强相关。
     if (rec.muted) continue
     // 作用域隔离：带 scope 的记录只在本会话召回；旧记录没有 scope 时才全局可见。
@@ -263,11 +267,17 @@ export function search(
     // 只替换返回对象，原文和作废链都不动；历史意图仍由 allowSuperseded 放回旧值。
     let hitRec = rec
     if (rec.supersededBy && !allowSuperseded) {
-      for (let hop = 0; hitRec?.supersededBy && hop < 5; hop += 1) {
+      const seen = new Set()
+      let broken = false
+      while (hitRec?.supersededBy) {
+        if (seen.has(hitRec.id) || seen.size >= 8) { broken = true; break }
+        seen.add(hitRec.id)
         const next = byId.get(hitRec.supersededBy)
-        if (!next) break
+        if (!next) { broken = true; break }
+        if (scope && next.scope && next.scope !== scope) { broken = true; break }
         hitRec = next
       }
+      if (broken || !hitRec || hitRec.supersededBy) continue
       if (hitRec === rec) continue
       if (hitRec.muted) continue
       if (scope && hitRec.scope && hitRec.scope !== scope) continue
@@ -275,20 +285,33 @@ export function search(
     }
     // 复读和负面情绪过滤要落在真正返回的记录上：旧值刚提过，不代表它的当前值也不能出现。
     // 「刚讲过」按会话算；老记录没有 lastInjectedScope 时按同会话处理。
-    const sameConversation = !hitRec.lastInjectedScope || hitRec.lastInjectedScope === (scope || '')
-    if (hitRec.tone === 'neg' && sameConversation && hitRec.lastInjectedAt && now - hitRec.lastInjectedAt < NEG_REMENTION_MS) continue
-    if (!allowRepeat && sameConversation && hitRec.lastInjectedAt && now - hitRec.lastInjectedAt < repeatWindowMs) continue
+    if (hitRec === rec) {
+      const sameConversation = !hitRec.lastInjectedScope || hitRec.lastInjectedScope === (scope || '')
+      if (hitRec.tone === 'neg' && sameConversation && hitRec.lastInjectedAt && now - hitRec.lastInjectedAt < NEG_REMENTION_MS) continue
+      if (!allowRepeat && sameConversation && hitRec.lastInjectedAt && now - hitRec.lastInjectedAt < repeatWindowMs) continue
+    }
     const key = hitRec.id
+    const hitTs = hitRec.eventAt || hitRec.createdAt || now
+    const hitFreshTs = hitRec.spokenAt || hitTs
+    const hitAge = Math.max(0, now - hitFreshTs) / DAY
+    const hitFresh = hitAge <= 1 ? 1.12 : hitAge <= 7 ? 1.06 : hitAge <= 30 ? 1.0 : hitAge <= 180 ? 0.94 : 0.88
+    const hitImportance = Number(hitRec.importance) || 0.5
+    const hitUsed = 1 + Math.min(0.12, (hitRec.uses || 1) * 0.01)
+    const entryScore = hitRec === rec
+      ? final
+      : score * (0.85 + 0.3 * hitImportance) * hitFresh * hitUsed * (hitRec.pinned ? 1.15 : 1)
     const entry = {
       rec: hitRec,
-      score: Math.round(final * 100) / 100,
+      score: Math.round(entryScore * 100) / 100,
       hits,
-      why: hitRec === rec ? why : [...why, 'current'],
+      why: hitRec === rec ? why : [...why, 'current', `via:${rec.id}`],
     }
     const prev = out.get(key)
     if (!prev || entry.score > prev.score) out.set(key, entry)
   }
   return [...out.values()]
-    .sort((a, b) => b.score - a.score || (b.rec.importance || 0) - (a.rec.importance || 0))
-    .slice(0, Math.max(1, limit))
+    .sort((a, b) => b.score - a.score
+      || (b.rec.importance || 0) - (a.rec.importance || 0)
+      || String(a.rec.id).localeCompare(String(b.rec.id)))
+    .slice(0, cap)
 }
