@@ -146,7 +146,8 @@ export function staleSystemNodeSeqs(session) {
   for (const seq of nodes) {
     const event = session.eventAt?.(seq)
     if (event?.type !== 'system/message') continue
-    if (!Array.isArray(event.data?.content) || event.data.content.length === 0) continue
+    const content = event.data?.message?.content
+    if (!Array.isArray(content) || content.length === 0) continue
     filled.push(seq)
   }
   return filled.slice(0, -1)

@@ -32,9 +32,9 @@ test('旧运行快照只保留最新一份，其余按 surface 序号返回待�
   assert.equal(pruneSupersededContext({ surface: { nodes: [10] } }, () => {}), 0)
 
   const sys = new Map([
-    [20, { type: 'system/message', data: { content: [{ type: 'text', text: '旧提示' }] } }],
-    [21, { type: 'system/message', data: { content: [] } }],
-    [22, { type: 'system/message', data: { content: [{ type: 'text', text: '新提示' }] } }],
+    [20, { type: 'system/message', data: { message: { content: [{ type: 'text', text: '旧提示' }] } } }],
+    [21, { type: 'system/message', data: { message: { content: [] } } }],
+    [22, { type: 'system/message', data: { message: { content: [{ type: 'text', text: '新提示' }] } } }],
   ])
   const sysSession = { surface: { nodes: [20, 21, 22] }, eventAt: (seq) => sys.get(seq) }
   assert.deepEqual(staleSystemNodeSeqs(sysSession), [20])
