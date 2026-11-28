@@ -189,6 +189,42 @@ export function apply(ctx, config = {}) {
     } catch { /* 首次写入时文件还不存在，statSync 必失败，这里没有别的分支可走 */ }
     appendFileSync(statsPath, JSON.stringify(entry) + '\n')
   }
+  // 注入日志此前没人读：健康检查里给个今日汇总，面板和复盘才有入口；按 mtime+size 缓存，别每次健康检查都整文件解析。
+  let injectStatsCache = { key: '', at: 0, value: null }
+  const injectStatsToday = (ts) => {
+    let key = ''
+    try {
+      const st = statSync(statsPath)
+      key = `${st.size}:${Math.round(st.mtimeMs)}`
+    } catch { return null }
+    if (injectStatsCache.key === key && ts - injectStatsCache.at < 30000) return injectStatsCache.value
+    const dayStart = Math.floor((ts + 8 * 3600000) / DAY) * DAY - 8 * 3600000
+    let turns = 0
+    let chars = 0
+    let caveat = 0
+    let unrendered = 0
+    try {
+      let text = readFileSync(statsPath, 'utf8')
+      // 今日条目一定在尾部；日志上限 2MB，只解析最后 512KB，剩下的不 split。
+      if (text.length > 512 * 1024) {
+        const cut = text.indexOf('\n', text.length - 512 * 1024)
+        if (cut > 0) text = text.slice(cut + 1)
+      }
+      for (const line of text.split('\n')) {
+        if (!line) continue
+        let e
+        try { e = JSON.parse(line) } catch { continue }
+        if (!(e.at >= dayStart)) continue
+        turns += 1
+        chars += Number(e.chars) || 0
+        if (e.caveat) caveat += 1
+        unrendered += Array.isArray(e.unrendered) ? e.unrendered.length : 0
+      }
+    } catch { return null }
+    const value = { turns, chars, avgChars: turns ? Math.round(chars / turns) : 0, caveat, unrendered }
+    injectStatsCache = { key, at: ts, value }
+    return value
+  }
   // 纠正次数落盘：只放内存的话，重启后面板上的「被纠正几次」会归零，看着像从没被纠过。
   const countersPath = join(dirname(cfg.storePath), 'counters.json')
   let corrections = 0
@@ -1025,6 +1061,7 @@ const archivedMsgIds = new Map()
             corrections,
             newest: store.records.at(-1)?.createdAt || null,
             todayAdded: store.records.filter((r) => now() - (r.createdAt || 0) < DAY).length,
+            injectToday: injectStatsToday(now()),
           })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(body)
