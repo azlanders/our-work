@@ -287,6 +287,16 @@ test('firstItemChars 只放宽第一条，总预算仍然守住', () => {
   assert.ok(wide.length > flat.length, `第一条放宽后应更长：${wide.length} vs ${flat.length}`)
 })
 
+test('短回复不吃掉用户那半段的预算', () => {
+  const now = Date.parse('2026-11-25T12:00:00+08:00')
+  const block = renderRecallBlock([
+    { rec: { id: 'sides', text: `用户：${'甲'.repeat(180)}\n我：嗯`, eventAt: now } },
+  ], { maxChars: 400, itemChars: 200, now })
+  const body = block.split('\n').find((l) => /^\d+\. /.test(l)) || ''
+  // 固定 6:4 只能放约 115 个「甲」；把「我：嗯」吃不掉的额度还给用户侧后应明显更多。
+  assert.ok((body.match(/甲/g) || []).length > 150, body)
+})
+
 test('recall block never cuts a relative date term in half', () => {
   const now = Date.parse('2026-06-30T12:00:00+08:00')
   const at = Date.parse('2026-05-03T10:00:00+08:00')

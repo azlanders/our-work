@@ -99,8 +99,12 @@ function renderBody(text, budget, anchor, tzOffsetMs) {
   // 「你：」+「（我当时回：」+「）」共 9 字，先扣掉再分预算，否则拼完会超。
   const avail = budget - 9
   if (avail < 16) return inlineDateHints(clipKeepTerms(text, budget, anchor, tzOffsetMs), anchor, tzOffsetMs)
-  const userBudget = Math.max(8, Math.round(avail * 0.6))
-  const asstBudget = Math.max(4, avail - userBudget)
+  let userBudget = Math.max(8, Math.round(avail * 0.6))
+  let asstBudget = Math.max(4, avail - userBudget)
+  // 「用户说一大段、我只回了个嗯」是最常见的形态；按 6:4 硬分会把用不上的额度白白扔掉。
+  // 一边本来就短，就把剩下的让给另一边，总预算不变。
+  if (parts.user.length < userBudget) asstBudget = Math.max(4, avail - parts.user.length)
+  else if (parts.asst.length < asstBudget) userBudget = Math.max(8, avail - parts.asst.length)
   const user = clipKeepTerms(parts.user, userBudget, anchor, tzOffsetMs)
   const asst = clipKeepTerms(parts.asst, asstBudget, anchor, tzOffsetMs)
   return inlineDateHints(asst ? `你：${user}（我当时回：${asst}）` : `你：${user}`, anchor, tzOffsetMs)
