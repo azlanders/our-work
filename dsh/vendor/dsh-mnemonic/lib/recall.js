@@ -204,12 +204,6 @@ export function search(
     if (!rec || (excludeIds && excludeIds.has(rec.id))) continue
     // 静音是硬过滤：降权在强相关查询上压不住，而真正会触发这条的恰恰是强相关。
     if (rec.muted) continue
-    // 「刚讲过」是按会话算的：同一个 bot 有私聊和好几个群，私聊刚提过的事不该在群里也哑火。
-    // 老记录没有 lastInjectedScope，按同会话处理（宁可少复读，也别在两个群里各念一遍）。
-    const sameConversation = !rec.lastInjectedScope || rec.lastInjectedScope === (scope || '')
-    // 难受的事 48 小时内不主动重提第二次：第一次是「记得」，第二次就是揭伤疤。
-    if (rec.tone === 'neg' && sameConversation && rec.lastInjectedAt && now - rec.lastInjectedAt < NEG_REMENTION_MS) continue
-    if (!allowRepeat && sameConversation && rec.lastInjectedAt && now - rec.lastInjectedAt < repeatWindowMs) continue
     // 作用域隔离：带 scope 的记录只在本会话召回；旧记录没有 scope 时才全局可见。
     if (scope && rec.scope && rec.scope !== scope) continue
     const g = index.grams.get(rec.id)
@@ -279,6 +273,11 @@ export function search(
       if (scope && hitRec.scope && hitRec.scope !== scope) continue
       if (excludeIds?.has(hitRec.id)) continue
     }
+    // 复读和负面情绪过滤要落在真正返回的记录上：旧值刚提过，不代表它的当前值也不能出现。
+    // 「刚讲过」按会话算；老记录没有 lastInjectedScope 时按同会话处理。
+    const sameConversation = !hitRec.lastInjectedScope || hitRec.lastInjectedScope === (scope || '')
+    if (hitRec.tone === 'neg' && sameConversation && hitRec.lastInjectedAt && now - hitRec.lastInjectedAt < NEG_REMENTION_MS) continue
+    if (!allowRepeat && sameConversation && hitRec.lastInjectedAt && now - hitRec.lastInjectedAt < repeatWindowMs) continue
     const key = hitRec.id
     const entry = {
       rec: hitRec,
